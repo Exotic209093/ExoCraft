@@ -31,3 +31,27 @@ Original prompt: I want too build a minecraft clone but in the browser fully
 - Add proper texture atlas + UVs (current blocks use flat colors).
 - Add save/load world state (localStorage or IndexedDB).
 - Replace simple collision with step-up logic for smoother walking over 1-block rises.
+
+## Bug sweep + fixes (2026-03-04)
+- Added automated assertions in `scripts/bug_sweep.mjs` and validated against local dev server.
+- Fixed menu input leakage:
+  - `Space` pressed in menu no longer causes immediate jump after starting.
+  - Movement/action keys are now ignored until mode is `playing`.
+- Fixed mode safety for hotkeys:
+  - `R` no longer regenerates terrain from menu.
+  - One-shot keys (`F`, `R`, `L`, `Digit1-5`) ignore key-repeat spam.
+- Fixed pointer-lock interaction consistency:
+  - Break/place now raycast from crosshair center while pointer-locked instead of stale mouse coordinates.
+- Fixed deterministic stepping conflict:
+  - In automation sessions, the RAF simulation loop is paused and updates only through `window.advanceTime(ms)`.
+- Fixed repeated mesh rebuild leak risk:
+  - Old instanced meshes are now disposed when rebuilt.
+- Updated menu text to match behavior:
+  - `Hold middle mouse` -> `Middle click`.
+
+## Validation after fixes
+- `npm run build` passes.
+- `node scripts/bug_sweep.mjs http://127.0.0.1:5173` passes.
+- Playwright gameplay client rerun:
+  - `node scripts/web_game_playwright_client.mjs --url http://127.0.0.1:5173 --actions-file scripts/test_actions.json --click-selector #start-btn --iterations 4 --pause-ms 250 --screenshot-dir output/web-game`
+  - Reviewed `shot-0..3.png`, `state-0..3.json`, and no `errors-*.json` emitted.

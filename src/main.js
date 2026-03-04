@@ -205,6 +205,9 @@ class VoxelWorld {
   rebuildMeshes() {
     for (const mesh of this.meshes) {
       this.meshGroup.remove(mesh);
+      if (typeof mesh.dispose === "function") {
+        mesh.dispose();
+      }
     }
     this.meshes.length = 0;
 
@@ -270,6 +273,10 @@ const state = {
   targetBlock: null,
   recentAction: "Spawned",
 };
+
+// Automation runs should advance only through window.advanceTime().
+const isAutomationSession = typeof window.__drainVirtualTimePending === "function";
+let useExternalTimeStep = isAutomationSession;
 
 function playerAABBAt(position) {
   return {
@@ -696,9 +703,14 @@ function render() {
 }
 
 function startGame() {
+  if (state.mode === "playing") {
+    return;
+  }
   state.mode = "playing";
   menu.classList.add("hidden");
   hud.classList.remove("hidden");
+  state.keys.clear();
+  state.jumpQueued = false;
   renderer.domElement.focus();
   state.recentAction = "Started game";
 }
@@ -733,20 +745,28 @@ window.addEventListener("keydown", (event) => {
 
   if (code === "Enter" && state.mode === "menu") {
     startGame();
+    return;
   }
+
+  if (state.mode !== "playing") {
+    return;
+  }
+
+  const isRepeat = event.repeat;
+
   if (code === "Space") {
     state.jumpQueued = true;
   }
-  if (code === "KeyF") {
+  if (code === "KeyF" && !isRepeat) {
     toggleFullscreen();
   }
-  if (code === "KeyR") {
+  if (code === "KeyR" && !isRepeat) {
     regenerateWorld();
   }
-  if (code === "KeyL" && state.mode === "playing") {
+  if (code === "KeyL" && !isRepeat) {
     togglePointerLock();
   }
-  if (code.startsWith("Digit")) {
+  if (code.startsWith("Digit") && !isRepeat) {
     const slot = Number(code.replace("Digit", ""));
     if (slot >= 1 && slot <= BLOCK_TYPES.length) {
       state.selectedBlock = BLOCK_TYPES[slot - 1].id;
@@ -794,7 +814,7 @@ renderer.domElement.addEventListener("mousedown", (event) => {
     return;
   }
 
-  const ndc = toNdc(event.clientX, event.clientY);
+  const ndc = state.pointerLocked ? { x: 0, y: 0 } : toNdc(event.clientX, event.clientY);
   if (event.button === 0) {
     breakBlock(ndc.x, ndc.y);
   } else if (event.button === 2) {
@@ -815,11 +835,13 @@ window.addEventListener("resize", () => {
 });
 
 window.advanceTime = async (ms) => {
+  useExternalTimeStep = true;
   const steps = Math.max(1, Math.round(ms / FIXED_STEP_MS));
   const stepSeconds = ms / steps / 1000;
   for (let i = 0; i < steps; i += 1) {
     updateSimulation(stepSeconds);
   }
+  lastFrame = performance.now();
   render();
 };
 
@@ -855,6 +877,10 @@ window.render_game_to_text = () => {
 
 let lastFrame = performance.now();
 function frame(now) {
+  if (useExternalTimeStep) {
+    requestAnimationFrame(frame);
+    return;
+  }
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   lastFrame = now;
   updateSimulation(dt);
