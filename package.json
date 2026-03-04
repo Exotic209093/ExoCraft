@@ -1,0 +1,23 @@
+{
+  "name": "exocraft",
+  "version": "1.0.0",
+  "description": "Browser voxel sandbox inspired by Minecraft",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "echo \"Use npm run dev and the Playwright client\""
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "three": "^0.183.2"
+  },
+  "devDependencies": {
+    "playwright": "^1.58.2",
+    "vite": "^7.3.1"
+  }
+}
