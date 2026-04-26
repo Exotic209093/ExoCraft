@@ -31,7 +31,13 @@ import {
   transferInventoryStack,
 } from "./game/survival";
 import { createBlockMaterials, VoxelWorld } from "./game/world";
-import { createAtlasTexture } from "./game/textures";
+import {
+  createAtlasTexture,
+  createCrackTextures,
+  CRACK_STAGE_COUNT,
+  createSunTexture,
+  createMoonTexture,
+} from "./game/textures";
 
 const configOverrides = typeof window.EXOCRAFT_CONFIG === "object" ? window.EXOCRAFT_CONFIG : {};
 const gameConfig = createGameConfig(configOverrides);
@@ -137,6 +143,35 @@ const sun = new THREE.DirectionalLight(lightingConfig.sun.color, lightingConfig.
 sun.position.set(lightingConfig.sun.position.x, lightingConfig.sun.position.y, lightingConfig.sun.position.z);
 scene.add(sun);
 
+// Visible sun + moon discs. Both follow the simulation's sun-direction so they line up
+// with where the directional light is "coming from". Moon sits on the opposite side.
+const SKY_BODY_DISTANCE = 180;
+const SKY_BODY_SCALE = 22;
+const sunSprite = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: createSunTexture(),
+    depthWrite: false,
+    depthTest: false,
+    transparent: true,
+    fog: false,
+  }),
+);
+sunSprite.scale.set(SKY_BODY_SCALE, SKY_BODY_SCALE, 1);
+sunSprite.renderOrder = -1;
+scene.add(sunSprite);
+const moonSprite = new THREE.Sprite(
+  new THREE.SpriteMaterial({
+    map: createMoonTexture(),
+    depthWrite: false,
+    depthTest: false,
+    transparent: true,
+    fog: false,
+  }),
+);
+moonSprite.scale.set(SKY_BODY_SCALE * 0.7, SKY_BODY_SCALE * 0.7, 1);
+moonSprite.renderOrder = -1;
+scene.add(moonSprite);
+
 const torchLights = [];
 let activeTorchLights = 0;
 const torchLightsEnabled = torchLightConfig.enabled !== false;
@@ -177,6 +212,199 @@ const targetOutline = new THREE.LineSegments(
 );
 targetOutline.visible = false;
 scene.add(targetOutline);
+
+// Mining-cracks overlay: a slightly-larger box anchored to the targeted block, with
+// a transparent texture that swaps through 10 stages as break progress increases.
+const crackTextures = createCrackTextures();
+const crackOverlayMaterial = new THREE.MeshBasicMaterial({
+  map: crackTextures[0],
+  transparent: true,
+  opacity: 0.95,
+  depthWrite: false,
+  polygonOffset: true,
+  polygonOffsetFactor: -1,
+  polygonOffsetUnits: -1,
+});
+const crackOverlay = new THREE.Mesh(new THREE.BoxGeometry(1.002, 1.002, 1.002), crackOverlayMaterial);
+crackOverlay.visible = false;
+scene.add(crackOverlay);
+let lastCrackStage = -1;
+
+// ----- Block-break particle pool -----
+const PARTICLE_POOL_SIZE = 96;
+const PARTICLES_PER_BREAK = 14;
+const PARTICLE_LIFE_MS_MIN = 480;
+const PARTICLE_LIFE_MS_MAX = 880;
+const PARTICLE_GRAVITY = -22;
+
+const particleGroup = new THREE.Group();
+scene.add(particleGroup);
+const particleGeometry = new THREE.BoxGeometry(0.14, 0.14, 0.14);
+const particles = [];
+for (let i = 0; i < PARTICLE_POOL_SIZE; i += 1) {
+  const material = new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 1 });
+  const mesh = new THREE.Mesh(particleGeometry, material);
+  mesh.visible = false;
+  particleGroup.add(mesh);
+  particles.push({
+    mesh,
+    material,
+    vx: 0,
+    vy: 0,
+    vz: 0,
+    lifeMs: 0,
+    maxLifeMs: 0,
+    active: false,
+  });
+}
+
+function spawnBlockBreakParticles(blockX, blockY, blockZ, blockType) {
+  const blockDef = BLOCK_BY_ID.get(blockType);
+  const baseColor = blockDef?.color ?? 0xffffff;
+  let spawned = 0;
+  for (let i = 0; i < particles.length && spawned < PARTICLES_PER_BREAK; i += 1) {
+    const p = particles[i];
+    if (p.active) {
+      continue;
+    }
+    p.active = true;
+    p.maxLifeMs = PARTICLE_LIFE_MS_MIN + Math.random() * (PARTICLE_LIFE_MS_MAX - PARTICLE_LIFE_MS_MIN);
+    p.lifeMs = p.maxLifeMs;
+    p.mesh.position.set(
+      blockX + 0.2 + Math.random() * 0.6,
+      blockY + 0.2 + Math.random() * 0.6,
+      blockZ + 0.2 + Math.random() * 0.6,
+    );
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 1.6 + Math.random() * 2.6;
+    p.vx = Math.cos(angle) * speed;
+    p.vz = Math.sin(angle) * speed;
+    p.vy = 3.0 + Math.random() * 3.0;
+    // Slight per-particle color jitter so all 14 particles aren't identical.
+    const jitter = (Math.random() - 0.5) * 0.18;
+    p.material.color.set(baseColor);
+    p.material.color.r = THREE.MathUtils.clamp(p.material.color.r + jitter, 0, 1);
+    p.material.color.g = THREE.MathUtils.clamp(p.material.color.g + jitter, 0, 1);
+    p.material.color.b = THREE.MathUtils.clamp(p.material.color.b + jitter, 0, 1);
+    p.material.opacity = 1;
+    p.mesh.visible = true;
+    spawned += 1;
+  }
+}
+
+function updateParticles(deltaMs) {
+  if (deltaMs <= 0) {
+    return;
+  }
+  const dtSec = deltaMs / 1000;
+  for (const p of particles) {
+    if (!p.active) continue;
+    p.lifeMs -= deltaMs;
+    if (p.lifeMs <= 0) {
+      p.active = false;
+      p.mesh.visible = false;
+      continue;
+    }
+    p.vy += PARTICLE_GRAVITY * dtSec;
+    p.mesh.position.x += p.vx * dtSec;
+    p.mesh.position.y += p.vy * dtSec;
+    p.mesh.position.z += p.vz * dtSec;
+    // Apply mild drag so particles settle.
+    p.vx *= 0.92;
+    p.vz *= 0.92;
+    // Fade out in the last 30% of life.
+    const fadeStart = p.maxLifeMs * 0.3;
+    p.material.opacity = p.lifeMs < fadeStart ? Math.max(0, p.lifeMs / fadeStart) : 1;
+  }
+}
+
+// ----- Procedural sound effects via Web Audio -----
+let audioContext = null;
+let audioMaster = null;
+function ensureAudio() {
+  if (audioContext) return audioContext;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) return null;
+  audioContext = new Ctx();
+  audioMaster = audioContext.createGain();
+  audioMaster.gain.value = 0.35;
+  audioMaster.connect(audioContext.destination);
+  return audioContext;
+}
+
+function playNoiseBurst({ durationMs, lowpass = 1200, gain = 0.6, gainStart = 0.6 }) {
+  const ctx = ensureAudio();
+  if (!ctx || ctx.state === "suspended") {
+    if (ctx?.resume) ctx.resume().catch(() => {});
+    if (!ctx || ctx.state !== "running") return;
+  }
+  const samples = Math.floor(ctx.sampleRate * (durationMs / 1000));
+  const buffer = ctx.createBuffer(1, samples, ctx.sampleRate);
+  const data = buffer.getChannelData(0);
+  for (let i = 0; i < samples; i += 1) {
+    data[i] = (Math.random() * 2 - 1) * 0.85;
+  }
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  const filter = ctx.createBiquadFilter();
+  filter.type = "lowpass";
+  filter.frequency.value = lowpass;
+  const env = ctx.createGain();
+  const t = ctx.currentTime;
+  env.gain.setValueAtTime(gainStart, t);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + durationMs / 1000);
+  source.connect(filter).connect(env).connect(audioMaster);
+  source.start(t);
+  source.stop(t + durationMs / 1000 + 0.01);
+}
+
+function playTone({ frequency, durationMs, type = "sine", gain = 0.3 }) {
+  const ctx = ensureAudio();
+  if (!ctx || ctx.state === "suspended") {
+    if (ctx?.resume) ctx.resume().catch(() => {});
+    if (!ctx || ctx.state !== "running") return;
+  }
+  const osc = ctx.createOscillator();
+  osc.type = type;
+  osc.frequency.value = frequency;
+  const env = ctx.createGain();
+  const t = ctx.currentTime;
+  env.gain.setValueAtTime(gain, t);
+  env.gain.exponentialRampToValueAtTime(0.0001, t + durationMs / 1000);
+  osc.connect(env).connect(audioMaster);
+  osc.start(t);
+  osc.stop(t + durationMs / 1000 + 0.01);
+}
+
+function playBreakSound(blockType) {
+  // Stone-ish blocks ping higher; wood/leaf softer. Lowpass approximates the muffled
+  // impact you hear in Minecraft.
+  const stoneLike = blockType === 3 || blockType === 7 || blockType === 9 || blockType === 6;
+  playNoiseBurst({
+    durationMs: 160,
+    lowpass: stoneLike ? 1400 : 900,
+    gainStart: stoneLike ? 0.7 : 0.55,
+  });
+}
+
+function playPlaceSound(blockType) {
+  const stoneLike = blockType === 3 || blockType === 7 || blockType === 9;
+  playTone({
+    frequency: stoneLike ? 180 : 240,
+    durationMs: 90,
+    type: "triangle",
+    gain: 0.32,
+  });
+  playNoiseBurst({ durationMs: 70, lowpass: 700, gainStart: 0.25 });
+}
+
+function playStepSound() {
+  playNoiseBurst({ durationMs: 60, lowpass: 600, gainStart: 0.18 });
+}
+
+function playJumpSound() {
+  playTone({ frequency: 380, durationMs: 70, type: "sine", gain: 0.18 });
+}
 
 const raycaster = new THREE.Raycaster();
 const normalMatrix = new THREE.Matrix3();
@@ -282,6 +510,13 @@ const state = {
   objectiveStats: createDefaultObjectiveStats(),
   objectiveWaypoint: null,
   specialization: createDefaultSpecializationState(),
+  // Camera-feel state: bob phase advances with horizontal walk speed; FOV lerps between
+  // base and sprint values so sprinting "pulls" the world in slightly.
+  bobPhase: 0,
+  bobAmplitude: 0,
+  cameraFov: renderConfig.fov,
+  targetFov: renderConfig.fov,
+  isSprinting: false,
 };
 
 // Automation runs should advance only through window.advanceTime().
@@ -390,11 +625,41 @@ function updateDayNight(deltaMs) {
     const horizontalRadius = 44;
     const verticalRadius = 42;
     const baseHeight = 10;
+    // Directional light: keep its y above the horizon clamp so the world never goes
+    // pitch black on full night (dayFactor handles real darkness via intensity).
     sun.position.set(
       Math.sin(orbit) * horizontalRadius,
       Math.max(4, baseHeight + Math.cos(orbit) * verticalRadius),
       Math.cos(orbit) * 30,
     );
+
+    // Sky bodies: use the unclamped orbital position so the sun actually sets and
+    // the moon actually rises on the opposite side.
+    const skyDirX = Math.sin(orbit) * horizontalRadius;
+    const skyDirY = baseHeight + Math.cos(orbit) * verticalRadius;
+    const skyDirZ = Math.cos(orbit) * 30;
+    const skyDirLen = Math.hypot(skyDirX, skyDirY, skyDirZ) || 1;
+    const skyNX = skyDirX / skyDirLen;
+    const skyNY = skyDirY / skyDirLen;
+    const skyNZ = skyDirZ / skyDirLen;
+    const cameraOrigin = camera.position;
+    sunSprite.position.set(
+      cameraOrigin.x + skyNX * SKY_BODY_DISTANCE,
+      cameraOrigin.y + skyNY * SKY_BODY_DISTANCE,
+      cameraOrigin.z + skyNZ * SKY_BODY_DISTANCE,
+    );
+    moonSprite.position.set(
+      cameraOrigin.x - skyNX * SKY_BODY_DISTANCE,
+      cameraOrigin.y - skyNY * SKY_BODY_DISTANCE,
+      cameraOrigin.z - skyNZ * SKY_BODY_DISTANCE,
+    );
+    // Soft fade across the horizon so neither disc pops in/out abruptly.
+    const sunAboveHorizon = THREE.MathUtils.clamp(skyNY * 6 + 0.6, 0, 1);
+    sunSprite.material.opacity = sunAboveHorizon;
+    sunSprite.visible = sunAboveHorizon > 0.02;
+    const moonAboveHorizon = THREE.MathUtils.clamp(-skyNY * 6 + 0.6, 0, 1);
+    moonSprite.material.opacity = moonAboveHorizon;
+    moonSprite.visible = moonAboveHorizon > 0.02;
   }
 }
 
@@ -478,8 +743,16 @@ function getBestMobDamageInInventory() {
   return best;
 }
 
+const SPRINT_MULTIPLIER = 1.32;
+const SPRINT_FOV_BUMP = 10;
+const FOV_LERP_RATE = 8; // higher = snappier
+const BOB_BASE_FREQUENCY = 9.5;
+const BOB_VERTICAL_AMPLITUDE = 0.06;
+const BOB_LATERAL_AMPLITUDE = 0.045;
+
 function getCurrentMoveSpeed() {
-  return playerConfig.moveSpeed + getCombinedBonuses().moveSpeedBonus;
+  const base = playerConfig.moveSpeed + getCombinedBonuses().moveSpeedBonus;
+  return state.isSprinting ? base * SPRINT_MULTIPLIER : base;
 }
 
 function countInventoryItem(itemId) {
@@ -3359,6 +3632,7 @@ function updateTargetBlockFromCenter() {
   if (!hit) {
     state.targetBlock = null;
     targetOutline.visible = false;
+    hideCrackOverlay();
     return;
   }
 
@@ -3366,6 +3640,7 @@ function updateTargetBlockFromCenter() {
   if (!normal) {
     state.targetBlock = null;
     targetOutline.visible = false;
+    hideCrackOverlay();
     return;
   }
 
@@ -3374,6 +3649,7 @@ function updateTargetBlockFromCenter() {
   if (type === 0) {
     state.targetBlock = null;
     targetOutline.visible = false;
+    hideCrackOverlay();
     return;
   }
 
@@ -3384,6 +3660,12 @@ function updateTargetBlockFromCenter() {
   };
   targetOutline.visible = true;
   targetOutline.position.set(coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
+  // If we'd been mining a different block, drop the in-progress crack overlay so it
+  // doesn't ghost on top of whatever the player is now aiming at.
+  const targetKey = `${coords.x},${coords.y},${coords.z}`;
+  if (state.breakProgress.targetKey && state.breakProgress.targetKey !== targetKey) {
+    hideCrackOverlay();
+  }
 }
 
 function breakBlock(ndcX = 0, ndcY = 0) {
@@ -3427,6 +3709,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   if (state.breakProgress.amount < hardness) {
     const pct = Math.min(99, Math.floor((state.breakProgress.amount / hardness) * 100));
     state.recentAction = `Mining ${blockName(type)} ${pct}%`;
+    showCrackOverlay(coords.x, coords.y, coords.z, state.breakProgress.amount / hardness);
     return false;
   }
 
@@ -3463,8 +3746,27 @@ function breakBlock(ndcX = 0, ndcY = 0) {
 
   state.breakProgress.targetKey = null;
   state.breakProgress.amount = 0;
+  hideCrackOverlay();
+  spawnBlockBreakParticles(coords.x, coords.y, coords.z, type);
+  playBreakSound(type);
   updateTargetBlockFromCenter();
   return true;
+}
+
+function showCrackOverlay(x, y, z, progress01) {
+  const stage = Math.min(CRACK_STAGE_COUNT - 1, Math.floor(progress01 * CRACK_STAGE_COUNT));
+  if (stage !== lastCrackStage) {
+    crackOverlayMaterial.map = crackTextures[stage];
+    crackOverlayMaterial.needsUpdate = true;
+    lastCrackStage = stage;
+  }
+  crackOverlay.position.set(x + 0.5, y + 0.5, z + 0.5);
+  crackOverlay.visible = true;
+}
+
+function hideCrackOverlay() {
+  crackOverlay.visible = false;
+  lastCrackStage = -1;
 }
 
 function placeBlock(ndcX = 0, ndcY = 0) {
@@ -3516,14 +3818,30 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   state.recentAction = `Placed ${blockName(placeType)} @ ${coords.x},${coords.y},${coords.z}`;
   markCraftPanelDirty();
   markInventoryPanelDirty();
+  playPlaceSound(placeType);
   updateTargetBlockFromCenter();
   return true;
 }
 
 function updateCameraTransform() {
-  camera.position.set(state.playerPos.x, state.playerPos.y + playerConfig.eyeHeight, state.playerPos.z);
+  // Vertical bob is twice the frequency of lateral bob (footstep cadence vs hip sway).
+  const verticalBob = Math.sin(state.bobPhase * 2) * BOB_VERTICAL_AMPLITUDE * state.bobAmplitude;
+  const lateralBob = Math.sin(state.bobPhase) * BOB_LATERAL_AMPLITUDE * state.bobAmplitude;
+  const sinYaw = Math.sin(state.yaw);
+  const cosYaw = Math.cos(state.yaw);
+  const rightX = cosYaw;
+  const rightZ = -sinYaw;
+  camera.position.set(
+    state.playerPos.x + rightX * lateralBob,
+    state.playerPos.y + playerConfig.eyeHeight + verticalBob,
+    state.playerPos.z + rightZ * lateralBob,
+  );
   camera.rotation.y = state.yaw;
   camera.rotation.x = state.pitch;
+  if (Math.abs(camera.fov - state.cameraFov) > 0.05) {
+    camera.fov = state.cameraFov;
+    camera.updateProjectionMatrix();
+  }
 }
 
 function pickSpawnPoint() {
@@ -3762,10 +4080,14 @@ function updateSimulation(dtSeconds) {
     strafeInput /= inputLength;
   }
 
+  // Sprint: hold Shift while pressing forward (Minecraft-style — backwards/strafing
+  // doesn't sprint). Only effective when on ground; jumping mid-sprint keeps the bump
+  // until release, but landing without forward held drops it.
+  const sprintHeld = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
+  state.isSprinting = sprintHeld && forwardInput > 0;
+
   // Camera at rotation.y = yaw (with default looking -Z) faces (-sin yaw, 0, -cos yaw).
   // The camera-local +X (screen-right) axis is (cos yaw, 0, -sin yaw).
-  // The previous formula sign-flipped forward.x and right.z, which silently inverts
-  // both forward/back and left/right strafing once yaw rotates away from PI.
   const sinYaw = Math.sin(state.yaw);
   const cosYaw = Math.cos(state.yaw);
   const forwardX = -sinYaw;
@@ -3786,6 +4108,7 @@ function updateSimulation(dtSeconds) {
     state.onGround = false;
     state.recentAction = "Jumped";
     jumpedThisFrame = true;
+    playJumpSound();
   }
   state.jumpQueued = false;
 
@@ -3833,11 +4156,34 @@ function updateSimulation(dtSeconds) {
     state.playerVel.y = 0;
   }
 
+  // FOV lerp toward sprint target. Fast enough to feel responsive but not snappy.
+  state.targetFov = renderConfig.fov + (state.isSprinting ? SPRINT_FOV_BUMP : 0);
+  const fovLerpAlpha = 1 - Math.exp(-FOV_LERP_RATE * dtSeconds);
+  state.cameraFov += (state.targetFov - state.cameraFov) * fovLerpAlpha;
+
+  // View bob advances proportional to ground speed; only while on the ground.
+  const horizontalSpeed = Math.hypot(state.playerVel.x, state.playerVel.z);
+  if (state.onGround && horizontalSpeed > 0.4) {
+    const prevPhase = state.bobPhase;
+    state.bobPhase += dtSeconds * BOB_BASE_FREQUENCY * (horizontalSpeed / playerConfig.moveSpeed);
+    const targetAmp = Math.min(1, horizontalSpeed / playerConfig.moveSpeed);
+    state.bobAmplitude += (targetAmp - state.bobAmplitude) * Math.min(1, dtSeconds * 12);
+    // Footstep on each peak of the doubled-frequency vertical bob (sin(phase*2)
+    // crosses zero positively every PI / 2 of bobPhase).
+    const stepPeriod = Math.PI / 2;
+    if (Math.floor(state.bobPhase / stepPeriod) !== Math.floor(prevPhase / stepPeriod)) {
+      playStepSound();
+    }
+  } else {
+    state.bobAmplitude += (0 - state.bobAmplitude) * Math.min(1, dtSeconds * 14);
+  }
+
   clampPlayer();
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   updateFurnaceSimulation(deltaMs);
   updateHostileMobs(deltaMs);
   updateTorchLights(deltaMs);
+  updateParticles(deltaMs);
   updateBranchEncounterState();
   updateObjectives(deltaMs);
   updateCameraTransform();
@@ -3864,6 +4210,9 @@ function startGame() {
   if (state.mode === "playing") {
     return;
   }
+  // Lazily create the AudioContext on the user gesture that starts the game so
+  // browsers don't suspend it. Failing this just leaves audio silent — non-fatal.
+  ensureAudio();
   state.mode = "playing";
   menu.classList.add("hidden");
   hud.classList.remove("hidden");

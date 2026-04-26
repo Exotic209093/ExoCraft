@@ -21,7 +21,12 @@ export function setupControls({
   placeBlockAt,
   toNdc,
 }) {
-  const movementKeyCodes = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+  // Shift used for sprint (web-safe; Ctrl+W would close the tab in most browsers).
+  const movementKeyCodes = new Set([
+    "KeyW", "KeyA", "KeyS", "KeyD",
+    "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "ShiftLeft", "ShiftRight",
+  ]);
 
   const onKeyDown = (event) => {
     const { code } = event;

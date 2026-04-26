@@ -400,3 +400,164 @@ export function tileUvRect(tileName) {
 }
 
 export const ATLAS_TILE_PX = TILE_PX;
+
+// ----- Mining crack overlay textures -----
+// 10 stages of progressively heavier cracks on a transparent background. Drawn at
+// 16x16 to match the atlas; sampled with NearestFilter to keep the pixel-art look.
+const CRACK_STAGES = 10;
+
+function paintCrackStage(ctx, stage) {
+  // Each stage seeds new fracture lines plus expands prior ones.
+  const intensity = (stage + 1) / CRACK_STAGES;
+  ctx.clearRect(0, 0, TILE_PX, TILE_PX);
+  ctx.fillStyle = "rgba(0,0,0,0)";
+  // Major fractures
+  const lineCount = Math.floor(2 + intensity * 5);
+  for (let i = 0; i < lineCount; i += 1) {
+    const seed = i * 13 + stage * 7;
+    const x0 = Math.floor((Math.sin(seed) * 0.5 + 0.5) * TILE_PX);
+    const y0 = Math.floor((Math.cos(seed * 1.7) * 0.5 + 0.5) * TILE_PX);
+    const angle = (Math.sin(seed * 0.31) * 0.5 + 0.5) * Math.PI * 2;
+    const len = 4 + Math.floor(intensity * 8);
+    let x = x0;
+    let y = y0;
+    for (let s = 0; s < len; s += 1) {
+      if (x < 0 || x >= TILE_PX || y < 0 || y >= TILE_PX) break;
+      const alpha = 0.4 + intensity * 0.45;
+      ctx.fillStyle = `rgba(0,0,0,${alpha.toFixed(3)})`;
+      ctx.fillRect(x, y, 1, 1);
+      const wobble = Math.sin((seed + s) * 1.7);
+      const branch = Math.cos((seed - s) * 2.1);
+      x += Math.round(Math.cos(angle + wobble * 0.3));
+      y += Math.round(Math.sin(angle + branch * 0.3));
+    }
+  }
+  // Speckle fractures (small dark spots)
+  const speckles = Math.floor(intensity * 24);
+  for (let i = 0; i < speckles; i += 1) {
+    const seed = i * 31 + stage * 17;
+    const sx = Math.floor((Math.sin(seed) * 0.5 + 0.5) * TILE_PX);
+    const sy = Math.floor((Math.cos(seed * 0.7) * 0.5 + 0.5) * TILE_PX);
+    ctx.fillStyle = `rgba(0,0,0,${(0.25 + intensity * 0.4).toFixed(3)})`;
+    ctx.fillRect(sx, sy, 1, 1);
+  }
+}
+
+export function createCrackTextures() {
+  const textures = [];
+  for (let stage = 0; stage < CRACK_STAGES; stage += 1) {
+    const canvas = document.createElement("canvas");
+    canvas.width = TILE_PX;
+    canvas.height = TILE_PX;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = false;
+    paintCrackStage(ctx, stage);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.magFilter = THREE.NearestFilter;
+    tex.minFilter = THREE.NearestFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.generateMipmaps = false;
+    tex.needsUpdate = true;
+    textures.push(tex);
+  }
+  return textures;
+}
+
+export const CRACK_STAGE_COUNT = CRACK_STAGES;
+
+// ----- Sky body textures (sun + moon) -----
+function paintSunCanvas(ctx, size) {
+  const data = ctx.createImageData(size, size);
+  const cx = size / 2;
+  const cy = size / 2;
+  const radius = size * 0.42;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const i = (y * size + x) * 4;
+      if (dist <= radius) {
+        const t = dist / radius;
+        // Bright white-yellow core fading to soft yellow rim.
+        data.data[i] = 255;
+        data.data[i + 1] = Math.floor(245 - t * 30);
+        data.data[i + 2] = Math.floor(180 - t * 80);
+        data.data[i + 3] = 255;
+      } else if (dist <= radius * 1.3) {
+        // Soft glow halo.
+        const t = (dist - radius) / (radius * 0.3);
+        const alpha = Math.max(0, 1 - t);
+        data.data[i] = 255;
+        data.data[i + 1] = 220;
+        data.data[i + 2] = 140;
+        data.data[i + 3] = Math.floor(alpha * 120);
+      } else {
+        data.data[i + 3] = 0;
+      }
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+}
+
+function paintMoonCanvas(ctx, size) {
+  const data = ctx.createImageData(size, size);
+  const cx = size / 2;
+  const cy = size / 2;
+  const radius = size * 0.4;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const i = (y * size + x) * 4;
+      if (dist <= radius) {
+        const t = dist / radius;
+        // Pale cool white with crater-like noise variation.
+        const seed = Math.sin(x * 13.1 + y * 7.7) * 0.5 + 0.5;
+        const crater = seed < 0.18 ? -22 : seed > 0.85 ? 8 : 0;
+        data.data[i] = Math.floor(232 - t * 30 + crater);
+        data.data[i + 1] = Math.floor(238 - t * 22 + crater);
+        data.data[i + 2] = Math.floor(244 - t * 12 + crater);
+        data.data[i + 3] = 255;
+      } else if (dist <= radius * 1.2) {
+        const t = (dist - radius) / (radius * 0.2);
+        data.data[i] = 220;
+        data.data[i + 1] = 230;
+        data.data[i + 2] = 240;
+        data.data[i + 3] = Math.floor((1 - t) * 60);
+      } else {
+        data.data[i + 3] = 0;
+      }
+    }
+  }
+  ctx.putImageData(data, 0, 0);
+}
+
+export function createSunTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  paintSunCanvas(ctx, 64);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+
+export function createMoonTexture() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  paintMoonCanvas(ctx, 64);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
