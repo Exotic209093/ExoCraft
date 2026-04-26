@@ -12,10 +12,14 @@
         <p>Browser voxel sandbox</p>
         <p class="menu-line">Move: WASD or Arrows</p>
         <p class="menu-line">Jump: Space</p>
-        <p class="menu-line">Break: Left Click</p>
+        <p class="menu-line">Break / Attack: Left Click</p>
         <p class="menu-line">Place: Right Click</p>
         <p class="menu-line">Look: Middle click to lock/unlock cursor</p>
-        <p class="menu-line">Select block: 1-5</p>
+        <p class="menu-line">Select hotbar: 1-9</p>
+        <p class="menu-line">Inventory panel: E</p>
+        <p class="menu-line">Crafting panel: C</p>
+        <p class="menu-line">Furnace panel: V</p>
+        <p class="menu-line">Close open panel: Esc</p>
         <p class="menu-line">Fullscreen: F</p>
         <button id="start-btn" type="button">Start</button>
       </div>
@@ -23,7 +27,44 @@
       <div id="hud" class="hidden">
         <div id="crosshair"></div>
         <div id="stats"></div>
+        <div id="objective-hud" class="hidden">
+          <div id="objective-title"></div>
+          <div id="objective-detail"></div>
+          <div id="objective-waypoint"></div>
+        </div>
         <div id="hotbar"></div>
+      </div>
+
+      <div id="save-controls" class="hidden">
+        <button id="save-btn" type="button">Save</button>
+        <button id="load-btn" type="button">Load</button>
+        <button id="new-world-btn" type="button">New World</button>
+        <span id="save-status"></span>
+      </div>
+
+      <div id="craft-panel" class="hidden">
+        <div id="craft-title">Crafting</div>
+        <div id="craft-context"></div>
+        <div id="craft-recipes"></div>
+      </div>
+
+      <div id="furnace-panel" class="hidden">
+        <div id="furnace-title">Furnace</div>
+        <div id="furnace-context"></div>
+        <div id="furnace-controls"></div>
+      </div>
+
+      <div id="inventory-panel" class="hidden">
+        <div id="inventory-title">Inventory</div>
+        <div id="inventory-hint">Click one slot, then another slot to move or swap.</div>
+        <div class="inventory-section">
+          <div class="inventory-section-title">Hotbar</div>
+          <div id="inventory-hotbar-grid" class="inventory-grid"></div>
+        </div>
+        <div class="inventory-section">
+          <div class="inventory-section-title">Backpack</div>
+          <div id="inventory-backpack-grid" class="inventory-grid"></div>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.js"></script>

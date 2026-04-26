@@ -2,3 +2,7 @@ node_modules/
 dist/
 output/
 dev-server.log
+.claude/
+.playwright-mcp/
+.vscode/
+exocraft-*.png
