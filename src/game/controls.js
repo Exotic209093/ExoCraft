@@ -139,11 +139,18 @@ export function setupControls({
       return;
     }
 
-    const ndc = state.pointerLocked ? { x: 0, y: 0 } : toNdc(event.clientX, event.clientY);
+    // First click engages pointer lock so the player can look around without
+    // hunting for the middle-click binding. Once locked, left/right click
+    // perform their normal break/place actions.
+    if (!state.pointerLocked) {
+      togglePointerLock();
+      return;
+    }
+
     if (event.button === 0) {
-      breakBlockAt(ndc.x, ndc.y);
+      breakBlockAt(0, 0);
     } else if (event.button === 2) {
-      placeBlockAt(ndc.x, ndc.y);
+      placeBlockAt(0, 0);
     }
   };
 

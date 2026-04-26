@@ -3762,12 +3762,16 @@ function updateSimulation(dtSeconds) {
     strafeInput /= inputLength;
   }
 
+  // Camera at rotation.y = yaw (with default looking -Z) faces (-sin yaw, 0, -cos yaw).
+  // The camera-local +X (screen-right) axis is (cos yaw, 0, -sin yaw).
+  // The previous formula sign-flipped forward.x and right.z, which silently inverts
+  // both forward/back and left/right strafing once yaw rotates away from PI.
   const sinYaw = Math.sin(state.yaw);
   const cosYaw = Math.cos(state.yaw);
-  const forwardX = sinYaw;
+  const forwardX = -sinYaw;
   const forwardZ = -cosYaw;
   const rightX = cosYaw;
-  const rightZ = sinYaw;
+  const rightZ = -sinYaw;
   const moveSpeed = getCurrentMoveSpeed();
 
   state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
