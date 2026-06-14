@@ -23,9 +23,13 @@ export function aabbIntersectsBlock(aabb, x, y, z) {
 // Block ids that the player can move through (passable for collision purposes).
 // Water is passable — the player enters and swims; buoyancy is handled in main.js.
 // Lava is also passable — damage and movement slowdown handled in main.js (Wave 8).
+// Flora (Wave 11) — cross-quad, no collision; player walks through freely.
 const PASSABLE_BLOCKS = new Set([
   15, // water
   21, // lava (Wave 8)
+  23, // tall grass (Wave 11)
+  24, // flower (Wave 11)
+  25, // sapling (Wave 11)
 ]);
 
 function isPassable(blockType) {

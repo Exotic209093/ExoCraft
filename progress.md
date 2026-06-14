@@ -672,3 +672,10 @@ Goal: get ExoCraft as close to Minecraft as possible. Recon produced a 12-wave d
 - Chest block (id 22): per-position 27-slot chestStates Map (furnace pattern), chest panel + click-transfer, serialized, break dumps contents.
 - Armor: leather/iron/diamond helmet/chest/legs/boots (armor:{slot,defense}), 4 equip slots, takeDamage reduction min(0.96, def/25) floored >=1 (starvation/void bypass), armor bar above hearts (own signature). Save v4->5 (chests+armor persist, old saves default). Debug: equipArmor/hurtPlayer/openChestAt/giveChestItem/getArmorStats.
 - 3 reviewers found+fixed 7 must-fixes (grid was inaccessible; item-loss on craft/close/save; sword workbench flags; chest-open input lock; armor stacked-equip). Verified: full diamond armor cuts 8dmg->1; 3x3 grid + inventory render; build green.
+
+## Wave 11 complete — combat weight + audio + flora + F3
+- Combat: 0.4s swing cooldown (rate-limits melee); mob knockback (8 m/s, via collision-aware move) + player knockback (5.5 m/s, integrates over a 0.25s window, skips starvation/void/fall/lava). Objective combat chain intact.
+- New `src/game/audio.js`: extracted break/place/step/jump + added hurt, mob-growl-when-near, water/cave ambience, soft toggleable music, per-surface footstep timbre. Gated behind startGame audio-resume; cheap per-tick.
+- Cross-quad flora ids 23 tall-grass / 24 flower / 25 sapling: own buffer + X-quad branch in the wave-4 mesher (DoubleSide alpha-cutout, neutral AO, sky-sampled light), PASSABLE, instant-break drops, sparse seeded placement on grass above the beach line.
+- F3 overlay (F3 toggle, default off): XYZ/chunk/facing/target/eye+fluid/light/FPS/chunks/time from text-state; own cached signature.
+- 2 reviewers found+fixed 5 must-fixes (player knockback dead on ground; mob knockback teleported through world; F3 light readout + dedup). Verified: flowers/grass/saplings render as cross-quads; F3 shows full readout; build green. (FPS ~27 under paused-RAF automation — real-play perf to check in graphics phase.)

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -145,6 +145,8 @@ const BLOCK_LIGHT_EMIT = {
 const LIGHT_PASSABLE = new Set([
   15, // water
   21, // lava (Wave 8) — light propagates through lava itself
+  // Wave 11 flora — cross-quad, no collision, light passes through freely
+  23, 24, 25,
 ]);
 
 function toChunkKey(cx, cz) {
@@ -326,7 +328,18 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   const waterMat = waterMaterial;
   const lavaMat  = lavaMaterial;
 
-  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat };
+  // Wave 11 — flora cross-quad material: DoubleSide alpha-cutout (same as leaves but DoubleSide).
+  const floraMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: false,
+    alphaTest: 0.5,
+    side: THREE.DoubleSide,
+    vertexColors: true,
+  });
+  applyLightingShaderPatch(floraMaterial);
+  const floraMat = floraMaterial;
+
+  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat, flora: floraMat };
 }
 
 // ---------------------------------------------------------------------------
@@ -794,6 +807,23 @@ export class VoxelWorld {
       }
     }
 
+    // --- Wave 11: cross-quad flora above grass surface ---
+    // Place tall grass, flowers, or saplings in the air cell immediately above a grass block,
+    // only when the surface is above sea level (no underwater flora).
+    // Check topY is the true grass surface: above seaLevel+beachWidth (not sand/beach).
+    if (y === topY + 1 && topY > seaLevel + beachWidth) {
+      const fn = this.hashLattice2(worldX * 3 + 7, worldZ * 3 + 13);
+      if (fn > 0.93) {
+        return 23; // tall grass (most common)
+      }
+      if (fn > 0.907) {
+        return 24; // flower
+      }
+      if (fn > 0.895) {
+        return 25; // sapling (rarest)
+      }
+    }
+
     return 0;
   }
 
@@ -921,11 +951,16 @@ export class VoxelWorld {
   isFaceExposed(worldX, y, worldZ, faceIndex) {
     const selfType = this.get(worldX, y, worldZ);
     const selfClass = BLOCK_TRANSPARENCY_CLASS[selfType] || 0;
+    // Flora (class 4) — the mesher emits cross-quads instead of 6 cube faces, so
+    // this function is never called for flora blocks from the mesher.
+    // However, if a flora block borders a solid, the solid's face IS exposed by the
+    // normal class logic below (selfClass=0 solid, neighborClass=4 is non-zero → expose).
     const [dx, dy, dz] = CARDINAL_DIRECTIONS[faceIndex];
     const neighborType = this.get(worldX + dx, y + dy, worldZ + dz);
     if (neighborType === 0) {
       return true;
     }
+    // A solid block adjacent to flora is always exposed (class 4 ≠ 0).
     const neighborClass = BLOCK_TRANSPARENCY_CLASS[neighborType] || 0;
     // Opaque behind transparent: show face
     if (neighborClass !== 0 && selfClass === 0) {
@@ -1349,6 +1384,12 @@ export class VoxelWorld {
     const lavaUv     = [];
     const lavaCol    = [];
     const lavaIdx    = [];
+    // Wave 11: flora cross-quad buffer (tclass=4).
+    const floraPos   = [];
+    const floraNorm  = [];
+    const floraUv    = [];
+    const floraCol   = [];
+    const floraIdx   = [];
 
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
@@ -1364,8 +1405,67 @@ export class VoxelWorld {
           // Water (id 15) gets its own buffer even though it's also tclass=2,
           // so it renders on top of glass with its own material.
           // Lava (id 21, tclass=3) gets its own buffer after water.
+          // Flora (tclass=4) gets a cross-quad buffer and skips the cube-face loop.
           let posArr, normArr, uvArr, colArr, idxArr;
-          if (blockType === 21) {
+          if (FLORA_BLOCK_IDS.has(blockType)) {
+            // --- Cross-quad emitter for flora (two perpendicular quads = X shape) ---
+            // Sample skylight / blocklight from the voxel above (open sky side).
+            const aboveX = worldX;
+            const aboveY = y + 1;
+            const aboveZ = worldZ;
+            const aLX = aboveX - baseX;
+            const aLZ = aboveZ - baseZ;
+            let floraSky = 0;
+            let floraBlk = 0;
+            if (aboveY >= 0 && aboveY < H &&
+                aLX >= 0 && aLX < S && aLZ >= 0 && aLZ < S) {
+              floraSky = skylight[lIndex(aLX, aboveY, aLZ)];
+              floraBlk = blocklight[lIndex(aLX, aboveY, aLZ)];
+            } else if (aboveY >= H) {
+              floraSky = 15;
+            }
+            // Get tile UV from the block's "py" face entry (all faces use same tile for flora).
+            const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, FACE_PY);
+            // Emit two perpendicular quads centred in the block cell.
+            // Each quad spans diagonally corner-to-corner (like Minecraft X shape).
+            // Quad A: from (0.1, 0, 0.9) to (0.9, 1, 0.1) — SW–NE diagonal
+            // Quad B: from (0.1, 0, 0.1) to (0.9, 1, 0.9) — NW–SE diagonal
+            const x0 = worldX;
+            const y0 = y;
+            const z0 = worldZ;
+            const AO_NEUTRAL = 1.0; // no AO for flora
+            const lightR = floraSky / 15.0;
+            const lightG = floraBlk / 15.0;
+            const quadDefs = [
+              // Quad A verts: [bl, br, tl, tr] along SW–NE diagonal
+              [
+                [x0 + 0.1, y0,     z0 + 0.9],
+                [x0 + 0.9, y0,     z0 + 0.1],
+                [x0 + 0.1, y0 + 1, z0 + 0.9],
+                [x0 + 0.9, y0 + 1, z0 + 0.1],
+              ],
+              // Quad B verts: [bl, br, tl, tr] along NW–SE diagonal
+              [
+                [x0 + 0.9, y0,     z0 + 0.9],
+                [x0 + 0.1, y0,     z0 + 0.1],
+                [x0 + 0.9, y0 + 1, z0 + 0.9],
+                [x0 + 0.1, y0 + 1, z0 + 0.1],
+              ],
+            ];
+            for (const qverts of quadDefs) {
+              const base = floraPos.length / 3;
+              for (let v = 0; v < 4; v += 1) {
+                floraPos.push(...qverts[v]);
+                floraNorm.push(0, 1, 0); // approximate up normal
+                const [ut, vt] = FACE_UV_INDICES[v];
+                floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+                floraCol.push(lightR, lightG, AO_NEUTRAL);
+              }
+              // Two CCW triangles
+              floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+            }
+            continue; // skip the cube-face loop for flora
+          } else if (blockType === 21) {
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
             colArr  = lavaCol;   idxArr  = lavaIdx;
           } else if (blockType === 15) {
@@ -1556,6 +1656,16 @@ export class VoxelWorld {
       const mesh = new THREE.Mesh(lavaGeo, mats.lava);
       mesh.renderOrder = 4;
       mesh.userData.isLava = true;
+      chunk.meshes.push(mesh);
+      this.meshGroup.add(mesh);
+    }
+
+    // Wave 11: flora cross-quads rendered after lava (renderOrder 5).
+    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraIdx);
+    if (floraGeo) {
+      const mesh = new THREE.Mesh(floraGeo, mats.flora);
+      mesh.renderOrder = 5;
+      mesh.userData.isFlora = true;
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }

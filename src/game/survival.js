@@ -120,6 +120,11 @@ export function getTotalDefense(wornArmor) {
 }
 
 export const ITEM_DEFS = {
+  // Wave 11 flora items (cross-quad blocks, passable)
+  tall_grass:  { id: "tall_grass",  name: "Tall Grass",  placeBlockType: 23 },
+  flower:      { id: "flower",      name: "Flower",      placeBlockType: 24 },
+  sapling:     { id: "sapling",     name: "Sapling",     placeBlockType: 25 },
+  seeds:       { id: "seeds",       name: "Seeds" },
   grass: { id: "grass", name: "Grass", placeBlockType: 1 },
   dirt: { id: "dirt", name: "Dirt", placeBlockType: 2 },
   stone: { id: "stone", name: "Stone", placeBlockType: 3 },
@@ -235,6 +240,10 @@ export const BLOCK_DROPS = {
   // 15 = water: no drop (bucket mechanic deferred)
   // Wave 10 — chest drops itself (contents handled in breakBlock)
   22: "chest",
+  // Wave 11 — flora drops (tall grass → seeds, flower → flower, sapling → sapling)
+  23: "seeds",     // tall grass → seeds
+  24: "flower",    // flower → flower
+  25: "sapling",   // sapling → sapling
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -300,6 +309,10 @@ const BLOCK_HARDNESS = {
   21: Infinity, // lava — not breakable
   // Wave 10
   22: 2.0,  // chest — axe preferred
+  // Wave 11 — flora: break instantly (zero hardness → one tick)
+  23: 0.05,
+  24: 0.05,
+  25: 0.05,
 };
 
 const BLOCK_PREFERRED_TOOL = {

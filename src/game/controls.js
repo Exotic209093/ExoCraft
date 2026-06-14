@@ -21,6 +21,7 @@ export function setupControls({
   breakBlockAt,
   placeBlockAt,
   toNdc,
+  toggleF3Overlay,
 }) {
   // Shift used for sprint (web-safe; Ctrl+W would close the tab in most browsers).
   const movementKeyCodes = new Set([
@@ -80,6 +81,10 @@ export function setupControls({
     }
     if (code === "KeyF" && !isRepeat) {
       toggleFullscreen();
+    }
+    if (code === "F3" && !isRepeat && typeof toggleF3Overlay === "function") {
+      event.preventDefault();
+      toggleF3Overlay();
     }
     if (code === "KeyR" && !isRepeat) {
       regenerateWorld();

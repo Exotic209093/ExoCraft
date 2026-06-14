@@ -45,6 +45,10 @@ const DEFAULT_GAME_CONFIG = {
       { id: 21, name: "Lava", color: 0xff6600, transparent: true, emissive: 0xff3300, emissiveIntensity: 0.9 },
       // Wave 10 — chest block
       { id: 22, name: "Chest", color: 0xa0732a },
+      // Wave 11 — flora (cross-quad, passable)
+      { id: 23, name: "Tall Grass", color: 0x5aa036 },
+      { id: 24, name: "Flower",     color: 0xf060a0 },
+      { id: 25, name: "Sapling",    color: 0x4a9040 },
     ],
     generation: {
       seed: 1337,
@@ -170,6 +174,13 @@ const DEFAULT_GAME_CONFIG = {
       dayDespawnChancePerSecond: 0.6,
       playerHitDamage: 2,
       playerBaseMobDamage: 2,
+      // Wave 11 — combat weight
+      // How long the player must wait between melee swings (seconds).
+      playerSwingCooldownSec: 0.4,
+      // How much velocity is added to a mob when the player lands a hit.
+      mobKnockbackSpeed: 8.0,
+      // How much velocity is pushed onto the player when a mob hits them.
+      playerKnockbackSpeed: 5.5,
     },
     torchLighting: {
       enabled: true,

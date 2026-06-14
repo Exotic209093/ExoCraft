@@ -527,3 +527,118 @@ export function updateHud({ state, world, statsEl, hotbarEl }) {
     lastHotbar = hbSig;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wave 11 — F3 debug overlay
+// A toggleable <pre> overlay that shows real-time debug info (default hidden).
+// Toggled by F3 key (controls.js sets state.f3Visible).
+// ---------------------------------------------------------------------------
+let _f3El = null;
+let _f3LastSig = "";
+
+function yawToCardinal(yaw) {
+  // yaw=0 faces -Z (north), increases clockwise when viewed from above.
+  // Normalise to [0, 2π) then map to 8 directions.
+  const tau = Math.PI * 2;
+  const n = ((yaw % tau) + tau) % tau;
+  const eighths = Math.round(n / (tau / 8)) % 8;
+  return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][eighths];
+}
+
+/**
+ * Update (or create) the F3 debug overlay.
+ *
+ * @param {{
+ *   state: object,
+ *   world: object,
+ *   fps: number,
+ *   chunkSize?: number,
+ * }} opts
+ */
+export function updateF3Overlay({ state, world, fps, chunkSize = 16 }) {
+  // Create the element on first call.
+  if (!_f3El) {
+    _f3El = document.createElement("pre");
+    _f3El.id = "f3-overlay";
+    _f3El.style.cssText = [
+      "position:fixed",
+      "top:8px",
+      "right:8px",
+      "background:rgba(0,0,0,0.55)",
+      "color:#e8e8e8",
+      "font:12px/1.45 monospace",
+      "padding:8px 10px",
+      "border-radius:4px",
+      "pointer-events:none",
+      "z-index:9999",
+      "white-space:pre",
+      "display:none",
+    ].join(";");
+    document.body.appendChild(_f3El);
+  }
+
+  const visible = !!state.f3Visible;
+  _f3El.style.display = visible ? "block" : "none";
+  if (!visible) return;
+
+  const px = state.playerPos.x;
+  const py = state.playerPos.y;
+  const pz = state.playerPos.z;
+  const cx = Math.floor(px / chunkSize);
+  const cz = Math.floor(pz / chunkSize);
+
+  const facing = yawToCardinal(state.yaw);
+  const yawDeg = ((state.yaw * 180 / Math.PI) % 360 + 360) % 360;
+
+  const tod = state.timeOfDayMs;
+  const totalSec = Math.floor(tod / 1000);
+  const hh = String(Math.floor(totalSec / 60) % 24).padStart(2, "0");
+  const mm = String(totalSec % 60).padStart(2, "0");
+
+  const tb = state.targetBlock;
+  const tbStr = tb
+    ? `${tb.name} (${tb.x},${tb.y},${tb.z})`
+    : "none";
+
+  const loadedChunks = typeof world.getLoadedChunkCount === "function"
+    ? world.getLoadedChunkCount()
+    : "?";
+
+  // Light info: sample the block the eye is in and derive sky/block light.
+  const eyeX = Math.floor(px);
+  const eyeY = Math.floor(py + 1.62);
+  const eyeZ = Math.floor(pz);
+  const eyeBlock = typeof world.get === "function" ? world.get(eyeX, eyeY, eyeZ) : 0;
+  const inFluid = state.eyeInWater ? "water" : state.eyeInLava ? "lava" : "air";
+
+  // Sky light: 15 when eye is at or above the open-sky surface, 0 underground.
+  // findSurfaceY returns the Y of the first solid block top-down, so if eye is
+  // below that surface the column has a roof overhead.
+  let skyLight = 15;
+  if (typeof world.findSurfaceY === "function") {
+    const surfaceY = world.findSurfaceY(eyeX, eyeZ);
+    if (Number.isFinite(surfaceY) && eyeY < surfaceY) {
+      skyLight = 0;
+    }
+  }
+  // Block light: 15 when eye voxel is a torch/light-emitting block, 0 otherwise.
+  // Block id 8 = torch in the default palette (BLOCK_LIGHT_EMIT in world.js).
+  const blockLight = (eyeBlock === 8) ? 15 : 0;
+
+  const fpsRounded = Math.round(fps);
+  const sig = `${px.toFixed(1)}|${py.toFixed(1)}|${pz.toFixed(1)}|${facing}|${tbStr}|${fpsRounded}|${loadedChunks}|${tod}`;
+  if (sig === _f3LastSig) return;
+  _f3LastSig = sig;
+
+  _f3El.textContent = [
+    `XYZ:    ${px.toFixed(3)} / ${py.toFixed(3)} / ${pz.toFixed(3)}`,
+    `Chunk:  ${cx}, ${cz}  (local ${Math.floor(((px % chunkSize) + chunkSize) % chunkSize)}, ${Math.floor(((pz % chunkSize) + chunkSize) % chunkSize)})`,
+    `Facing: ${facing}  (yaw ${yawDeg.toFixed(1)}°)`,
+    `Target: ${tbStr}`,
+    `Eye:    ${eyeX}, ${eyeY}, ${eyeZ}  (${inFluid})`,
+    `Light:  sky ${skyLight} / block ${blockLight}`,
+    `FPS:    ${fpsRounded}`,
+    `Chunks: ${loadedChunks} loaded`,
+    `Time:   ${hh}:${mm}  (dayFactor ${(state.dayFactor ?? 0).toFixed(2)})`,
+  ].join("\n");
+}

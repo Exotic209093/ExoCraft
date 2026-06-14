@@ -40,6 +40,10 @@ const TILE = {
   diamond_ore:     [6, 2],
   redstone_ore:    [7, 2],
   lava:            [5, 3],
+  // Wave 11 — flora tiles (row 4)
+  tall_grass:      [0, 4],
+  flower:          [1, 4],
+  sapling:         [2, 4],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -83,6 +87,10 @@ export const BLOCK_FACE_TILES = {
   20: { px: "redstone_ore", nx: "redstone_ore", py: "redstone_ore", ny: "redstone_ore", pz: "redstone_ore", nz: "redstone_ore" },
   // Wave 8 lava.
   21: { px: "lava",         nx: "lava",         py: "lava",         ny: "lava",         pz: "lava",         nz: "lava"         },
+  // Wave 11 flora (cross-quad; tile used for the two crossed quads).
+  23: { px: "tall_grass",   nx: "tall_grass",   py: "tall_grass",   ny: "tall_grass",   pz: "tall_grass",   nz: "tall_grass"   },
+  24: { px: "flower",       nx: "flower",       py: "flower",       ny: "flower",       pz: "flower",       nz: "flower"       },
+  25: { px: "sapling",      nx: "sapling",      py: "sapling",      ny: "sapling",      pz: "sapling",      nz: "sapling"      },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -592,6 +600,90 @@ function paintLava(ctx, col, row) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Wave 11 — flora tile paint functions
+// All three tiles use DoubleSide alpha-cutout in the mesher.
+// Pixels not painted (transparent) are cut out by alphaTest 0.5.
+// ---------------------------------------------------------------------------
+
+function paintTallGrass(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 91);
+      const n2 = pixelNoise(x, y, 92);
+      // Bottom 2 rows: stem; rest: feathery tips.
+      // Sparse pattern so alpha-cutout produces see-through gaps like tall grass.
+      const inStem = y >= TILE_PX - 3;
+      const blade = Math.abs(x - TILE_PX / 2) < 2.5 + Math.sin(y * 0.9) * 2;
+      const wing  = (n > 0.55) && Math.abs(x - TILE_PX / 2) < 5 && y < TILE_PX - 2;
+      if (!inStem && !blade && !wing) continue;
+      // Darker near base, brighter at tips
+      const bright = 1 - (y / TILE_PX) * 0.35;
+      let r = Math.round((82 + n2 * 24) * bright);
+      let g = Math.round((164 + n2 * 30) * bright);
+      let b = Math.round((58 + n2 * 16) * bright);
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintFlower(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 93);
+      const cx = TILE_PX / 2;
+      const cy = TILE_PX / 2 - 1;
+      const dx = x - cx;
+      const dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      // Stem: thin center column bottom half
+      const inStem = Math.abs(x - cx) < 1.2 && y > cy;
+      // Petals: 4 cardinal petal puffs at radius ~3-4
+      const petal = dist > 2.2 && dist < 5.0 && n > 0.32;
+      // Center disc
+      const centre = dist < 2.4;
+      if (!inStem && !petal && !centre) continue;
+      let r, g, b;
+      if (inStem) { r = 80; g = 150; b = 50; }
+      else if (centre) { r = 240; g = 200; b = 30; }
+      else {
+        // Petals: soft white-pink with noise variation
+        const pn = pixelNoise(x, y, 94);
+        r = 240 + Math.round(pn * 15);
+        g = 160 + Math.round(pn * 30);
+        b = 200 + Math.round(pn * 15);
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintSapling(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 95);
+      const cx = TILE_PX / 2;
+      // Trunk: bottom 6 rows, 2px wide
+      const inTrunk = Math.abs(x - cx) < 1.5 && y >= TILE_PX - 6;
+      // Leaves: small oval cluster upper half
+      const lx = x - cx;
+      const ly = y - 4;
+      const inLeaf = (lx * lx * 0.4 + ly * ly) < 16 && n > 0.22;
+      if (!inTrunk && !inLeaf) continue;
+      let r, g, b;
+      if (inTrunk) {
+        r = 160 + Math.round(n * 20); g = 110 + Math.round(n * 20); b = 60;
+      } else {
+        r = 76 + Math.round(n * 30); g = 148 + Math.round(n * 30); b = 60;
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -624,6 +716,10 @@ function paintAtlas(ctx) {
   paintDiamondOre(ctx,  ...TILE.diamond_ore);
   paintRedstoneOre(ctx, ...TILE.redstone_ore);
   paintLava(ctx,        ...TILE.lava);
+  // Wave 11 — flora
+  paintTallGrass(ctx,   ...TILE.tall_grass);
+  paintFlower(ctx,      ...TILE.flower);
+  paintSapling(ctx,     ...TILE.sapling);
 }
 
 export function createAtlasTexture() {
@@ -675,7 +771,15 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   // Wave 8: lava — own buffer (class 3). Lava-lava faces culled; lava-air/solid faces rendered.
   // Class 3 is numerically distinct so lava-water faces are NOT culled (they border each other).
   21: 3,
+  // Wave 11 flora — class 4 = cross-quad (alpha-cutout, DoubleSide, NOT cube faces).
+  // Class 4 is distinct from all other classes so neighbor checks never cull them.
+  23: 4, // tall grass
+  24: 4, // flower
+  25: 4, // sapling
 };
+
+// Flora block ids as a Set — used by the mesher and collision system.
+export const FLORA_BLOCK_IDS = new Set([23, 24, 25]);
 
 // ----- Item icon canvases -----
 // Returns a lazily-painted atlas canvas (shared, painted once).

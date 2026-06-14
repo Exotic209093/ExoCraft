@@ -3,7 +3,7 @@ import * as THREE from "three";
 import { createGameConfig } from "./game/config";
 import { Sky } from "./game/sky";
 import { setupControls } from "./game/controls";
-import { updateHud } from "./game/hud";
+import { updateHud, updateF3Overlay } from "./game/hud";
 import { aabbIntersectsBlock, playerAABBAt, resolveAxis } from "./game/physics";
 import { getSave, putSave, removeSave } from "./game/save";
 import {
@@ -66,7 +66,18 @@ import {
   CRACK_STAGE_COUNT,
   createSunTexture,
   createMoonTexture,
+  FLORA_BLOCK_IDS,
 } from "./game/textures";
+import {
+  ensureAudio as _ensureAudioModule,
+  playBreakSound,
+  playPlaceSound,
+  playStepSoundForBlock,
+  playJumpSound,
+  playHurtSound,
+  updateAudio,
+  setMusicEnabled,
+} from "./game/audio";
 
 const configOverrides = typeof window.EXOCRAFT_CONFIG === "object" ? window.EXOCRAFT_CONFIG : {};
 const gameConfig = createGameConfig(configOverrides);
@@ -99,6 +110,10 @@ const LAVA_BLOCK_TYPE         = 21;
 // Wave 10 — chest
 const CHEST_BLOCK_TYPE        = 22;
 const CHEST_SIZE              = 27;
+// Wave 11 — flora (cross-quad, passable, no collision)
+const TALL_GRASS_BLOCK_TYPE   = 23;
+const FLOWER_BLOCK_TYPE       = 24;
+const SAPLING_BLOCK_TYPE      = 25;
 const CHEST_INTERACT_RADIUS   = 6;
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
@@ -397,92 +412,16 @@ function updateParticles(deltaMs) {
   }
 }
 
-// ----- Procedural sound effects via Web Audio -----
-let audioContext = null;
-let audioMaster = null;
+// ----- Audio (Wave 11): delegated to game/audio.js -----
+// The module handles ensureAudio / context creation internally.
+// We re-export ensureAudio under the old name so startGame() still works.
 function ensureAudio() {
-  if (audioContext) return audioContext;
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  if (!Ctx) return null;
-  audioContext = new Ctx();
-  audioMaster = audioContext.createGain();
-  audioMaster.gain.value = 0.35;
-  audioMaster.connect(audioContext.destination);
-  return audioContext;
+  return _ensureAudioModule();
 }
-
-function playNoiseBurst({ durationMs, lowpass = 1200, gain = 0.6, gainStart = 0.6 }) {
-  const ctx = ensureAudio();
-  if (!ctx || ctx.state === "suspended") {
-    if (ctx?.resume) ctx.resume().catch(() => {});
-    if (!ctx || ctx.state !== "running") return;
-  }
-  const samples = Math.floor(ctx.sampleRate * (durationMs / 1000));
-  const buffer = ctx.createBuffer(1, samples, ctx.sampleRate);
-  const data = buffer.getChannelData(0);
-  for (let i = 0; i < samples; i += 1) {
-    data[i] = (Math.random() * 2 - 1) * 0.85;
-  }
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  const filter = ctx.createBiquadFilter();
-  filter.type = "lowpass";
-  filter.frequency.value = lowpass;
-  const env = ctx.createGain();
-  const t = ctx.currentTime;
-  env.gain.setValueAtTime(gainStart, t);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + durationMs / 1000);
-  source.connect(filter).connect(env).connect(audioMaster);
-  source.start(t);
-  source.stop(t + durationMs / 1000 + 0.01);
-}
-
-function playTone({ frequency, durationMs, type = "sine", gain = 0.3 }) {
-  const ctx = ensureAudio();
-  if (!ctx || ctx.state === "suspended") {
-    if (ctx?.resume) ctx.resume().catch(() => {});
-    if (!ctx || ctx.state !== "running") return;
-  }
-  const osc = ctx.createOscillator();
-  osc.type = type;
-  osc.frequency.value = frequency;
-  const env = ctx.createGain();
-  const t = ctx.currentTime;
-  env.gain.setValueAtTime(gain, t);
-  env.gain.exponentialRampToValueAtTime(0.0001, t + durationMs / 1000);
-  osc.connect(env).connect(audioMaster);
-  osc.start(t);
-  osc.stop(t + durationMs / 1000 + 0.01);
-}
-
-function playBreakSound(blockType) {
-  // Stone-ish blocks ping higher; wood/leaf softer. Lowpass approximates the muffled
-  // impact you hear in Minecraft.
-  const stoneLike = blockType === 3 || blockType === 7 || blockType === 9 || blockType === 6;
-  playNoiseBurst({
-    durationMs: 160,
-    lowpass: stoneLike ? 1400 : 900,
-    gainStart: stoneLike ? 0.7 : 0.55,
-  });
-}
-
-function playPlaceSound(blockType) {
-  const stoneLike = blockType === 3 || blockType === 7 || blockType === 9;
-  playTone({
-    frequency: stoneLike ? 180 : 240,
-    durationMs: 90,
-    type: "triangle",
-    gain: 0.32,
-  });
-  playNoiseBurst({ durationMs: 70, lowpass: 700, gainStart: 0.25 });
-}
-
+// playBreakSound, playPlaceSound, playJumpSound, playHurtSound — imported from audio.js above.
+// playStepSound alias kept for any legacy call sites:
 function playStepSound() {
-  playNoiseBurst({ durationMs: 60, lowpass: 600, gainStart: 0.18 });
-}
-
-function playJumpSound() {
-  playTone({ frequency: 380, durationMs: 70, type: "sine", gain: 0.18 });
+  playStepSoundForBlock(0);
 }
 
 const raycaster = new THREE.Raycaster();
@@ -617,6 +556,12 @@ const state = {
   // Wave 8: lava submersion state
   inLava: false,        // true when player body is in lava
   eyeInLava: false,     // true when the camera eye voxel is lava
+  // Wave 11 — combat weight
+  playerSwingCooldownRemaining: 0, // seconds remaining before next swing is allowed
+  // Wave 11 — player knockback timer: while > 0, input doesn't overwrite horizontal vel
+  playerKnockbackRemaining: 0,
+  // Wave 11 — F3 debug overlay
+  f3Visible: false,
 };
 
 // Automation runs should advance only through window.advanceTime().
@@ -678,6 +623,8 @@ function blockName(type) {
 
 function refreshHud() {
   updateHud({ state, world, statsEl, hotbarEl });
+  // Wave 11 — F3 debug overlay (no-op when f3Visible=false, cheap signature guard inside).
+  updateF3Overlay({ state, world, fps: _fpsEma, chunkSize: worldConfig.chunk.size });
 }
 
 function toFurnaceKey(x, y, z) {
@@ -2998,7 +2945,7 @@ function updateArrowProjectiles(deltaMs) {
     const dy = arrow.pos.y - (state.playerPos.y + 0.9);
     const distSq = dx * dx + dy * dy + dz * dz;
     if (distSq <= ARROW_HIT_RADIUS * ARROW_HIT_RADIUS) {
-      takeDamage(arrow.damage, "skeleton arrow");
+      takeDamage(arrow.damage, "skeleton arrow", arrow.pos);
       scene.remove(arrow.mesh);
       arrowProjectiles.splice(i, 1);
       continue;
@@ -3053,7 +3000,7 @@ function triggerCreeperExplosion(mob) {
   const blastRadiusSq = (r + 1.5) * (r + 1.5);
   if (playerDistSq <= blastRadiusSq) {
     const falloff = 1 - Math.sqrt(playerDistSq) / (r + 1.5);
-    takeDamage(Math.max(1, Math.floor(CREEPER_EXPLOSION_DAMAGE * falloff)), "creeper explosion");
+    takeDamage(Math.max(1, Math.floor(CREEPER_EXPLOSION_DAMAGE * falloff)), "creeper explosion", mob.pos);
   }
 
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
@@ -3478,7 +3425,39 @@ function updateHostileMobs(deltaMs) {
     const mobContactDamage = typeDef.contactDamage ?? attackDamage;
     if (mobContactDamage > 0 && planarDistance <= attackRange && mob.attackCooldownMs <= 0) {
       mob.attackCooldownMs = attackCooldownMs;
-      takeDamage(mobContactDamage, mob.mobType || "hostile");
+      takeDamage(mobContactDamage, mob.mobType || "hostile", mob.pos);
+    }
+
+    // Wave 11 — apply knockback velocity to mob (decays quickly with gravity).
+    if (mob.vel && (Math.abs(mob.vel.x) > 0.01 || Math.abs(mob.vel.y) > 0.01 || Math.abs(mob.vel.z) > 0.01)) {
+      // Route horizontal displacement through the collision-aware step mover so mobs
+      // can't tunnel through walls during knockback.
+      const hSpeed = Math.hypot(mob.vel.x, mob.vel.z);
+      if (hSpeed > 0.001) {
+        const maxStep = Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1;
+        tryMoveHostileMobWithStep(mob, mob.vel.x / hSpeed, mob.vel.z / hSpeed, hSpeed * dtSeconds, maxStep);
+      }
+      // Vertical: integrate gravity, then clamp against the actual block below the mob
+      // (not findSurfaceY which ignores caves/overhangs and can snap to open-sky surface).
+      mob.pos.y += mob.vel.y * dtSeconds;
+      mob.vel.y += -28 * dtSeconds;           // gravity
+      const belowX = Math.floor(mob.pos.x);
+      const belowZ = Math.floor(mob.pos.z);
+      // Find the highest solid block in the column at mob position, up to mob's current Y.
+      // Walk down from mob foot; if the block below is solid, floor is there.
+      const mobFoot = Math.floor(mob.pos.y);
+      const blockBelow = world.get(belowX, mobFoot - 1, belowZ);
+      if (blockBelow && blockBelow !== 0 && mob.vel.y <= 0) {
+        mob.pos.y = mobFoot;
+        mob.vel.y = 0;
+      }
+      // Safety: never fall below world bottom.
+      if (mob.pos.y < 0) {
+        mob.pos.y = 0;
+        mob.vel.y = 0;
+      }
+      mob.vel.x *= Math.pow(0.12, dtSeconds); // fast horizontal decay
+      mob.vel.z *= Math.pow(0.12, dtSeconds);
     }
 
     mob.mesh.position.copy(mob.pos);
@@ -3539,6 +3518,10 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   if (!isHostileMobEnabled() || hostileMobs.length === 0) {
     return false;
   }
+  // Wave 11 — swing cooldown: gate melee to ~0.4s between swings.
+  if (state.playerSwingCooldownRemaining > 0) {
+    return false;
+  }
   raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
   const hits = raycaster.intersectObjects(hostileMobGroup.children, true);
   if (hits.length === 0) {
@@ -3561,11 +3544,32 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   if (index < 0) {
     return false;
   }
+  // Start cooldown timer
+  const swingCooldownSec = Number.isFinite(hostileMobConfig.playerSwingCooldownSec)
+    ? hostileMobConfig.playerSwingCooldownSec
+    : 0.4;
+  state.playerSwingCooldownRemaining = swingCooldownSec;
+
   const playerDamage = getSelectedMobDamage();
   const mob = hostileMobs[index];
   mob.health -= Math.max(1, Math.floor(playerDamage));
   // Decrement weapon durability on hit.
   decrementDurability(state.inventory, state.selectedSlot, 1);
+
+  // Wave 11 — knockback: push the mob away from the player.
+  const knockbackSpeed = Number.isFinite(hostileMobConfig.mobKnockbackSpeed)
+    ? hostileMobConfig.mobKnockbackSpeed
+    : 8.0;
+  const kbDx = mob.pos.x - state.playerPos.x;
+  const kbDz = mob.pos.z - state.playerPos.z;
+  const kbLen = Math.hypot(kbDx, kbDz);
+  if (kbLen > 0.001) {
+    mob.vel = mob.vel || new THREE.Vector3();
+    mob.vel.x = (kbDx / kbLen) * knockbackSpeed;
+    mob.vel.y = 3.5;
+    mob.vel.z = (kbDz / kbLen) * knockbackSpeed;
+  }
+
   if (mob.health <= 0) {
     const killWeaponItemId = getSelectedItemId();
     const mobTypeId = mob.mobType || "zombie";
@@ -5623,7 +5627,7 @@ function respawnPlayer(options = {}) {
   updateCameraTransform();
 }
 
-function takeDamage(amount, reason) {
+function takeDamage(amount, reason, attackerPos = null) {
   if (state.mode !== "playing") {
     return;
   }
@@ -5643,6 +5647,29 @@ function takeDamage(amount, reason) {
       damage = Math.max(1, Math.floor(damage * (1 - reduction)));
     }
   }
+
+  // Wave 11 — player knockback: push player away from attacker (mob/explosion only).
+  // Starvation, void, lava, fall don't knock the player.
+  const hasPhysicalSource = attackerPos && !bypassArmor && reason !== "fall" && reason !== "lava";
+  if (hasPhysicalSource) {
+    const kbSpeed = Number.isFinite(hostileMobConfig.playerKnockbackSpeed)
+      ? hostileMobConfig.playerKnockbackSpeed
+      : 5.5;
+    const kbDx = state.playerPos.x - attackerPos.x;
+    const kbDz = state.playerPos.z - attackerPos.z;
+    const kbLen = Math.hypot(kbDx, kbDz);
+    if (kbLen > 0.001) {
+      state.playerVel.x = (kbDx / kbLen) * kbSpeed;
+      state.playerVel.z = (kbDz / kbLen) * kbSpeed;
+      state.playerVel.y = 3.0;
+      // Protect the horizontal vel from being overwritten by input for ~0.25 s
+      // so resolveAxis can integrate it before the next movement frame zeros it.
+      state.playerKnockbackRemaining = 0.25;
+    }
+  }
+
+  // Wave 11 — hurt sound
+  playHurtSound();
 
   state.health = Math.max(0, state.health - damage);
   if (state.health <= 0) {
@@ -5901,8 +5928,17 @@ function updateSimulation(dtSeconds) {
     // --- ON LAND (or in lava): original physics with lava slowdown ---
     // Wave 8: lava halves movement speed (same as Minecraft's lava drag).
     const effectiveMoveSpeed = state.inLava ? moveSpeed * 0.5 : moveSpeed;
-    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * effectiveMoveSpeed;
-    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * effectiveMoveSpeed;
+    const inputVelX = (forwardX * forwardInput + rightX * strafeInput) * effectiveMoveSpeed;
+    const inputVelZ = (forwardZ * forwardInput + rightZ * strafeInput) * effectiveMoveSpeed;
+    if (state.playerKnockbackRemaining > 0) {
+      // Knockback window: add input to existing vel so the player can nudge themselves
+      // but the horizontal push is not zeroed before resolveAxis integrates it.
+      state.playerVel.x += inputVelX;
+      state.playerVel.z += inputVelZ;
+    } else {
+      state.playerVel.x = inputVelX;
+      state.playerVel.z = inputVelZ;
+    }
     state.playerVel.y += playerConfig.gravity * dtSeconds;
     const wasOnGround = state.onGround;
     const impactVelocityY = state.playerVel.y;
@@ -6017,7 +6053,12 @@ function updateSimulation(dtSeconds) {
     // crosses zero positively every PI / 2 of bobPhase).
     const stepPeriod = Math.PI / 2;
     if (Math.floor(state.bobPhase / stepPeriod) !== Math.floor(prevPhase / stepPeriod)) {
-      playStepSound();
+      // Wave 11: per-surface footstep — sample block underfoot.
+      const footX = Math.floor(state.playerPos.x);
+      const footY = Math.floor(state.playerPos.y) - 1;
+      const footZ = Math.floor(state.playerPos.z);
+      const footBlock = world ? world.get(footX, footY, footZ) : 0;
+      playStepSoundForBlock(footBlock);
     }
   } else {
     state.bobAmplitude += (0 - state.bobAmplitude) * Math.min(1, dtSeconds * 14);
@@ -6045,6 +6086,16 @@ function updateSimulation(dtSeconds) {
     }
   }
 
+  // Wave 11 — swing cooldown countdown.
+  if (state.playerSwingCooldownRemaining > 0) {
+    state.playerSwingCooldownRemaining = Math.max(0, state.playerSwingCooldownRemaining - dtSeconds);
+  }
+  // Wave 11 — knockback timer: counts down each tick so the horizontal vel survives long
+  // enough to be picked up by resolveAxis (see land-movement branch below).
+  if (state.playerKnockbackRemaining > 0) {
+    state.playerKnockbackRemaining = Math.max(0, state.playerKnockbackRemaining - dtSeconds);
+  }
+
   clampPlayer();
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   updateFurnaceSimulation(deltaMs);
@@ -6057,6 +6108,8 @@ function updateSimulation(dtSeconds) {
   updateObjectives(deltaMs);
   updateCameraTransform();
   updateTargetBlockFromCenter();
+  // Wave 11 — audio tick (ambience, mob proximity growl, music).
+  updateAudio(state, world, hostileMobs, worldConfig.generation.seaLevel || 38);
   refreshHud();
   updateCraftPanel();
   updateFurnacePanel();
@@ -6154,6 +6207,9 @@ setupControls({
   breakBlockAt: breakBlock,
   placeBlockAt: placeBlock,
   toNdc,
+  toggleF3Overlay: () => {
+    state.f3Visible = !state.f3Visible;
+  },
 });
 
 saveButton.addEventListener("click", () => {
@@ -6253,6 +6309,8 @@ window.addEventListener("resize", () => {
 });
 
 let lastFrame = Number.NaN;
+// Wave 11 — rolling FPS counter (exponential moving average).
+let _fpsEma = 60;
 
 window.advanceTime = async (ms) => {
   useExternalTimeStep = true;
@@ -6786,6 +6844,10 @@ function frame(now) {
   }
   const dt = Number.isFinite(lastFrame) ? Math.min(0.05, (now - lastFrame) / 1000) : 0;
   lastFrame = now;
+  // Wave 11 — update rolling FPS estimate.
+  if (dt > 0) {
+    _fpsEma = _fpsEma * 0.9 + (1 / dt) * 0.1;
+  }
   updateSimulation(dt);
   render();
   requestAnimationFrame(frame);
