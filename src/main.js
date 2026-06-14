@@ -68,6 +68,18 @@ import {
   rollPassiveMobDrops,
 } from "./game/passiveMobs";
 import {
+  initMobAnimState,
+  initMobShadow,
+  removeMobShadow,
+  triggerHurtFlash,
+  startMobDeath,
+  isMobDying,
+  isMobDeathFinished,
+  tickMobAnims,
+  updateMobTravel,
+  getMobDebugSnapshot,
+} from "./game/mobAnim";
+import {
   createAtlasTexture,
   createCrackTextures,
   CRACK_STAGE_COUNT,
@@ -2567,6 +2579,7 @@ function syncHostileMobCount() {
 function clearHostileMobs() {
   while (hostileMobs.length > 0) {
     const mob = hostileMobs.pop();
+    removeMobShadow(mob, scene);
     hostileMobGroup.remove(mob.mesh);
   }
   mobSpawnAccumulatorMs = 0;
@@ -2614,6 +2627,9 @@ function createHostileMob(position, saved = null, forcedType = null) {
   mesh.userData.mobId = id;
   mesh.position.copy(mob.pos);
   hostileMobs.push(mob);
+  // Wave F3 — init transient animation state (never persisted)
+  initMobAnimState(mob);
+  initMobShadow(mob, scene);
   syncHostileMobCount();
   return mob;
 }
@@ -2624,6 +2640,7 @@ function removeHostileMobAt(index) {
   }
   const [mob] = hostileMobs.splice(index, 1);
   if (mob) {
+    removeMobShadow(mob, scene);
     hostileMobGroup.remove(mob.mesh);
   }
   syncHostileMobCount();
@@ -2631,19 +2648,26 @@ function removeHostileMobAt(index) {
 }
 
 function serializeHostileMobs() {
-  return hostileMobs.slice(0, Number.isFinite(hostileMobConfig.maxPersisted) ? hostileMobConfig.maxPersisted : 20).map((mob) => ({
-    id: mob.id,
-    mobType: mob.mobType || "zombie",
-    x: Number(mob.pos.x.toFixed(3)),
-    y: Number(mob.pos.y.toFixed(3)),
-    z: Number(mob.pos.z.toFixed(3)),
-    health: mob.health,
-    mode: mob.mode,
-    wanderAngle: Number(mob.wanderAngle.toFixed(4)),
-    wanderTimerMs: Math.floor(mob.wanderTimerMs),
-    attackCooldownMs: Math.floor(mob.attackCooldownMs),
-    chasing: mob.chasing,
-  }));
+  const maxPersisted = Number.isFinite(hostileMobConfig.maxPersisted) ? hostileMobConfig.maxPersisted : 20;
+  const result = [];
+  for (const mob of hostileMobs) {
+    if (result.length >= maxPersisted) break;
+    if (mob.dying) continue;  // Wave F3 — don't persist dying mobs
+    result.push({
+      id: mob.id,
+      mobType: mob.mobType || "zombie",
+      x: Number(mob.pos.x.toFixed(3)),
+      y: Number(mob.pos.y.toFixed(3)),
+      z: Number(mob.pos.z.toFixed(3)),
+      health: mob.health,
+      mode: mob.mode,
+      wanderAngle: Number(mob.wanderAngle.toFixed(4)),
+      wanderTimerMs: Math.floor(mob.wanderTimerMs),
+      attackCooldownMs: Math.floor(mob.attackCooldownMs),
+      chasing: mob.chasing,
+    });
+  }
+  return result;
 }
 
 function isMobSpawnColumnWalkable(x, z) {
@@ -3211,19 +3235,26 @@ function createPassiveMob(position, saved = null, forcedType = null) {
   mesh.userData.passiveMobId = id;
   mesh.position.copy(mob.pos);
   passiveMobs.push(mob);
+  // Wave F3 — init transient animation state (never persisted)
+  initMobAnimState(mob);
+  initMobShadow(mob, scene);
   return mob;
 }
 
 function removePassiveMobAt(index) {
   if (index < 0 || index >= passiveMobs.length) return null;
   const [mob] = passiveMobs.splice(index, 1);
-  if (mob) passiveMobGroup.remove(mob.mesh);
+  if (mob) {
+    removeMobShadow(mob, scene);
+    passiveMobGroup.remove(mob.mesh);
+  }
   return mob || null;
 }
 
 function clearPassiveMobs() {
   while (passiveMobs.length > 0) {
     const mob = passiveMobs.pop();
+    removeMobShadow(mob, scene);
     passiveMobGroup.remove(mob.mesh);
   }
   passiveMobIdCounter = 1;
@@ -3231,16 +3262,22 @@ function clearPassiveMobs() {
 }
 
 function serializePassiveMobs() {
-  return passiveMobs.slice(0, 20).map((mob) => ({
-    id: mob.id,
-    mobType: mob.mobType,
-    x: Number(mob.pos.x.toFixed(3)),
-    y: Number(mob.pos.y.toFixed(3)),
-    z: Number(mob.pos.z.toFixed(3)),
-    health: mob.health,
-    wanderAngle: Number(mob.wanderAngle.toFixed(4)),
-    wanderTimerMs: Math.floor(mob.wanderTimerMs),
-  }));
+  const result = [];
+  for (const mob of passiveMobs) {
+    if (result.length >= 20) break;
+    if (mob.dying) continue;  // Wave F3 — don't persist dying mobs
+    result.push({
+      id: mob.id,
+      mobType: mob.mobType,
+      x: Number(mob.pos.x.toFixed(3)),
+      y: Number(mob.pos.y.toFixed(3)),
+      z: Number(mob.pos.z.toFixed(3)),
+      health: mob.health,
+      wanderAngle: Number(mob.wanderAngle.toFixed(4)),
+      wanderTimerMs: Math.floor(mob.wanderTimerMs),
+    });
+  }
+  return result;
 }
 
 function loadPassiveMobs(serializedMobs) {
@@ -3296,6 +3333,16 @@ function updatePassiveMobs(deltaMs) {
   for (let i = passiveMobs.length - 1; i >= 0; i -= 1) {
     const mob = passiveMobs[i];
 
+    // Wave F3 — death animation: advance, then remove when done
+    if (isMobDying(mob)) {
+      if (isMobDeathFinished(mob, deltaMs)) {
+        removePassiveMobAt(i);
+      } else {
+        mob.mesh.position.copy(mob.pos);
+      }
+      continue;
+    }
+
     // Despawn if far away
     const dx = mob.pos.x - state.playerPos.x;
     const dz = mob.pos.z - state.playerPos.z;
@@ -3310,7 +3357,9 @@ function updatePassiveMobs(deltaMs) {
       continue;
     }
 
-    // Wander
+    // Wander — record position before move for travel tracking
+    const prevPosX = mob.pos.x;
+    const prevPosZ = mob.pos.z;
     const typeDef = getPassiveMobTypeDef(mob.mobType);
     const speed = typeDef.speed ?? 1.2;
     mob.wanderTimerMs -= deltaMs;
@@ -3320,11 +3369,69 @@ function updatePassiveMobs(deltaMs) {
     }
     const dirX = Math.sin(mob.wanderAngle);
     const dirZ = -Math.cos(mob.wanderAngle);
-    const moved = tryMoveHostileMobWithStep(mob, dirX, dirZ, speed * dtSeconds, 1.1);
-    if (!moved) mob.wanderTimerMs = 0;
 
+    // Wave F3 — hazard avoidance: don't step into lava/water or off big drops
+    const nextX = mob.pos.x + dirX * speed * dtSeconds;
+    const nextZ = mob.pos.z + dirZ * speed * dtSeconds;
+    const nextBX = Math.floor(nextX);
+    const nextBZ = Math.floor(nextZ);
+    const nextGroundY = world.findSurfaceY(nextBX, nextBZ);
+    let isHazard = false;
+    let isBigDrop = false;
+    if (Number.isFinite(nextGroundY)) {
+      const nextBlock = world.get(nextBX, Math.floor(nextGroundY), nextBZ);
+      const nextBlockBelow = world.get(nextBX, Math.floor(nextGroundY) - 1, nextBZ);
+      isHazard = nextBlock === LAVA_BLOCK_TYPE || nextBlock === WATER_BLOCK_TYPE
+        || nextBlockBelow === LAVA_BLOCK_TYPE;
+      isBigDrop = (mob.pos.y - nextGroundY) > 2.5;
+    }
+
+    const moved = (!isHazard && !isBigDrop)
+      ? tryMoveHostileMobWithStep(mob, dirX, dirZ, speed * dtSeconds, 1.1)
+      : false;
+    if (!moved) {
+      mob.wanderTimerMs = 0;
+      // Auto-jump: if blocked by a 1-block-tall wall, hop over it (mirrors hostile logic)
+      if (dirX !== 0 || dirZ !== 0) {
+        const footY   = Math.floor(mob.pos.y);
+        const nextBX2 = Math.floor(mob.pos.x + dirX * 0.6);
+        const nextBZ2 = Math.floor(mob.pos.z + dirZ * 0.6);
+        const footBlock  = world.get(nextBX2, footY,     nextBZ2);
+        const kneeBlock  = world.get(nextBX2, footY + 1, nextBZ2);
+        const headBlock  = world.get(nextBX2, footY + 2, nextBZ2);
+        if (footBlock !== 0 && kneeBlock === 0 && headBlock === 0) {
+          mob.vel = mob.vel || new THREE.Vector3();
+          mob.vel.y = Math.max(mob.vel.y, 5.0);
+        }
+      }
+    }
+
+    // Wave F3 — gravity: integrate hop velocity when active, else snap to surface
+    if (mob.vel && mob.vel.y > 0.01) {
+      mob.pos.y += mob.vel.y * dtSeconds;
+      mob.vel.y += -28 * dtSeconds; // gravity
+      if (mob.vel.y < 0) mob.vel.y = 0; // let snap logic take over on descent
+    } else {
+      const surfY = world.findSurfaceY(Math.floor(mob.pos.x), Math.floor(mob.pos.z));
+      if (Number.isFinite(surfY) && mob.pos.y > surfY + 1.5) {
+        mob.pos.y = Math.max(surfY + 1.01, mob.pos.y - 14 * dtSeconds);
+      } else if (Number.isFinite(surfY) && mob.pos.y < surfY + 0.8) {
+        mob.pos.y = surfY + 1.01;
+        if (mob.vel) mob.vel.y = 0;
+      }
+    }
+
+    // Wave F3 — face travel direction
+    if (speed > 0.1) {
+      mob.mesh.rotation.y = mob.wanderAngle;
+    }
+
+    updateMobTravel(mob, { x: prevPosX, z: prevPosZ }, dtSeconds);
     mob.mesh.position.copy(mob.pos);
   }
+
+  // Wave F3 — drive limb/head animations
+  tickMobAnims(passiveMobs, deltaMs, state.playerPos, true);
 }
 
 function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
@@ -3344,6 +3451,8 @@ function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
   viewmodel.triggerSwing();
   const playerDamage = getSelectedMobDamage();
   const mob = passiveMobs[index];
+  // Wave F3 — skip dying mobs (they can't be hit again)
+  if (isMobDying(mob)) return false;
   mob.health -= Math.max(1, Math.floor(playerDamage));
   decrementDurability(state.inventory, state.selectedSlot, 1);
   if (mob.health <= 0) {
@@ -3351,18 +3460,19 @@ function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
     const dropX = mob.pos.x;
     const dropY = mob.pos.y + 0.5;
     const dropZ = mob.pos.z;
-    removePassiveMobAt(index);
-    // Wave F1: spawn item entities at mob death position instead of direct grant
+    // Wave F3 — fire loot/XP at death-start, then enter death animation
     const drops = rollPassiveMobDrops(mobTypeId);
     for (const drop of drops) {
       itemEntities.spawnItemEntity(drop.itemId, drop.count, dropX, dropY, dropZ);
     }
-    // Wave F2: passive mobs drop 1–3 XP
     xpOrbs.spawnXp(1 + Math.floor(seededXpFloat(++_xpBreakCounter) * 3), dropX, dropY, dropZ);
+    startMobDeath(mob);
     state.recentAction = drops.length > 0
       ? `Defeated ${mobTypeId} (items dropped)`
       : `Defeated ${mobTypeId}`;
   } else {
+    // Wave F3 — red hurt flash
+    triggerHurtFlash(mob);
     state.recentAction = `Hit ${mob.mobType} (${mob.health} hp)`;
     markInventoryPanelDirty();
   }
@@ -3405,6 +3515,17 @@ function updateHostileMobs(deltaMs) {
   const dtSeconds = deltaMs / 1000;
   for (let i = hostileMobs.length - 1; i >= 0; i -= 1) {
     const mob = hostileMobs[i];
+
+    // Wave F3 — death animation: advance, then remove when finished
+    if (isMobDying(mob)) {
+      if (isMobDeathFinished(mob, deltaMs)) {
+        removeHostileMobAt(i);
+      } else {
+        mob.mesh.position.copy(mob.pos);
+      }
+      continue;
+    }
+
     const toPlayerX = state.playerPos.x - mob.pos.x;
     const toPlayerZ = state.playerPos.z - mob.pos.z;
     const planarDistance = Math.hypot(toPlayerX, toPlayerZ);
@@ -3430,10 +3551,10 @@ function updateHostileMobs(deltaMs) {
         if (mob.health <= 0) {
           const killWeapon = "zombie_burn";
           const burnPos = { x: mob.pos.x, y: mob.pos.y, z: mob.pos.z };
-          removeHostileMobAt(i);
           rewardHostileMobDefeat(killWeapon, "zombie", burnPos);
           markCraftPanelDirty();
           markInventoryPanelDirty();
+          startMobDeath(mob);
           continue;
         }
       }
@@ -3583,12 +3704,59 @@ function updateHostileMobs(deltaMs) {
       }
     }
 
+    // Wave F3 — record position before movement for travel tracking
+    const prevPosX = mob.pos.x;
+    const prevPosZ = mob.pos.z;
+
     if (speed > 0) {
-      // Spider: can climb up slightly more aggressively (extra step tolerance)
-      const maxStep = mob.mobType === "spider" ? 2.1 : (Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1);
-      const moved = tryMoveHostileMobWithStep(mob, dirX, dirZ, speed * dtSeconds, maxStep);
-      if (!moved && !mob.chasing) {
-        mob.wanderTimerMs = 0;
+      const isSpider = mob.mobType === "spider";
+      const maxStep = isSpider ? 2.1 : (Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1);
+      const moveAmount = speed * dtSeconds;
+
+      // Wave F3 — hazard avoidance: check next tile before stepping
+      // Spider is exempt (can climb/traverse); land mobs avoid lava/water/big drops
+      let willMove = true;
+      if (!isSpider && (dirX !== 0 || dirZ !== 0)) {
+        const nextX = mob.pos.x + dirX * moveAmount;
+        const nextZ = mob.pos.z + dirZ * moveAmount;
+        const nextBX = Math.floor(nextX);
+        const nextBZ = Math.floor(nextZ);
+        const nextSurfY = world.findSurfaceY(nextBX, nextBZ);
+        if (Number.isFinite(nextSurfY)) {
+          const surfBlock = world.get(nextBX, Math.floor(nextSurfY), nextBZ);
+          const subBlock  = world.get(nextBX, Math.floor(nextSurfY) - 1, nextBZ);
+          const isHazard  = surfBlock === LAVA_BLOCK_TYPE || surfBlock === WATER_BLOCK_TYPE
+                          || subBlock  === LAVA_BLOCK_TYPE;
+          const isBigDrop = (mob.pos.y - nextSurfY) > 2.5;
+          if (isHazard || isBigDrop) willMove = false;
+        }
+      }
+
+      if (willMove) {
+        const moved = tryMoveHostileMobWithStep(mob, dirX, dirZ, moveAmount, maxStep);
+        if (!moved) {
+          // Wave F3 — auto-jump: if blocked by a 1-block-tall wall, hop over it
+          if (!isSpider && (dirX !== 0 || dirZ !== 0)) {
+            const footY = Math.floor(mob.pos.y);
+            const nextBX = Math.floor(mob.pos.x + dirX * 0.6);
+            const nextBZ = Math.floor(mob.pos.z + dirZ * 0.6);
+            const footBlock  = world.get(nextBX, footY,     nextBZ);
+            const kneeBlock  = world.get(nextBX, footY + 1, nextBZ);
+            const headBlock  = world.get(nextBX, footY + 2, nextBZ);
+            if (footBlock !== 0 && kneeBlock === 0 && headBlock === 0) {
+              mob.vel = mob.vel || new THREE.Vector3();
+              mob.vel.y = Math.max(mob.vel.y, 5.0); // hop
+            }
+          }
+          if (!mob.chasing) mob.wanderTimerMs = 0;
+        }
+      } else {
+        if (!mob.chasing) mob.wanderTimerMs = 0;
+      }
+
+      // Wave F3 — face travel direction (non-zero dir only)
+      if (dirX !== 0 || dirZ !== 0) {
+        mob.mesh.rotation.y = Math.atan2(dirX, dirZ);
       }
     }
 
@@ -3629,10 +3797,26 @@ function updateHostileMobs(deltaMs) {
       }
       mob.vel.x *= Math.pow(0.12, dtSeconds); // fast horizontal decay
       mob.vel.z *= Math.pow(0.12, dtSeconds);
+    } else {
+      // Wave F3 — gravity/grounding when not under knockback: snap mob to surface
+      const surfY = world.findSurfaceY(Math.floor(mob.pos.x), Math.floor(mob.pos.z));
+      if (Number.isFinite(surfY)) {
+        if (mob.pos.y > surfY + 1.5) {
+          mob.pos.y = Math.max(surfY + 1.01, mob.pos.y - 14 * dtSeconds);
+        } else if (mob.pos.y < surfY + 0.8) {
+          mob.pos.y = surfY + 1.01;
+        }
+      }
     }
+
+    // Wave F3 — update travel accumulator for walk cycle
+    updateMobTravel(mob, { x: prevPosX, z: prevPosZ }, dtSeconds);
 
     mob.mesh.position.copy(mob.pos);
   }
+
+  // Wave F3 — drive limb/head animations
+  tickMobAnims(hostileMobs, deltaMs, state.playerPos, false);
 
   // --- Update arrow projectiles ---
   updateArrowProjectiles(deltaMs);
@@ -3717,6 +3901,11 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   if (index < 0) {
     return false;
   }
+  const mob = hostileMobs[index];
+  // Wave F3 — dying mobs can't be hit again
+  if (isMobDying(mob)) {
+    return false;
+  }
   // Start cooldown timer
   const swingCooldownSec = Number.isFinite(hostileMobConfig.playerSwingCooldownSec)
     ? hostileMobConfig.playerSwingCooldownSec
@@ -3725,7 +3914,6 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   viewmodel.triggerSwing();
 
   const playerDamage = getSelectedMobDamage();
-  const mob = hostileMobs[index];
   mob.health -= Math.max(1, Math.floor(playerDamage));
   // Decrement weapon durability on hit.
   decrementDurability(state.inventory, state.selectedSlot, 1);
@@ -3748,11 +3936,14 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
     const killWeaponItemId = getSelectedItemId();
     const mobTypeId = mob.mobType || "zombie";
     const mobPos = { x: mob.pos.x, y: mob.pos.y, z: mob.pos.z };
-    removeHostileMobAt(index);
+    // Wave F3 — fire loot/XP at death-start, then enter death animation
     rewardHostileMobDefeat(killWeaponItemId, mobTypeId, mobPos);
     markCraftPanelDirty();
     markInventoryPanelDirty();
+    startMobDeath(mob);
   } else {
+    // Wave F3 — red hurt flash on non-fatal hit
+    triggerHurtFlash(mob);
     state.recentAction = `Hit ${mob.mobType || "hostile mob"} (${mob.health} hp)`;
     markInventoryPanelDirty();
   }
@@ -6924,6 +7115,8 @@ window.__exoCraftDebug = {
     updateObjectives(0, true);
     return state.timeOfDayMs;
   },
+  // Wave F3 — mob animation debug snapshot (scalar-only, safe to log)
+  getMobDebug: () => getMobDebugSnapshot(hostileMobs, passiveMobs),
   scanExplorationStructures: (radius = 18) => scanExplorationStructures(radius),
   findNearestCopperOre: (radius = 26) => {
     const ore = findNearestCopperOre(radius);
