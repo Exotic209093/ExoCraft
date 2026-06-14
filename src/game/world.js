@@ -637,6 +637,11 @@ export class VoxelWorld {
     this.treeInfoCache = new Map();
     this.surfaceOreNodeCache = new Map();
     this.biomeCache = new Map();
+
+    // Wave F5: set by main.js to fluidSim.fluidLevels after FluidSim is created.
+    // The mesher reads this to detect flowing cells and emit reduced-height boxes.
+    // Null until the sim is wired in (source-only ocean rendering is unaffected).
+    this.fluidLevels = null;
   }
 
   normalizeBlockType(type) {
@@ -2054,6 +2059,84 @@ export class VoxelWorld {
               }
             }
             continue; // skip the cube-face loop for partial blocks
+          } else if ((blockType === 15 || blockType === 21) && this.fluidLevels && this.fluidLevels.has(`${worldX},${y},${worldZ}`)) {
+            // --- Wave F5: flowing fluid — emit a reduced-height box into the fluid's own buffer ---
+            const _flInfo = this.fluidLevels.get(`${worldX},${y},${worldZ}`);
+            // Flowing height: level/maxLevel fraction. Water maxLevel=7, lava maxLevel=3.
+            const _flMaxLevel = (blockType === 15) ? 7 : 3;
+            const _flHeight = Math.max(0.125, _flInfo.level / _flMaxLevel);
+            // Sample light from the voxel above (same pattern as partial blocks).
+            const _flAboveX = worldX;
+            const _flAboveY = y + 1;
+            const _flAboveZ = worldZ;
+            const _flALX = _flAboveX - baseX;
+            const _flALZ = _flAboveZ - baseZ;
+            let _flSky = 0;
+            let _flBlk = 0;
+            if (_flAboveY >= 0 && _flAboveY < H &&
+                _flALX >= 0 && _flALX < S && _flALZ >= 0 && _flALZ < S) {
+              _flSky = skylight[lIndex(_flALX, _flAboveY, _flALZ)];
+              _flBlk = blocklight[lIndex(_flALX, _flAboveY, _flALZ)];
+            } else if (_flAboveY >= H) {
+              _flSky = 15;
+            }
+            const _flLR = _flSky / 15.0;
+            const _flLG = _flBlk / 15.0;
+            const _flAO = 1.0;
+            // Select which buffer set to emit into (water or lava material).
+            const _flPos  = (blockType === 15) ? waterPos  : lavaPos;
+            const _flNorm = (blockType === 15) ? waterNorm : lavaNorm;
+            const _flUv   = (blockType === 15) ? waterUv   : lavaUv;
+            const _flCol  = (blockType === 15) ? waterCol  : lavaCol;
+            const _flTint = (blockType === 15) ? waterTint : lavaTint;
+            const _flIdx  = (blockType === 15) ? waterIdx  : lavaIdx;
+            // Emit a box of size (1, _flHeight, 1) starting at (worldX, y, worldZ).
+            // Reuse the same emitPartialQuad-style inline emitter.
+            const _ox = worldX, _oy = y, _oz = worldZ;
+            const _sx = 1.0, _sy = _flHeight, _sz = 1.0;
+            const _emitFluidQuad = (verts, nx, ny, nz, uvRect) => {
+              const _base = _flPos.length / 3;
+              const { uMin, uMax, vMin, vMax } = uvRect;
+              for (let _v = 0; _v < 4; _v += 1) {
+                _flPos.push(...verts[_v]);
+                _flNorm.push(nx, ny, nz);
+                const [_ut, _vt] = FACE_UV_INDICES[_v];
+                _flUv.push(_ut === 0 ? uMin : uMax, _vt === 0 ? vMin : vMax);
+                _flCol.push(_flLR, _flLG, _flAO);
+                _flTint.push(1.0, 1.0, 1.0);
+              }
+              const _isPyNy = (ny !== 0);
+              if (_isPyNy) {
+                _flIdx.push(_base, _base + 2, _base + 1, _base + 1, _base + 2, _base + 3);
+              } else {
+                _flIdx.push(_base, _base + 1, _base + 2, _base + 1, _base + 3, _base + 2);
+              }
+            };
+            // PX face
+            _emitFluidQuad(
+              [[_ox+_sx,_oy,_oz+_sz],[_ox+_sx,_oy,_oz],[_ox+_sx,_oy+_sy,_oz+_sz],[_ox+_sx,_oy+_sy,_oz]],
+              1,0,0, getFaceUvRect(blockType, FACE_PX));
+            // NX face
+            _emitFluidQuad(
+              [[_ox,_oy,_oz],[_ox,_oy,_oz+_sz],[_ox,_oy+_sy,_oz],[_ox,_oy+_sy,_oz+_sz]],
+              -1,0,0, getFaceUvRect(blockType, FACE_NX));
+            // PY face (the visible top surface)
+            _emitFluidQuad(
+              [[_ox,_oy+_sy,_oz],[_ox+_sx,_oy+_sy,_oz],[_ox,_oy+_sy,_oz+_sz],[_ox+_sx,_oy+_sy,_oz+_sz]],
+              0,1,0, getFaceUvRect(blockType, FACE_PY));
+            // NY face
+            _emitFluidQuad(
+              [[_ox,_oy,_oz+_sz],[_ox+_sx,_oy,_oz+_sz],[_ox,_oy,_oz],[_ox+_sx,_oy,_oz]],
+              0,-1,0, getFaceUvRect(blockType, FACE_NY));
+            // PZ face
+            _emitFluidQuad(
+              [[_ox,_oy,_oz+_sz],[_ox+_sx,_oy,_oz+_sz],[_ox,_oy+_sy,_oz+_sz],[_ox+_sx,_oy+_sy,_oz+_sz]],
+              0,0,1, getFaceUvRect(blockType, FACE_PZ));
+            // NZ face
+            _emitFluidQuad(
+              [[_ox+_sx,_oy,_oz],[_ox,_oy,_oz],[_ox+_sx,_oy+_sy,_oz],[_ox,_oy+_sy,_oz]],
+              0,0,-1, getFaceUvRect(blockType, FACE_NZ));
+            continue; // skip the cube-face loop for flowing fluid
           } else if (blockType === 21) {
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
             colArr  = lavaCol;   tintArr = lavaTint;  swayArr = null;     idxArr  = lavaIdx;

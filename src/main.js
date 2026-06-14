@@ -50,9 +50,11 @@ import {
   getArmorSlot,
   getTotalDefense,
   ARMOR_DEFENSE,
+  NON_STACKABLE,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
+import { FluidSim } from "./game/fluidSim";
 import { WeatherSystem } from "./game/weather";
 import {
   MOB_TYPES,
@@ -382,6 +384,12 @@ const world = new VoxelWorld({
   materials: blockMaterials,
   generation: worldConfig.generation,
 });
+
+// Wave F5: create fluid sim before initial generateTerrain so the mesher can read
+// fluidLevels immediately. The Map starts empty — no reset needed at boot (fix #4/#9/#13).
+const fluidSim = new FluidSim(world);
+world.fluidLevels = fluidSim.fluidLevels;
+
 world.generateTerrain();
 scene.add(world.meshGroup);
 
@@ -5527,6 +5535,7 @@ function collectSaveSnapshot() {
       toNext:       state.xpToNext,
       furnaceAccum: state._furnaceXpAccum,
     },
+    fluidSim: fluidSim.serialise(), // Wave F5: persist flowing cells
   };
 }
 
@@ -5611,6 +5620,8 @@ async function loadGame() {
     loadPassiveMobs(snapshot.passiveMobs);
     // Wave F1: restore item entities; v<=5 saves have no itemEntities field → clear
     itemEntities.restore(snapshot.itemEntities ?? null);
+    // Wave F5: restore flowing fluid cells; null snapshot = no flowing cells (clears map)
+    fluidSim.restore(snapshot.fluidSim ?? null);
     // Wave F2: restore XP state; v<=6 saves have no xp field → default to 0
     {
       const xpSnap = snapshot.xp ?? null;
@@ -5730,6 +5741,39 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   if (tryHitPassiveMob(ndcX, ndcY)) {
     return true;
   }
+
+  // Wave F5: bucket collection — empty_bucket + click on fluid source → filled bucket.
+  // Only source blocks (not flowing cells) can be collected.
+  {
+    const heldId = getSelectedItemId();
+    if (heldId === "empty_bucket") {
+      const bucketHit = hitTest(ndcX, ndcY);
+      if (bucketHit) {
+        const bucketNormal = getWorldNormal(bucketHit);
+        if (bucketNormal) {
+          const bucketCoords = toBlockCoords(bucketHit.point, bucketNormal, -1);
+          if (world.inBounds(bucketCoords.x, bucketCoords.y, bucketCoords.z)) {
+            const bucketBlockId = world.get(bucketCoords.x, bucketCoords.y, bucketCoords.z);
+            const isSource = (bucketBlockId === WATER_BLOCK_TYPE || bucketBlockId === LAVA_BLOCK_TYPE)
+              && !(fluidSim.fluidLevels && fluidSim.fluidLevels.has(`${bucketCoords.x},${bucketCoords.y},${bucketCoords.z}`));
+            if (isSource) {
+              const filledBucket = (bucketBlockId === WATER_BLOCK_TYPE) ? "water_bucket" : "lava_bucket";
+              world.set(bucketCoords.x, bucketCoords.y, bucketCoords.z, 0);
+              fluidSim.removeSource(bucketCoords.x, bucketCoords.y, bucketCoords.z, bucketBlockId);
+              // Slot is always count:1 (NON_STACKABLE) — replace with filled bucket.
+              state.inventory[state.selectedSlot] = { itemId: filledBucket, count: 1 };
+              markInventoryPanelDirty();
+              markCraftPanelDirty();
+              state.recentAction = `Collected ${filledBucket === "water_bucket" ? "water" : "lava"}`;
+              viewmodel.triggerSwing();
+              return true;
+            }
+          }
+        }
+      }
+    }
+  }
+
   const hit = hitTest(ndcX, ndcY);
   if (!hit) {
     state.breakProgress.targetKey = null;
@@ -5773,6 +5817,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
 
   const minedDeepCopper = type === COPPER_ORE_BLOCK_TYPE && isTorchPlacementInCave(coords.x, coords.y, coords.z);
   world.set(coords.x, coords.y, coords.z, 0);
+  fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid flow into dug space
   if (type === FURNACE_BLOCK_TYPE) {
     furnaceStates.delete(targetKey);
     if (state.activeFurnaceKey === targetKey) {
@@ -5928,6 +5973,29 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     return eatSelectedFood();
   }
 
+  // Wave F5: bucket — place fluid source block into targeted air cell.
+  // water_bucket → places water (id 15), lava_bucket → places lava (id 21).
+  if (slot.itemId === "water_bucket" || slot.itemId === "lava_bucket") {
+    const bucketFluidId = slot.itemId === "water_bucket" ? WATER_BLOCK_TYPE : LAVA_BLOCK_TYPE;
+    const bucketHit = hitTest(ndcX, ndcY);
+    if (!bucketHit) return false;
+    const bucketNormal = getWorldNormal(bucketHit);
+    if (!bucketNormal) return false;
+    const bucketCoords = toBlockCoords(bucketHit.point, bucketNormal, 1);
+    if (!world.inBounds(bucketCoords.x, bucketCoords.y, bucketCoords.z)) return false;
+    if (world.get(bucketCoords.x, bucketCoords.y, bucketCoords.z) !== 0) return false;
+    if (playerInsideBlock(bucketCoords.x, bucketCoords.y, bucketCoords.z)) return false;
+    world.set(bucketCoords.x, bucketCoords.y, bucketCoords.z, bucketFluidId);
+    fluidSim.placeSource(bucketCoords.x, bucketCoords.y, bucketCoords.z, bucketFluidId);
+    // Slot is always count:1 (NON_STACKABLE) — replace with empty bucket.
+    state.inventory[state.selectedSlot] = { itemId: "empty_bucket", count: 1 };
+    markInventoryPanelDirty();
+    markCraftPanelDirty();
+    state.recentAction = `Placed ${slot.itemId === "water_bucket" ? "water" : "lava"} source`;
+    viewmodel.triggerSwing();
+    return true;
+  }
+
   let placeType = getPlaceableBlockType(slot.itemId);
   if (!placeType) {
     state.recentAction = "Selected item not placeable";
@@ -5984,6 +6052,7 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
   world.set(coords.x, coords.y, coords.z, placeType);
+  fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid react to placed block
   if (FALLING_BLOCK_TYPES.has(placeType)) {
     const placedPos = world.toChunkPosition(coords.x, coords.z);
     const placedChunk = world.chunks.get(placedPos.key);
@@ -6232,6 +6301,7 @@ function triggerDamageFlash() {
 }
 
 function regenerateWorld() {
+  fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -6264,6 +6334,7 @@ function regenerateWorld() {
 async function createNewWorld() {
   const seed = randomSeed();
   world.setSeed(seed);
+  fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -6330,6 +6401,9 @@ function collectNearbyBlocks() {
 function updateSimulation(dtSeconds) {
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   const deltaMs = dtSeconds * 1000;
+
+  // Wave F5: advance fluid sim with milliseconds (fix #2/#11 — must be deltaMs, NOT dtSeconds).
+  fluidSim.tick(deltaMs);
 
   // Compute eyeInWater BEFORE updateDayNight so sky.update() and the fog override
   // both see the same value on the frame the eye enters or exits water.
@@ -7237,6 +7311,40 @@ window.render_game_to_text = () => {
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Wave F5 fluid debug hooks ---------------------------------------------------
+  // placeFluidSource(x,y,z,type) — "water"|"lava" or numeric id (15|21)
+  placeFluidSource: (x, y, z, type) => {
+    const idMap = { water: 15, lava: 21 };
+    const fluidId = typeof type === "string" ? (idMap[type] ?? null) : (type === 15 || type === 21 ? type : null);
+    if (fluidId === null) return `Unknown fluid type: ${type}. Use "water", "lava", 15, or 21.`;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, fluidId, false, false);
+    fluidSim.placeSource(bx, by, bz, fluidId);
+    return { placed: true, x: bx, y: by, z: bz, fluidId };
+  },
+  // getFluidAt(x,y,z) — returns fluid state at position (read-only getBlock for fluids)
+  getFluidAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const id = world.get(bx, by, bz);
+    if (id !== 15 && id !== 21) return null;
+    const info = fluidSim.fluidLevels.get(`${bx},${by},${bz}`);
+    const isSource = !info;
+    return { id, isSource, level: isSource ? null : info.level, falling: isSource ? false : info.falling };
+  },
+  // stepFluidSim(n) — run n deterministic ticks immediately (ignores accumulator cadence)
+  stepFluidSim: (n = 1) => {
+    const steps = Math.max(1, Math.floor(Number(n) || 1));
+    for (let i = 0; i < steps; i++) {
+      for (const [fluidId, def] of Object.entries({ 15: { maxLevel: 7, tickMs: 250 }, 21: { maxLevel: 3, tickMs: 500 } })) {
+        fluidSim._runTick(Number(fluidId), def);
+      }
+    }
+    return { steps, fluidCellCount: fluidSim.fluidLevels.size, activeFluidCount: fluidSim._active[15].size + fluidSim._active[21].size };
+  },
+  // fluidCellCount() — total flowing cells in fluidLevels
+  fluidCellCount: () => fluidSim.fluidLevels.size,
+  // activeFluidCount() — cells pending evaluation in the active set
+  activeFluidCount: () => fluidSim._active[15].size + fluidSim._active[21].size,
   // Graphics-C viewmodel debug
   triggerViewmodelSwing: () => viewmodel.triggerSwing(),
   // Graphics-B weather debug

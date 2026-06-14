@@ -83,6 +83,17 @@ export function hasDurability(itemId) {
 }
 
 // ---------------------------------------------------------------------------
+// Wave F5 — non-stackable items (not tools; handled separately from durability)
+// ---------------------------------------------------------------------------
+// Buckets must never stack: filling one out of a stack of N would silently destroy N-1.
+// We route these through the one-per-slot branch in addItemToInventory / transferInventoryStack.
+export const NON_STACKABLE = new Set([
+  "empty_bucket",
+  "water_bucket",
+  "lava_bucket",
+]);
+
+// ---------------------------------------------------------------------------
 // Wave 10 — Armor slots
 // ---------------------------------------------------------------------------
 export const ARMOR_SLOTS = ["head", "chest", "legs", "feet"];
@@ -157,6 +168,10 @@ export const ITEM_DEFS = {
   glass: { id: "glass", name: "Glass", placeBlockType: 14 },
   // Wave 5 — water is not placeable or obtainable by the player (bucket later)
   water: { id: "water", name: "Water" },
+  // Wave F5 — buckets (non-stackable; one per slot; fill/empty via right-click on fluid)
+  empty_bucket: { id: "empty_bucket", name: "Empty Bucket" },
+  water_bucket: { id: "water_bucket", name: "Water Bucket" },
+  lava_bucket:  { id: "lava_bucket",  name: "Lava Bucket"  },
   // Wave 10 — chest block
   chest: { id: "chest", name: "Chest", placeBlockType: 22 },
   plank: { id: "plank", name: "Plank" },
@@ -1047,6 +1062,16 @@ export const RECIPES = [
     output: { itemId: "wood_stairs", count: 4 },
     requiresWorkbench: true,
   },
+  // Wave F5 — bucket (3 iron ingots in a U-shape: bottom row + left + right of middle row)
+  {
+    id: "empty_bucket",
+    name: "Bucket",
+    pattern: ["_X_", "X_X", "_X_"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 3 }],
+    output: { itemId: "empty_bucket", count: 1 },
+    requiresWorkbench: true,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -1162,6 +1187,18 @@ export function addItemToInventory(inventory, itemId, count) {
     return remaining;
   }
 
+  // Wave F5: non-stackable items (buckets) — one per slot, count always 1.
+  if (NON_STACKABLE.has(itemId)) {
+    for (let i = 0; i < inventory.length && remaining > 0; i += 1) {
+      if (inventory[i]) {
+        continue;
+      }
+      inventory[i] = { itemId, count: 1 };
+      remaining -= 1;
+    }
+    return remaining;
+  }
+
   for (let i = 0; i < inventory.length && remaining > 0; i += 1) {
     const slot = inventory[i];
     if (!slot || slot.itemId !== itemId || slot.count >= MAX_STACK) {
@@ -1261,8 +1298,8 @@ export function transferInventoryStack(inventory, fromIndex, toIndex) {
     return true;
   }
 
-  // Tools with durability never merge — only swap.
-  if (!hasDurability(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
+  // Tools with durability and non-stackable items (buckets) never merge — only swap.
+  if (!hasDurability(fromSlot.itemId) && !NON_STACKABLE.has(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
     const moved = Math.min(MAX_STACK - toSlot.count, fromSlot.count);
     if (moved <= 0) {
       return false;
