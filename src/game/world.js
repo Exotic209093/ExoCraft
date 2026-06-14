@@ -132,17 +132,19 @@ function buildFaceAoNeighbours() {
 }
 
 // Light-emission levels per block type.
-// Torch = strong block light, copper ore = faint ambient glow.
+// Torch = strong block light, copper ore = faint ambient glow, lava = very bright.
 const BLOCK_LIGHT_EMIT = {
-  8: 14,  // torch
-  9: 3,   // copper ore
+  8:  14, // torch
+  9:   3, // copper ore
+  21: 15, // lava — max blocklight (Wave 8)
 };
 
 // Block types that allow light (sky + block) to propagate through them.
 // Air (0) is always passable; any id in this set is also passable.
-// Water passes light so underwater areas aren't pitch black by day.
+// Water and lava pass light so deep cave areas near lava aren't fully dark by blocklight BFS.
 const LIGHT_PASSABLE = new Set([
   15, // water
+  21, // lava (Wave 8) — light propagates through lava itself
 ]);
 
 function toChunkKey(cx, cz) {
@@ -272,10 +274,26 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   });
   applyLightingShaderPatch(waterMaterial);
 
+  // Wave 8: lava material — opaque orange-glow fluid, emissive so it glows even in dark caves.
+  // Treated as its own transparent buffer (class 3) but is visually fully opaque from the tile;
+  // depthWrite true keeps it occluding geometry correctly.
+  const lavaMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: false,
+    opacity: 1.0,
+    depthWrite: true,
+    vertexColors: true,
+    emissive: new THREE.Color(0xff3300),
+    emissiveMap: atlasTexture,
+    emissiveIntensity: 0.85,
+  });
+  applyLightingShaderPatch(lavaMaterial);
+
   // Block id -> material override for blocks that need a specific material
   // beyond what their transparency class dictates (water differs from glass).
   const BLOCK_MATERIAL_OVERRIDE = {
     15: waterMaterial, // water uses its own material, not the shared glassMaterial
+    21: lavaMaterial,  // lava uses its own emissive material (Wave 8)
   };
 
   const materials = new Map();
@@ -306,8 +324,9 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   const leafMat = alphaCutoutMaterial;
   const glassMat = glassMaterial;
   const waterMat = waterMaterial;
+  const lavaMat  = lavaMaterial;
 
-  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat };
+  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat };
 }
 
 // ---------------------------------------------------------------------------
@@ -618,6 +637,77 @@ export class VoxelWorld {
     return oreField >= caveOreThreshold;
   }
 
+  /**
+   * Wave 8 ore ladder: deterministic, depth-banded ore placement.
+   * Returns the ore block type id (9=copper, 16=coal, 17=iron, 18=gold, 19=diamond, 20=redstone)
+   * or 0 for no ore.
+   *
+   * Depth bands (absolute Y in a world with surface ~Y48, seaLevel=38):
+   *   Y 20–44: coal   (shallow, common)
+   *   Y 14–32: iron   (mid depth)
+   *   Y  8–22: gold   (deep)
+   *   Y  4–18: redstone (deep, slightly shallower than diamond)
+   *   Y  2–14: diamond (deepest, rarest)
+   *   copper stays in its existing band (Y <= caveOreCeilingY=70) — untouched.
+   *
+   * Uses a separate noise field per ore type (different offsets) so veins don't
+   * cluster in the exact same spots.
+   */
+  oreAt(worldX, y, worldZ) {
+    const g = this.generation;
+    const freq = Number.isFinite(g.oreFrequency) ? g.oreFrequency : 0.22;
+
+    // Each ore type samples the same noise frequency but with unique coordinate offsets.
+    // This makes veins spatially independent while sharing the same BFS-friendly pattern.
+
+    // Coal ore: Y 20–44, common
+    if (y >= 20 && y <= 44) {
+      const threshold = Number.isFinite(g.coalOreThreshold) ? g.coalOreThreshold : 0.930;
+      const field =
+        this.noise3(worldX * freq + 7.1,  y * freq * 1.4 + 0.3,  worldZ * freq - 5.7)  * 0.7 +
+        this.noise2(worldX * 0.41 + y * 0.11, worldZ * 0.37 - y * 0.13) * 0.3;
+      if (field >= threshold) return 16;
+    }
+
+    // Iron ore: Y 14–32
+    if (y >= 14 && y <= 32) {
+      const threshold = Number.isFinite(g.ironOreThreshold) ? g.ironOreThreshold : 0.945;
+      const field =
+        this.noise3(worldX * freq - 13.3, y * freq * 1.6 + 2.9,  worldZ * freq + 17.1) * 0.7 +
+        this.noise2(worldX * 0.29 - y * 0.17, worldZ * 0.43 + y * 0.09) * 0.3;
+      if (field >= threshold) return 17;
+    }
+
+    // Gold ore: Y 8–22
+    if (y >= 8 && y <= 22) {
+      const threshold = Number.isFinite(g.goldOreThreshold) ? g.goldOreThreshold : 0.956;
+      const field =
+        this.noise3(worldX * freq + 41.7, y * freq * 1.8 - 3.1,  worldZ * freq + 8.5)  * 0.7 +
+        this.noise2(worldX * 0.53 + y * 0.21, worldZ * 0.31 + y * 0.15) * 0.3;
+      if (field >= threshold) return 18;
+    }
+
+    // Redstone ore: Y 4–18
+    if (y >= 4 && y <= 18) {
+      const threshold = Number.isFinite(g.redstoneOreThreshold) ? g.redstoneOreThreshold : 0.958;
+      const field =
+        this.noise3(worldX * freq - 22.4, y * freq * 2.1 + 5.7,  worldZ * freq - 14.3) * 0.7 +
+        this.noise2(worldX * 0.47 - y * 0.23, worldZ * 0.37 - y * 0.19) * 0.3;
+      if (field >= threshold) return 20;
+    }
+
+    // Diamond ore: Y 2–14, rarest
+    if (y >= 2 && y <= 14) {
+      const threshold = Number.isFinite(g.diamondOreThreshold) ? g.diamondOreThreshold : 0.968;
+      const field =
+        this.noise3(worldX * freq + 61.9, y * freq * 2.4 - 7.3,  worldZ * freq + 33.8) * 0.7 +
+        this.noise2(worldX * 0.61 + y * 0.27, worldZ * 0.53 - y * 0.31) * 0.3;
+      if (field >= threshold) return 19;
+    }
+
+    return 0;
+  }
+
   proceduralBlockTypeAt(worldX, y, worldZ) {
     if (!this.isWithinVerticalBounds(y)) {
       return 0;
@@ -645,16 +735,30 @@ export class VoxelWorld {
 
       if (baseType === 3) {
         if (this.isCavePocketAir(worldX, y, worldZ, topY)) {
+          // Wave 8: deep air pockets at or below lavaLevel become lava.
+          const lavaLevel = Number.isFinite(g.lavaLevel) ? g.lavaLevel : 16;
+          if (y <= lavaLevel) {
+            return 21; // LAVA
+          }
           return 0;
         }
 
+        // Surface copper ore nodes (unchanged — objective system depends on these).
         const surfaceOreDepth = Number.isFinite(g.surfaceOreDepth) ? Math.max(1, Math.floor(g.surfaceOreDepth)) : 3;
         const surfaceDepth = topY - y;
         if (surfaceDepth >= 1 && surfaceDepth <= surfaceOreDepth && this.hasSurfaceOreNode(worldX, worldZ)) {
-          return 9;
+          return 9; // copper ore surface node
         }
+
+        // Cave-embedded copper (existing isCaveOre band: Y <= 70, unchanged).
         if (this.isCaveOre(worldX, y, worldZ)) {
-          return 9;
+          return 9; // copper ore cave vein
+        }
+
+        // Wave 8 ore ladder: coal/iron/gold/diamond/redstone in depth bands below copper.
+        const ladderOre = this.oreAt(worldX, y, worldZ);
+        if (ladderOre !== 0) {
+          return ladderOre;
         }
       }
 
@@ -1218,7 +1322,7 @@ export class VoxelWorld {
     const lIndex = (lx, ly, lz) => lx + S * (lz + S * ly);
 
     // Geometry buffers for opaque and transparent faces.
-    // We keep leaves, glass, and water separate because they need different material params.
+    // We keep leaves, glass, water, and lava separate because they need different material params.
     const opaquePos  = [];
     const opaqueNorm = [];
     const opaqueUv   = [];
@@ -1239,6 +1343,12 @@ export class VoxelWorld {
     const waterUv    = [];
     const waterCol   = [];
     const waterIdx   = [];
+    // Wave 8: lava — own buffer (tclass=3), rendered after water.
+    const lavaPos    = [];
+    const lavaNorm   = [];
+    const lavaUv     = [];
+    const lavaCol    = [];
+    const lavaIdx    = [];
 
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
@@ -1253,8 +1363,12 @@ export class VoxelWorld {
           // Pick which buffer set to push into.
           // Water (id 15) gets its own buffer even though it's also tclass=2,
           // so it renders on top of glass with its own material.
+          // Lava (id 21, tclass=3) gets its own buffer after water.
           let posArr, normArr, uvArr, colArr, idxArr;
-          if (blockType === 15) {
+          if (blockType === 21) {
+            posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
+            colArr  = lavaCol;   idxArr  = lavaIdx;
+          } else if (blockType === 15) {
             posArr  = waterPos;  normArr = waterNorm; uvArr = waterUv;
             colArr  = waterCol;  idxArr  = waterIdx;
           } else if (tclass === 2) {
@@ -1426,12 +1540,22 @@ export class VoxelWorld {
       this.meshGroup.add(mesh);
     }
 
-    // Water rendered last (renderOrder 3) — after all other transparent geometry.
+    // Water rendered after glass (renderOrder 3).
     const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterIdx);
     if (waterGeo) {
       const mesh = new THREE.Mesh(waterGeo, mats.water);
       mesh.renderOrder = 3;
       mesh.userData.isWater = true;
+      chunk.meshes.push(mesh);
+      this.meshGroup.add(mesh);
+    }
+
+    // Wave 8: lava rendered after water (renderOrder 4) with its own emissive material.
+    const lavaGeo = makeGeometry(lavaPos, lavaNorm, lavaUv, lavaCol, lavaIdx);
+    if (lavaGeo) {
+      const mesh = new THREE.Mesh(lavaGeo, mats.lava);
+      mesh.renderOrder = 4;
+      mesh.userData.isLava = true;
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }

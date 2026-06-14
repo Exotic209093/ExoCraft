@@ -35,6 +35,9 @@ import {
   decrementDurability,
   hasDurability,
   TOOL_MAX_DURABILITY,
+  // Wave 8 — harvest-level gating
+  ORE_HARVEST_LEVEL,
+  getToolTier,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
@@ -67,6 +70,13 @@ const BEDROCK_BLOCK_TYPE = 13;
 const GLASS_BLOCK_TYPE = 14;
 // Wave 5 block type ids
 const WATER_BLOCK_TYPE = 15;
+// Wave 8 block type ids
+const COAL_ORE_BLOCK_TYPE     = 16;
+const IRON_ORE_BLOCK_TYPE     = 17;
+const GOLD_ORE_BLOCK_TYPE     = 18;
+const DIAMOND_ORE_BLOCK_TYPE  = 19;
+const REDSTONE_ORE_BLOCK_TYPE = 20;
+const LAVA_BLOCK_TYPE         = 21;
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -143,6 +153,14 @@ const nightSkyColor = new THREE.Color(0x10182a);
 const underwaterFogColor = new THREE.Color(0x0a3a7a);
 const UNDERWATER_FOG_NEAR = 2;
 const UNDERWATER_FOG_FAR  = 16;
+// Wave 8: lava fog — orange-red tint, very short visibility.
+const lavaFogColor = new THREE.Color(0x8b1a00);
+const LAVA_FOG_NEAR = 0.5;
+const LAVA_FOG_FAR  = 4;
+// Lava damage: 2 HP per second (4× lava ticks per second at 60fps).
+const LAVA_DAMAGE_PER_SECOND = 2;
+// Accumulator for lava damage (fractional damage per tick).
+let lavaAccumSec = 0;
 const dayGroundColor = new THREE.Color(lightingConfig.hemisphere.groundColor);
 const nightGroundColor = new THREE.Color(0x1b2029);
 const daySunColor = new THREE.Color(lightingConfig.sun.color);
@@ -549,6 +567,9 @@ const state = {
   // Wave 5: water submersion state
   inWater: false,       // true when player body (torso/feet) is in water
   eyeInWater: false,    // true when the camera eye voxel is water
+  // Wave 8: lava submersion state
+  inLava: false,        // true when player body is in lava
+  eyeInLava: false,     // true when the camera eye voxel is lava
 };
 
 // Automation runs should advance only through window.advanceTime().
@@ -3755,7 +3776,8 @@ async function loadGame() {
 
 function hitTest(ndcX = 0, ndcY = 0, maxDistance = worldConfig.maxReach) {
   raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
-  const solidMeshes = world.meshGroup.children.filter(m => !m.userData.isWater);
+  // Exclude water and lava from raycast — neither can be targeted/broken by the player.
+  const solidMeshes = world.meshGroup.children.filter(m => !m.userData.isWater && !m.userData.isLava);
   const hits = raycaster.intersectObjects(solidMeshes, false);
   for (const hit of hits) {
     if (hit.distance <= maxDistance) {
@@ -3784,7 +3806,7 @@ function updateTargetBlockFromCenter() {
 
   const coords = toBlockCoords(hit.point, normal, -1);
   const type = world.get(coords.x, coords.y, coords.z);
-  if (type === 0 || type === WATER_BLOCK_TYPE) {
+  if (type === 0 || type === WATER_BLOCK_TYPE || type === LAVA_BLOCK_TYPE) {
     state.targetBlock = null;
     targetOutline.visible = false;
     hideCrackOverlay();
@@ -3829,7 +3851,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
   const type = world.get(coords.x, coords.y, coords.z);
-  if (type === 0 || type === WATER_BLOCK_TYPE || coords.y === 0 || type === BEDROCK_BLOCK_TYPE) {
+  if (type === 0 || type === WATER_BLOCK_TYPE || type === LAVA_BLOCK_TYPE || coords.y === 0 || type === BEDROCK_BLOCK_TYPE) {
     state.breakProgress.targetKey = null;
     state.breakProgress.amount = 0;
     return false;
@@ -3877,7 +3899,13 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     markInventoryPanelDirty();
   }
 
-  const dropItemId = getBlockDropItem(type);
+  // Wave 8: harvest-level gating. If the block has a minimum tier requirement and the
+  // held tool is below that tier, suppress the drop (block breaks but yields nothing).
+  const requiredTier = ORE_HARVEST_LEVEL[type];
+  const heldTier = getToolTier(heldItemId);
+  const dropSuppressed = requiredTier !== undefined && heldTier < requiredTier;
+
+  const dropItemId = dropSuppressed ? null : getBlockDropItem(type);
   if (dropItemId) {
     const leftover = addItemToInventory(state.inventory, dropItemId, 1);
     if (leftover > 0) {
@@ -3887,6 +3915,8 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     }
     markCraftPanelDirty();
     markInventoryPanelDirty();
+  } else if (dropSuppressed) {
+    state.recentAction = `Need better tool for ${blockName(type)}`;
   } else if (!toolBroke) {
     state.recentAction = `Broke ${blockName(type)}`;
   }
@@ -4317,8 +4347,8 @@ function updateSimulation(dtSeconds) {
   const rightZ = -sinYaw;
   const moveSpeed = getCurrentMoveSpeed();
 
-  // --- Water submersion test ---
-  // Sample the block at the player's body center (waist) and eye to detect water.
+  // --- Water / lava submersion test ---
+  // Sample the block at the player's body center (waist) and eye to detect water or lava.
   const bodyTestY  = Math.floor(state.playerPos.y + playerConfig.height * 0.4);
   const eyeTestX   = Math.floor(state.playerPos.x);
   const eyeTestY   = Math.floor(state.playerPos.y + playerConfig.eyeHeight);
@@ -4327,6 +4357,9 @@ function updateSimulation(dtSeconds) {
   const eyeBlock   = world.get(eyeTestX, eyeTestY,  eyeTestZ);
   state.inWater    = bodyBlock === WATER_BLOCK_TYPE;
   state.eyeInWater = eyeBlock  === WATER_BLOCK_TYPE;
+  // Wave 8: lava submersion (body in lava = damage + slow; eye in lava = orange fog).
+  state.inLava     = bodyBlock === LAVA_BLOCK_TYPE;
+  state.eyeInLava  = eyeBlock  === LAVA_BLOCK_TYPE;
 
   // Water movement constants
   const WATER_SWIM_SPEED        = moveSpeed * 0.55;
@@ -4386,9 +4419,11 @@ function updateSimulation(dtSeconds) {
       state.playerVel.y = 0;
     }
   } else {
-    // --- ON LAND: original physics (unchanged) ---
-    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
-    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * moveSpeed;
+    // --- ON LAND (or in lava): original physics with lava slowdown ---
+    // Wave 8: lava halves movement speed (same as Minecraft's lava drag).
+    const effectiveMoveSpeed = state.inLava ? moveSpeed * 0.5 : moveSpeed;
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * effectiveMoveSpeed;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * effectiveMoveSpeed;
     state.playerVel.y += playerConfig.gravity * dtSeconds;
     const wasOnGround = state.onGround;
     const impactVelocityY = state.playerVel.y;
@@ -4454,11 +4489,16 @@ function updateSimulation(dtSeconds) {
     }
   }
 
-  // --- Underwater fog override ---
-  // updateDayNight already set scene.fog to the sky/night color. If the camera eye
-  // is inside water, override fog to a deep-blue tint and pull the draw distance in.
-  // Restore normal fog as soon as the eye leaves water.
-  if (state.eyeInWater) {
+  // --- Underwater / lava fog override ---
+  // updateDayNight already set scene.fog to the sky/night color. Override when the camera
+  // eye is inside water (deep blue) or lava (orange-red). Lava takes priority over water.
+  if (state.eyeInLava) {
+    // Wave 8: lava fog — very short visibility with orange-red tint.
+    scene.fog.color.copy(lavaFogColor);
+    scene.fog.near = LAVA_FOG_NEAR;
+    scene.fog.far  = LAVA_FOG_FAR;
+    scene.background.copy(lavaFogColor);
+  } else if (state.eyeInWater) {
     scene.fog.color.copy(underwaterFogColor);
     scene.fog.near = UNDERWATER_FOG_NEAR;
     scene.fog.far  = UNDERWATER_FOG_FAR;
@@ -4467,6 +4507,19 @@ function updateSimulation(dtSeconds) {
     // Restore normal fog distances (color was already set by updateDayNight).
     scene.fog.near = renderConfig.fogNear;
     scene.fog.far  = renderConfig.fogFar;
+  }
+
+  // Wave 8: lava damage — 2 HP/s when the player body is in lava.
+  if (state.inLava && state.mode === "playing") {
+    lavaAccumSec += dtSeconds;
+    if (lavaAccumSec >= 0.5) {
+      // Deliver damage in 0.5-second chunks so it feels punchy even at low frame rates.
+      const chunks = Math.floor(lavaAccumSec / 0.5);
+      takeDamage(LAVA_DAMAGE_PER_SECOND * 0.5 * chunks, "lava");
+      lavaAccumSec -= chunks * 0.5;
+    }
+  } else {
+    lavaAccumSec = 0;
   }
 
   // FOV lerp toward sprint target. Fast enough to feel responsive but not snappy.
@@ -4696,6 +4749,8 @@ window.render_game_to_text = () => {
       onGround: state.onGround,
       inWater: state.inWater,
       eyeInWater: state.eyeInWater,
+      inLava: state.inLava,
+      eyeInLava: state.eyeInLava,
       health: Number(state.health.toFixed(2)),
       maxHealth: state.maxHealth,
       hunger: Number(state.hunger.toFixed(2)),

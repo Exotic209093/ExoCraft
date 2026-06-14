@@ -33,6 +33,13 @@ const TILE = {
   glass:           [4, 1],
   // Wave 5
   water:           [5, 1],
+  // Wave 8 — ore tiles (rows 2-4, cols 5-7 + row 4)
+  coal_ore:        [6, 1],
+  iron_ore:        [7, 1],
+  gold_ore:        [5, 2],
+  diamond_ore:     [6, 2],
+  redstone_ore:    [7, 2],
+  lava:            [5, 3],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -68,6 +75,14 @@ export const BLOCK_FACE_TILES = {
   14: { px: "glass", nx: "glass", py: "glass", ny: "glass", pz: "glass", nz: "glass" },
   // Water: same tile on all faces.
   15: { px: "water", nx: "water", py: "water", ny: "water", pz: "water", nz: "water" },
+  // Wave 8 ores — stone base with colored speckles.
+  16: { px: "coal_ore",     nx: "coal_ore",     py: "coal_ore",     ny: "coal_ore",     pz: "coal_ore",     nz: "coal_ore"     },
+  17: { px: "iron_ore",     nx: "iron_ore",     py: "iron_ore",     ny: "iron_ore",     pz: "iron_ore",     nz: "iron_ore"     },
+  18: { px: "gold_ore",     nx: "gold_ore",     py: "gold_ore",     ny: "gold_ore",     pz: "gold_ore",     nz: "gold_ore"     },
+  19: { px: "diamond_ore",  nx: "diamond_ore",  py: "diamond_ore",  ny: "diamond_ore",  pz: "diamond_ore",  nz: "diamond_ore"  },
+  20: { px: "redstone_ore", nx: "redstone_ore", py: "redstone_ore", ny: "redstone_ore", pz: "redstone_ore", nz: "redstone_ore" },
+  // Wave 8 lava.
+  21: { px: "lava",         nx: "lava",         py: "lava",         ny: "lava",         pz: "lava",         nz: "lava"         },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -506,6 +521,77 @@ function paintWater(ctx, col, row) {
   }
 }
 
+// Generic ore tile: stone base + colored speckles.
+// speckR/G/B define the ore vein color; highlightBoost brightens bright speckles.
+function paintOre(ctx, col, row, speckR, speckG, speckB, salt) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 4);
+      const ore = pixelNoise(x, y, salt);
+      let r;
+      let g;
+      let b;
+      if (ore > 0.76) {
+        // Ore speckle: bright vein pixel.
+        const bright = ore > 0.91;
+        r = speckR + (bright ? 28 : 0);
+        g = speckG + (bright ? 20 : 0);
+        b = speckB + (bright ? 14 : 0);
+      } else {
+        // Stone base (same as paintStone).
+        let v = 150;
+        if (n < 0.18) v = 116;
+        else if (n < 0.45) v = 138;
+        else if (n > 0.85) v = 168;
+        r = v;
+        g = v + 2;
+        b = v + 6;
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintCoalOre(ctx, col, row) {
+  paintOre(ctx, col, row, 42, 40, 42, 40);
+}
+
+function paintIronOre(ctx, col, row) {
+  paintOre(ctx, col, row, 200, 158, 118, 41);
+}
+
+function paintGoldOre(ctx, col, row) {
+  paintOre(ctx, col, row, 232, 200, 48, 42);
+}
+
+function paintDiamondOre(ctx, col, row) {
+  paintOre(ctx, col, row, 64, 224, 208, 43);
+}
+
+function paintRedstoneOre(ctx, col, row) {
+  paintOre(ctx, col, row, 192, 28, 28, 44);
+}
+
+function paintLava(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      // Hot diagonal wave pattern: bright orange-yellow crests, dark red-black troughs.
+      const wave = Math.sin((x - y) * 0.8 + 0.5) * 0.5 + 0.5;
+      const n = pixelNoise(x, y, 50);
+      const n2 = pixelNoise(x + 3, y + 7, 51);
+      // Dark molten red base; brighter "hot spots" near crests.
+      const r = Math.min(255, 180 + Math.floor(wave * 70) + (n > 0.82 ? 20 : 0));
+      const g = Math.min(255,  40 + Math.floor(wave * 90) + (n > 0.82 ? 30 : 0));
+      const b = (n2 < 0.08) ? 12 : 0;
+      // Fully opaque — lava blocks light rather than lets it through.
+      ctx.fillStyle = `rgba(${r},${g},${b},255)`;
+      ctx.fillRect(ox + x, oy + y, 1, 1);
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -531,6 +617,13 @@ function paintAtlas(ctx) {
   paintGlass(ctx, ...TILE.glass);
   // Wave 5
   paintWater(ctx, ...TILE.water);
+  // Wave 8 — ore ladder + lava
+  paintCoalOre(ctx,     ...TILE.coal_ore);
+  paintIronOre(ctx,     ...TILE.iron_ore);
+  paintGoldOre(ctx,     ...TILE.gold_ore);
+  paintDiamondOre(ctx,  ...TILE.diamond_ore);
+  paintRedstoneOre(ctx, ...TILE.redstone_ore);
+  paintLava(ctx,        ...TILE.lava);
 }
 
 export function createAtlasTexture() {
@@ -579,6 +672,9 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   5:  1, // leaves — alpha cutout
   14: 2, // glass — full transparent
   15: 2, // water — full transparent (water-water faces culled; water-air/solid faces emitted)
+  // Wave 8: lava — own buffer (class 3). Lava-lava faces culled; lava-air/solid faces rendered.
+  // Class 3 is numerically distinct so lava-water faces are NOT culled (they border each other).
+  21: 3,
 };
 
 // ----- Item icon canvases -----
@@ -625,6 +721,26 @@ const ITEM_CHIP_COLORS = {
   glass:              "#b4dcf8",
   // Wave 5
   water:              "#2b6ccc",
+  // Wave 8 — ore items + ingots/gems
+  coal_ore:           "#4a4a52",
+  iron_ore:           "#c4a07a",
+  gold_ore:           "#e8c840",
+  diamond_ore:        "#50e8d8",
+  redstone_ore:       "#c02020",
+  coal:               "#2a2a2e",
+  iron_ingot:         "#d4c0a8",
+  gold_ingot:         "#f0d040",
+  diamond:            "#60f0e0",
+  redstone:           "#e03030",
+  // Wave 8 — new tool tiers
+  iron_pickaxe:       "#d4c0a8",
+  iron_axe:           "#d4c0a8",
+  iron_shovel:        "#d4c0a8",
+  iron_sword:         "#d4c0a8",
+  diamond_pickaxe:    "#60f0e0",
+  diamond_axe:        "#60f0e0",
+  diamond_shovel:     "#60f0e0",
+  diamond_sword:      "#60f0e0",
 };
 
 const ICON_SIZE = 32;

@@ -35,6 +35,14 @@ const DEFAULT_GAME_CONFIG = {
       { id: 14, name: "Glass", color: 0xb4dcf8, transparent: true },
       // Wave 5
       { id: 15, name: "Water", color: 0x2b6ccc, transparent: true },
+      // Wave 8 — ore ladder
+      { id: 16, name: "Coal Ore",     color: 0x4a4a52 },
+      { id: 17, name: "Iron Ore",     color: 0xc4a07a },
+      { id: 18, name: "Gold Ore",     color: 0xe8c840 },
+      { id: 19, name: "Diamond Ore",  color: 0x50e8d8 },
+      { id: 20, name: "Redstone Ore", color: 0xc02020 },
+      // Wave 8 — lava (emissive fluid)
+      { id: 21, name: "Lava", color: 0xff6600, transparent: true, emissive: 0xff3300, emissiveIntensity: 0.9 },
     ],
     generation: {
       seed: 1337,
@@ -94,6 +102,22 @@ const DEFAULT_GAME_CONFIG = {
       caveOreCeilingY: 70,
       caveOreThreshold: 0.942,
       caveOreFrequency: 0.19,
+
+      // --- Wave 8: ore ladder depth bands ---
+      // oreFrequency: noise sampling frequency for the ore vein field
+      oreFrequency: 0.22,
+      // Per-ore threshold (noise must exceed this to place an ore vein voxel).
+      // Higher threshold = rarer veins.
+      coalOreThreshold:     0.930,  // shallow & common
+      ironOreThreshold:     0.945,
+      goldOreThreshold:     0.956,
+      redstoneOreThreshold: 0.958,
+      diamondOreThreshold:  0.968,  // deepest & rarest
+
+      // --- Wave 8: lava ---
+      // Air pockets at or below this Y in the cave zone fill with lava.
+      // seaLevel=38, so Y=16 puts lava safely in the deep underground only.
+      lavaLevel: 16,
     },
   },
   player: {

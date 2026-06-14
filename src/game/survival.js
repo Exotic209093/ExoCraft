@@ -20,6 +20,61 @@ export const TOOL_MAX_DURABILITY = {
   bone_blade: 220,
   vanguard_blade: 350,
   deep_delver_pickaxe: 400,
+  // Wave 8 — iron tier
+  iron_pickaxe:  251,
+  iron_axe:      251,
+  iron_shovel:   251,
+  iron_sword:    251,
+  // Wave 8 — diamond tier
+  diamond_pickaxe: 1562,
+  diamond_axe:     1562,
+  diamond_shovel:  1562,
+  diamond_sword:   1562,
+};
+
+// ---------------------------------------------------------------------------
+// Tool tier ladder (Wave 8).
+// Numeric tier: 0=hand, 1=wood, 2=stone, 3=copper, 4=iron, 5=diamond.
+// ---------------------------------------------------------------------------
+export const TOOL_TIER = {
+  wood_pickaxe:        1,
+  wood_axe:            1,
+  wood_shovel:         1,
+  wood_sword:          1,
+  stone_pickaxe:       2,
+  stone_axe:           2,
+  stone_shovel:        2,
+  reinforced_pickaxe:  2,
+  copper_pickaxe:      3,
+  copper_blade:        3,
+  deep_delver_pickaxe: 3,
+  iron_pickaxe:        4,
+  iron_axe:            4,
+  iron_shovel:         4,
+  iron_sword:          4,
+  diamond_pickaxe:     5,
+  diamond_axe:         5,
+  diamond_shovel:      5,
+  diamond_sword:       5,
+};
+
+/**
+ * Returns the numeric tier (0–5) of the held tool; 0 = bare hand.
+ */
+export function getToolTier(itemId) {
+  if (!itemId) return 0;
+  return TOOL_TIER[itemId] || 0;
+}
+
+// Minimum tool tier required to get a DROP from each ore block.
+// Mining with a lower tier still breaks the block, but yields nothing (Minecraft harvest-level rule).
+// blockType -> required tier
+export const ORE_HARVEST_LEVEL = {
+  16: 1,  // coal ore     — wood+
+  17: 2,  // iron ore     — stone+ (tier 2)
+  18: 4,  // gold ore     — iron+  (tier 4)
+  19: 4,  // diamond ore  — iron+
+  20: 4,  // redstone ore — iron+
 };
 
 /** Returns true when this item has durability (i.e. is a tool/weapon). */
@@ -71,6 +126,28 @@ export const ITEM_DEFS = {
   stone_shovel: { id: "stone_shovel", name: "Stone Shovel", toolKind: "shovel", toolPower: 3.4 },
   reinforced_pickaxe: { id: "reinforced_pickaxe", name: "Reinforced Pickaxe", toolKind: "pickaxe", toolPower: 4.5 },
   copper_pickaxe: { id: "copper_pickaxe", name: "Copper Pickaxe", toolKind: "pickaxe", toolPower: 5.4 },
+  // Wave 8 — ore block items
+  coal_ore:     { id: "coal_ore",     name: "Coal Ore",     placeBlockType: 16 },
+  iron_ore:     { id: "iron_ore",     name: "Iron Ore",     placeBlockType: 17 },
+  gold_ore:     { id: "gold_ore",     name: "Gold Ore",     placeBlockType: 18 },
+  diamond_ore:  { id: "diamond_ore",  name: "Diamond Ore",  placeBlockType: 19 },
+  redstone_ore: { id: "redstone_ore", name: "Redstone Ore", placeBlockType: 20 },
+  // Wave 8 — ingots / gems / raw materials
+  coal:         { id: "coal",         name: "Coal" },
+  iron_ingot:   { id: "iron_ingot",   name: "Iron Ingot" },
+  gold_ingot:   { id: "gold_ingot",   name: "Gold Ingot" },
+  diamond:      { id: "diamond",      name: "Diamond" },
+  redstone:     { id: "redstone",     name: "Redstone Dust" },
+  // Wave 8 — iron tools
+  iron_pickaxe: { id: "iron_pickaxe", name: "Iron Pickaxe", toolKind: "pickaxe", toolPower: 6.8 },
+  iron_axe:     { id: "iron_axe",     name: "Iron Axe",     toolKind: "axe",     toolPower: 6.8 },
+  iron_shovel:  { id: "iron_shovel",  name: "Iron Shovel",  toolKind: "shovel",  toolPower: 6.8 },
+  iron_sword:   { id: "iron_sword",   name: "Iron Sword",   mobDamage: 10 },
+  // Wave 8 — diamond tools
+  diamond_pickaxe: { id: "diamond_pickaxe", name: "Diamond Pickaxe", toolKind: "pickaxe", toolPower: 9.2 },
+  diamond_axe:     { id: "diamond_axe",     name: "Diamond Axe",     toolKind: "axe",     toolPower: 9.2 },
+  diamond_shovel:  { id: "diamond_shovel",  name: "Diamond Shovel",  toolKind: "shovel",  toolPower: 9.2 },
+  diamond_sword:   { id: "diamond_sword",   name: "Diamond Sword",   mobDamage: 14 },
 };
 
 export const BLOCK_DROPS = {
@@ -89,7 +166,14 @@ export const BLOCK_DROPS = {
   12: "gravel",
   // 13 = bedrock: no drop (handled by breakBlock guard)
   14: "glass",
-  // 15 = water: no drop (bucket mechanic deferred to wave 8)
+  // 15 = water: no drop (bucket mechanic deferred)
+  // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
+  16: "coal",        // coal ore → coal directly (no smelting needed)
+  17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
+  18: "gold_ore",    // gold ore → gold ore item → smelt for ingot
+  19: "diamond",     // diamond ore → diamond gem directly
+  20: "redstone",    // redstone ore → redstone dust directly
+  // 21 = lava: no drop
 };
 
 /**
@@ -139,6 +223,13 @@ const BLOCK_HARDNESS = {
   13: Infinity, // bedrock — unbreakable
   14: 1.2,  // glass — fist or any tool
   15: Infinity, // water — not breakable (flow/bucket mechanic deferred)
+  // Wave 8 — ore ladder
+  16: 3.0,  // coal ore
+  17: 3.8,  // iron ore
+  18: 4.5,  // gold ore
+  19: 5.0,  // diamond ore
+  20: 4.5,  // redstone ore
+  21: Infinity, // lava — not breakable
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -155,6 +246,12 @@ const BLOCK_PREFERRED_TOOL = {
   12: "shovel",  // gravel
   // 13 bedrock: no tool matters — always Infinity hardness
   // 14 glass: no preferred tool (any breaks it equally)
+  // Wave 8 — all ores need a pickaxe
+  16: "pickaxe", // coal ore
+  17: "pickaxe", // iron ore
+  18: "pickaxe", // gold ore
+  19: "pickaxe", // diamond ore
+  20: "pickaxe", // redstone ore
 };
 
 export const RECIPES = [
@@ -366,6 +463,99 @@ export const RECIPES = [
     output: { itemId: "dirt", count: 1 },
     requiresWorkbench: false,
   },
+  // Wave 8 — iron tools (3 ingots + 2 sticks)
+  {
+    id: "iron_pickaxe",
+    name: "Iron Pickaxe",
+    inputs: [
+      { itemId: "iron_ingot", count: 3 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "iron_pickaxe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_axe",
+    name: "Iron Axe",
+    inputs: [
+      { itemId: "iron_ingot", count: 2 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "iron_axe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_shovel",
+    name: "Iron Shovel",
+    inputs: [
+      { itemId: "iron_ingot", count: 1 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "iron_shovel", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_sword",
+    name: "Iron Sword",
+    inputs: [
+      { itemId: "iron_ingot", count: 2 },
+      { itemId: "stick", count: 1 },
+    ],
+    output: { itemId: "iron_sword", count: 1 },
+    requiresWorkbench: false,
+  },
+  // Wave 8 — diamond tools (3 diamonds + 2 sticks)
+  {
+    id: "diamond_pickaxe",
+    name: "Diamond Pickaxe",
+    inputs: [
+      { itemId: "diamond", count: 3 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "diamond_pickaxe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_axe",
+    name: "Diamond Axe",
+    inputs: [
+      { itemId: "diamond", count: 2 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "diamond_axe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_shovel",
+    name: "Diamond Shovel",
+    inputs: [
+      { itemId: "diamond", count: 1 },
+      { itemId: "stick", count: 2 },
+    ],
+    output: { itemId: "diamond_shovel", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_sword",
+    name: "Diamond Sword",
+    inputs: [
+      { itemId: "diamond", count: 2 },
+      { itemId: "stick", count: 1 },
+    ],
+    output: { itemId: "diamond_sword", count: 1 },
+    requiresWorkbench: false,
+  },
+  // Wave 8 — coal is also a fuel; allow crafting torches with coal (same recipe path)
+  {
+    id: "torch_coal",
+    name: "Torch x4 (coal)",
+    inputs: [
+      { itemId: "stick", count: 1 },
+      { itemId: "coal", count: 1 },
+    ],
+    output: { itemId: "torch", count: 4 },
+    requiresWorkbench: false,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -374,6 +564,7 @@ export const FUEL_ITEM_MS = {
   plank: 2500,
   wood: 3000,
   charcoal: 6000,
+  coal: 6000, // Wave 8 — coal burns as long as charcoal
 };
 
 export const SMELTING_RECIPES = [
@@ -414,6 +605,19 @@ export const SMELTING_RECIPES = [
     inputItemId: "apple",
     outputItemId: "cooked_apple",
     cookTimeMs: 1200,
+  },
+  // Wave 8 — smelt ores into ingots
+  {
+    id: "iron_ingot",
+    inputItemId: "iron_ore",
+    outputItemId: "iron_ingot",
+    cookTimeMs: 2800,
+  },
+  {
+    id: "gold_ingot",
+    inputItemId: "gold_ore",
+    outputItemId: "gold_ingot",
+    cookTimeMs: 3200,
   },
 ];
 
