@@ -10,7 +10,7 @@ import { createGameConfig } from "./game/config";
 import { Sky } from "./game/sky";
 import { setupControls } from "./game/controls";
 import { updateHud, updateF3Overlay } from "./game/hud";
-import { aabbIntersectsBlock, playerAABBAt, resolveAxis } from "./game/physics";
+import { aabbCollidesWorld, aabbIntersectsBlock, playerAABBAt, resolveAxis, PASSABLE_BLOCKS } from "./game/physics";
 import { getSave, putSave, removeSave } from "./game/save";
 import {
   HOTBAR_SIZE,
@@ -644,6 +644,11 @@ const state = {
   cameraFov: renderConfig.fov,
   targetFov: renderConfig.fov,
   isSprinting: false,
+  // Wave F6: sneak / fly / sprint (transient, not persisted)
+  isSneaking: false,
+  isFlying: false,
+  _sprintArmed: false,       // set by double-tap-W; cleared when forward is released
+  _flyLandingGrace: false,   // suppress fall-damage on the tick fly is disabled
   // Wave 5: water submersion state
   inWater: false,       // true when player body (torso/feet) is in water
   eyeInWater: false,    // true when the camera eye voxel is water
@@ -957,6 +962,24 @@ function playerInsideBlock(x, y, z) {
   return aabbIntersectsBlock(aabb, x, y, z);
 }
 
+// Returns true if the player's footprint at (posX, posY, posZ) has at least one
+// solid (non-passable) block directly below it.  Used by sneak edge-guard.
+// Uses an AABB probe dropped 0.05 below the feet so it correctly detects support
+// on full blocks, slabs, and stair tops regardless of the partial-height surface.
+function hasSolidSupportAt(posX, posY, posZ) {
+  const epsilon = simConfig.epsilon;
+  const PROBE = 0.05;
+  const probeAabb = {
+    minX: posX - playerConfig.radius,
+    maxX: posX + playerConfig.radius,
+    minY: posY - PROBE,
+    maxY: posY,
+    minZ: posZ - playerConfig.radius,
+    maxZ: posZ + playerConfig.radius,
+  };
+  return aabbCollidesWorld(probeAabb, world, epsilon);
+}
+
 function toNdc(clientX, clientY) {
   const rect = renderer.domElement.getBoundingClientRect();
   return {
@@ -1020,9 +1043,14 @@ const BOB_BASE_FREQUENCY = 9.5;
 const BOB_VERTICAL_AMPLITUDE = 0.06;
 const BOB_LATERAL_AMPLITUDE = 0.045;
 
+const SNEAK_MULTIPLIER = 0.3;
+const SNEAK_EYE_LOWER  = 0.14; // how far camera drops while sneaking
+
 function getCurrentMoveSpeed() {
   const base = playerConfig.moveSpeed + getCombinedBonuses().moveSpeedBonus;
-  return state.isSprinting ? base * SPRINT_MULTIPLIER : base;
+  if (state.isSneaking) return base * SNEAK_MULTIPLIER;
+  if (state.isSprinting) return base * SPRINT_MULTIPLIER;
+  return base;
 }
 
 function countInventoryItem(itemId) {
@@ -5945,9 +5973,10 @@ function updateCameraTransform() {
   const cosYaw = Math.cos(state.yaw);
   const rightX = cosYaw;
   const rightZ = -sinYaw;
+  const effectiveEyeHeight = playerConfig.eyeHeight - (state.isSneaking ? SNEAK_EYE_LOWER : 0);
   camera.position.set(
     state.playerPos.x + rightX * lateralBob,
-    state.playerPos.y + playerConfig.eyeHeight + verticalBob,
+    state.playerPos.y + effectiveEyeHeight + verticalBob,
     state.playerPos.z + rightZ * lateralBob,
   );
   camera.rotation.y = state.yaw;
@@ -6055,6 +6084,11 @@ function respawnPlayer(options = {}) {
   state.playerPos.set(spawn.x, spawn.y, spawn.z);
   state.playerVel.set(0, 0, 0);
   state.onGround = false;
+  // Clear transient movement flags so a death mid-fly/mid-sneak doesn't carry over.
+  state.isFlying = false;
+  state.isSneaking = false;
+  state._sprintArmed = false;
+  state._flyLandingGrace = false;
   state.yaw = spawn.yaw;
   state.pitch = -0.2;
   if (healToMax) {
@@ -6296,11 +6330,16 @@ function updateSimulation(dtSeconds) {
     strafeInput /= inputLength;
   }
 
-  // Sprint: hold Shift while pressing forward (Minecraft-style — backwards/strafing
-  // doesn't sprint). Only effective when on ground; jumping mid-sprint keeps the bump
-  // until release, but landing without forward held drops it.
-  const sprintHeld = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
-  state.isSprinting = sprintHeld && forwardInput > 0;
+  // Sneak: ShiftLeft/Right held while grounded (not while flying — shift means descend there).
+  const shiftHeld = state.keys.has("ShiftLeft") || state.keys.has("ShiftRight");
+  state.isSneaking = shiftHeld && state.onGround && !state.isFlying;
+
+  // Sprint: activated by double-tap-W (_sprintArmed set in controls.js).
+  // Continues while forward is held; cancelled when forward releases, sneak starts, or flying.
+  if (forwardInput <= 0 || state.isSneaking || state.isFlying) {
+    state._sprintArmed = false;
+  }
+  state.isSprinting = state._sprintArmed && forwardInput > 0;
 
   // Camera at rotation.y = yaw (with default looking -Z) faces (-sin yaw, 0, -cos yaw).
   // The camera-local +X (screen-right) axis is (cos yaw, 0, -sin yaw).
@@ -6334,7 +6373,52 @@ function updateSimulation(dtSeconds) {
   const WATER_VERTICAL_DAMP     = 4.0;
   const WATER_MAX_SINK          = 3.0;
 
-  if (state.inWater) {
+  if (state.isFlying) {
+    // --- FLY MODE: no gravity, collisions still apply ---
+    // Minecraft creative flight glides at ~2x walk speed (horizontal + vertical).
+    const FLY_SPEED_MULTIPLIER = 2.0;
+    const flySpeed = (playerConfig.moveSpeed + getCombinedBonuses().moveSpeedBonus) * FLY_SPEED_MULTIPLIER;
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * flySpeed;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * flySpeed;
+
+    // Space ascends, ShiftLeft/ShiftRight descends.
+    const ascending  = state.keys.has("Space");
+    const descending = shiftHeld;
+    if (ascending && !descending) {
+      state.playerVel.y = flySpeed;
+    } else if (descending && !ascending) {
+      state.playerVel.y = -flySpeed;
+    } else {
+      state.playerVel.y = 0;
+    }
+
+    state.onGround = false;
+    state.jumpQueued = false;
+    resolveAxis({
+      axis: "x", delta: state.playerVel.x * dtSeconds,
+      state, world,
+      playerRadius: playerConfig.radius, playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    resolveAxis({
+      axis: "y", delta: state.playerVel.y * dtSeconds,
+      state, world,
+      playerRadius: playerConfig.radius, playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    resolveAxis({
+      axis: "z", delta: state.playerVel.z * dtSeconds,
+      state, world,
+      playerRadius: playerConfig.radius, playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    // If we landed on something, stay on it (so turning fly off at ground level works).
+    if (state.onGround) {
+      state.playerVel.y = 0;
+    }
+    // Clear fly-landing grace now that we are safely grounded/flying.
+    state._flyLandingGrace = false;
+  } else if (state.inWater) {
     // --- IN WATER: buoyancy + swim physics ---
     state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * WATER_SWIM_SPEED;
     state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * WATER_SWIM_SPEED;
@@ -6401,6 +6485,12 @@ function updateSimulation(dtSeconds) {
     state.playerVel.y += playerConfig.gravity * dtSeconds;
     const wasOnGround = state.onGround;
     const impactVelocityY = state.playerVel.y;
+    // Consume the fly-landing grace on the first physics frame after fly is disabled.
+    // Keeping it alive across multiple frames allows the exploit: fly up, toggle fly off
+    // mid-air, fall arbitrarily far, land with no damage.  One tick is enough to suppress
+    // the spurious spike on the exact frame the velocity was zeroed at toggle time.
+    const hadFlyLandingGrace = state._flyLandingGrace;
+    state._flyLandingGrace = false;
     let jumpedThisFrame = false;
 
     if (state.jumpQueued && state.onGround) {
@@ -6420,9 +6510,30 @@ function updateSimulation(dtSeconds) {
 
     state.onGround = false;
     const allowStepUp = wasOnGround && !jumpedThisFrame && playerConfig.stepHeight > 0;
+
+    // Sneak edge-guard: when grounded and sneaking, reject any horizontal delta that
+    // would leave the player's footprint unsupported.  Check per-axis so sliding
+    // along an edge still works (e.g. moving into a wall parallel to the ledge).
+    let deltaX = state.playerVel.x * dtSeconds;
+    let deltaZ = state.playerVel.z * dtSeconds;
+    if (state.isSneaking && wasOnGround && !jumpedThisFrame) {
+      if (deltaX !== 0 && !hasSolidSupportAt(
+        state.playerPos.x + deltaX, state.playerPos.y, state.playerPos.z,
+      )) {
+        deltaX = 0;
+        state.playerVel.x = 0;
+      }
+      if (deltaZ !== 0 && !hasSolidSupportAt(
+        state.playerPos.x, state.playerPos.y, state.playerPos.z + deltaZ,
+      )) {
+        deltaZ = 0;
+        state.playerVel.z = 0;
+      }
+    }
+
     resolveAxis({
       axis: "x",
-      delta: state.playerVel.x * dtSeconds,
+      delta: deltaX,
       state,
       world,
       playerRadius: playerConfig.radius,
@@ -6442,7 +6553,7 @@ function updateSimulation(dtSeconds) {
     });
     resolveAxis({
       axis: "z",
-      delta: state.playerVel.z * dtSeconds,
+      delta: deltaZ,
       state,
       world,
       playerRadius: playerConfig.radius,
@@ -6452,10 +6563,12 @@ function updateSimulation(dtSeconds) {
       stepHeight: playerConfig.stepHeight,
     });
 
-    if (!wasOnGround && state.onGround && impactVelocityY < -playerConfig.fallDamageSafeSpeed) {
-      const overSpeed = Math.abs(impactVelocityY) - playerConfig.fallDamageSafeSpeed;
-      const damage = overSpeed * playerConfig.fallDamageMultiplier;
-      takeDamage(damage, "fall");
+    if (!wasOnGround && state.onGround) {
+      if (impactVelocityY < -playerConfig.fallDamageSafeSpeed && !hadFlyLandingGrace) {
+        const overSpeed = Math.abs(impactVelocityY) - playerConfig.fallDamageSafeSpeed;
+        const damage = overSpeed * playerConfig.fallDamageMultiplier;
+        takeDamage(damage, "fall");
+      }
     }
 
     if (state.onGround && state.playerVel.y < 0) {
@@ -6497,7 +6610,7 @@ function updateSimulation(dtSeconds) {
   }
 
   // FOV lerp toward sprint target. Fast enough to feel responsive but not snappy.
-  state.targetFov = renderConfig.fov + (state.isSprinting ? SPRINT_FOV_BUMP : 0);
+  state.targetFov = renderConfig.fov + (state.isSprinting && !state.isSneaking ? SPRINT_FOV_BUMP : 0);
   const fovLerpAlpha = 1 - Math.exp(-FOV_LERP_RATE * dtSeconds);
   state.cameraFov += (state.targetFov - state.cameraFov) * fovLerpAlpha;
 
@@ -6879,6 +6992,9 @@ window.render_game_to_text = () => {
       vy: Number(state.playerVel.y.toFixed(3)),
       vz: Number(state.playerVel.z.toFixed(3)),
       onGround: state.onGround,
+      sneaking: state.isSneaking,
+      sprinting: state.isSprinting,
+      flying: state.isFlying,
       inWater: state.inWater,
       eyeInWater: state.eyeInWater,
       inLava: state.inLava,
@@ -7273,6 +7389,26 @@ window.__exoCraftDebug = {
     updateObjectives(0, true);
     return true;
   },
+  // Wave F6 — movement state debug hooks
+  setFlying: (bool) => {
+    state.isFlying = Boolean(bool);
+    if (!state.isFlying) {
+      state.playerVel.y = 0;
+      state._flyLandingGrace = true;
+    }
+    return state.isFlying;
+  },
+  setSneaking: (bool) => {
+    state.isSneaking = Boolean(bool);
+    return state.isSneaking;
+  },
+  getMovementState: () => ({
+    sneaking:   state.isSneaking,
+    flying:     state.isFlying,
+    sprinting:  state.isSprinting,
+    stepHeight: playerConfig.stepHeight,
+    moveSpeed:  Number(getCurrentMoveSpeed().toFixed(3)),
+  }),
   teleportPlayer: (x, y, z, yaw = state.yaw) => {
     if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
       return false;

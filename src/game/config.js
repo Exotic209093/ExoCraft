@@ -156,7 +156,7 @@ const DEFAULT_GAME_CONFIG = {
     height: 1.8,
     eyeHeight: 1.62,
     maxHealth: 20,
-    stepHeight: 1.05,
+    stepHeight: 0.6,
     moveSpeed: 6.2,
     turnSpeed: 2.3,
     gravity: -28,

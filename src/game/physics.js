@@ -103,7 +103,7 @@ function stairTopFracForAabb(aabb, x, y, z, orient) {
 // Water is passable — the player enters and swims; buoyancy is handled in main.js.
 // Lava is also passable — damage and movement slowdown handled in main.js (Wave 8).
 // Flora (Wave 11) — cross-quad, no collision; player walks through freely.
-const PASSABLE_BLOCKS = new Set([
+export const PASSABLE_BLOCKS = new Set([
   15, // water
   21, // lava (Wave 8)
   23, // tall grass (Wave 11)
@@ -115,7 +115,7 @@ function isPassable(blockType) {
   return blockType === 0 || PASSABLE_BLOCKS.has(blockType);
 }
 
-function aabbCollidesWorld(aabb, world, epsilon) {
+export function aabbCollidesWorld(aabb, world, epsilon) {
   const minX = Math.floor(aabb.minX);
   const maxX = Math.floor(aabb.maxX - epsilon);
   const minY = Math.floor(aabb.minY);

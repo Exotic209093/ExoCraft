@@ -24,12 +24,20 @@ export function setupControls({
   toggleF3Overlay,
   onThrowItem,
 }) {
-  // Shift used for sprint (web-safe; Ctrl+W would close the tab in most browsers).
+  // Movement keys tracked in state.keys. Shift and Space handled separately.
   const movementKeyCodes = new Set([
     "KeyW", "KeyA", "KeyS", "KeyD",
     "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
     "ShiftLeft", "ShiftRight",
+    "Space",
   ]);
+
+  // Double-tap-W sprint detection state (not in state object — purely input-layer).
+  let lastWPressTime = -Infinity;
+  const DOUBLE_TAP_WINDOW_MS = 300;
+
+  // Double-tap-Space fly detection state.
+  let lastSpacePressTime = -Infinity;
 
   const onKeyDown = (event) => {
     const { code } = event;
@@ -77,8 +85,35 @@ export function setupControls({
       return;
     }
 
-    if (code === "Space") {
-      state.jumpQueued = true;
+    if (code === "Space" && !panelOpen) {
+      if (!isRepeat) {
+        // Double-tap-Space toggles fly mode.
+        const now = performance.now();
+        if (now - lastSpacePressTime <= DOUBLE_TAP_WINDOW_MS) {
+          state.isFlying = !state.isFlying;
+          if (!state.isFlying) {
+            // Turning fly off: clear vertical velocity and suppress fall-damage spike.
+            state.playerVel.y = 0;
+            state._flyLandingGrace = true;
+          }
+          lastSpacePressTime = -Infinity; // consume the double-tap
+        } else {
+          lastSpacePressTime = now;
+        }
+      }
+      if (!state.isFlying) {
+        state.jumpQueued = true;
+      }
+    }
+    if (code === "KeyW" && !isRepeat && !panelOpen) {
+      // Double-tap-W activates sprint.
+      const now = performance.now();
+      if (now - lastWPressTime <= DOUBLE_TAP_WINDOW_MS) {
+        state._sprintArmed = true;
+        lastWPressTime = -Infinity;
+      } else {
+        lastWPressTime = now;
+      }
     }
     if (code === "KeyF" && !isRepeat) {
       toggleFullscreen();
@@ -108,9 +143,6 @@ export function setupControls({
     }
 
     if (panelOpen) {
-      if (code === "Space") {
-        state.jumpQueued = false;
-      }
       return;
     }
 
@@ -126,6 +158,8 @@ export function setupControls({
   const onBlur = () => {
     state.keys.clear();
     state.jumpQueued = false;
+    lastWPressTime = -Infinity;
+    lastSpacePressTime = -Infinity;
   };
 
   const onPointerLockChange = () => {
