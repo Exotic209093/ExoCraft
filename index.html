@@ -46,7 +46,26 @@
       <div id="craft-panel" class="hidden">
         <div id="craft-title">Crafting</div>
         <div id="craft-context"></div>
+        <div id="craft-grid-area">
+          <div id="craft-grid"></div>
+          <div id="craft-arrow">&#x2192;</div>
+          <div id="craft-result-slot" class="craft-slot craft-result empty">Empty</div>
+        </div>
+        <div class="inventory-section">
+          <div class="inventory-section-title">Inventory</div>
+          <div id="craft-inv-grid" class="inventory-grid"></div>
+        </div>
         <div id="craft-recipes"></div>
+      </div>
+
+      <div id="chest-panel" class="hidden">
+        <div id="chest-title">Chest</div>
+        <div id="chest-context"></div>
+        <div id="chest-storage"></div>
+        <div class="inventory-section">
+          <div class="inventory-section-title">Inventory</div>
+          <div id="chest-inv-grid" class="inventory-grid"></div>
+        </div>
       </div>
 
       <div id="furnace-panel" class="hidden">
@@ -58,6 +77,10 @@
       <div id="inventory-panel" class="hidden">
         <div id="inventory-title">Inventory</div>
         <div id="inventory-hint">Click one slot, then another slot to move or swap.</div>
+        <div class="inventory-section">
+          <div class="inventory-section-title">Armor</div>
+          <div id="inventory-armor-slots" class="armor-slots-row"></div>
+        </div>
         <div class="inventory-section">
           <div class="inventory-section-title">Hotbar</div>
           <div id="inventory-hotbar-grid" class="inventory-grid"></div>

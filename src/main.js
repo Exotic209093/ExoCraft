@@ -38,6 +38,12 @@ import {
   // Wave 8 — harvest-level gating
   ORE_HARVEST_LEVEL,
   getToolTier,
+  // Wave 10 — shaped crafting + armor
+  matchGridRecipe,
+  ARMOR_SLOTS,
+  getArmorSlot,
+  getTotalDefense,
+  ARMOR_DEFENSE,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
@@ -90,6 +96,10 @@ const GOLD_ORE_BLOCK_TYPE     = 18;
 const DIAMOND_ORE_BLOCK_TYPE  = 19;
 const REDSTONE_ORE_BLOCK_TYPE = 20;
 const LAVA_BLOCK_TYPE         = 21;
+// Wave 10 — chest
+const CHEST_BLOCK_TYPE        = 22;
+const CHEST_SIZE              = 27;
+const CHEST_INTERACT_RADIUS   = 6;
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -122,6 +132,8 @@ const playerBaseMobDamage = Number.isFinite(hostileMobConfig.playerBaseMobDamage
   : 2;
 const torchLightConfig = simConfig.torchLighting || {};
 const furnaceStates = new Map();
+// Wave 10 — chest state: key → 27-slot inventory array
+const chestStates = new Map();
 
 const app = document.querySelector("#app");
 const menu = document.querySelector("#menu");
@@ -146,9 +158,19 @@ const furnaceContext = document.querySelector("#furnace-context");
 const furnaceControls = document.querySelector("#furnace-controls");
 const inventoryPanel = document.querySelector("#inventory-panel");
 const inventoryHint = document.querySelector("#inventory-hint");
+const inventoryArmorSlotsEl = document.querySelector("#inventory-armor-slots");
 const inventoryHotbarGrid = document.querySelector("#inventory-hotbar-grid");
 const inventoryBackpackGrid = document.querySelector("#inventory-backpack-grid");
 const damageFlashEl = document.querySelector("#damage-flash");
+// Wave 10 — crafting grid elements
+const craftGridEl = document.querySelector("#craft-grid");
+const craftResultSlotEl = document.querySelector("#craft-result-slot");
+const craftInvGridEl = document.querySelector("#craft-inv-grid");
+// Wave 10 — chest panel elements
+const chestPanel = document.querySelector("#chest-panel");
+const chestContext = document.querySelector("#chest-context");
+const chestStorageEl = document.querySelector("#chest-storage");
+const chestInvGridEl = document.querySelector("#chest-inv-grid");
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, renderConfig.maxPixelRatio));
@@ -551,6 +573,16 @@ const state = {
   activeFurnaceKey: null,
   inventoryOpen: false,
   inventoryTransferIndex: null,
+  // Wave 10 — crafting grid (9 slots, 3x3; 2x2 limit enforced when no workbench)
+  craftingGrid: new Array(9).fill(null),
+  // Wave 10 — worn armor: { head, chest, legs, feet } each null or itemId string
+  wornArmor: { head: null, chest: null, legs: null, feet: null },
+  // Wave 10 — chest UI
+  chestOpen: false,
+  activeChestKey: null,
+  // transferContext tracks which panel a pending transfer originated from.
+  // Values: null | 'inventory' | 'grid' | 'armor' | 'chest-storage' | 'chest-inv'
+  transferContext: null,
   breakProgress: {
     targetKey: null,
     amount: 0,
@@ -600,6 +632,9 @@ let furnacePanelSignature = "";
 let furnacePanelNeedsRefresh = true;
 let inventoryPanelSignature = "";
 let inventoryPanelNeedsRefresh = true;
+// Wave 10
+let chestPanelSignature = "";
+let chestPanelNeedsRefresh = true;
 let mobSpawnAccumulatorMs = 0;
 let hostileMobIdCounter = 1;
 const hostileMobs = [];
@@ -2155,7 +2190,13 @@ function inventorySignature() {
 
 function inventoryPanelStateSignature() {
   const transfer = state.inventoryTransferIndex === null ? "-" : state.inventoryTransferIndex;
-  return `${state.selectedSlot}|${transfer}|${inventoryMutationCounter}`;
+  const armor = ARMOR_SLOTS.map((s) => state.wornArmor[s] || "_").join("|");
+  const ctx = state.transferContext ?? "-";
+  return `${state.selectedSlot}|${transfer}|${ctx}|${inventoryMutationCounter}|${armor}`;
+}
+
+function craftingGridSignature() {
+  return state.craftingGrid.map((s) => (s ? `${s.itemId}x${s.count}` : "_")).join("|");
 }
 
 function furnaceStateSignature(key) {
@@ -2190,8 +2231,13 @@ function markInventoryPanelDirty() {
   inventoryPanelNeedsRefresh = true;
   furnacePanelNeedsRefresh = true;
   craftPanelNeedsRefresh = true;
+  chestPanelNeedsRefresh = true;
   inventoryMutationCounter += 1;
   invalidateBonusCache();
+}
+
+function markChestPanelDirty() {
+  chestPanelNeedsRefresh = true;
 }
 
 function serializeInventory() {
@@ -2297,6 +2343,101 @@ function loadFurnaces(serializedFurnaces) {
   }
 
   markFurnacePanelDirty();
+}
+
+// ---------------------------------------------------------------------------
+// Wave 10 — Chest state helpers
+// ---------------------------------------------------------------------------
+
+function toChestKey(x, y, z) {
+  return `${x},${y},${z}`;
+}
+
+function fromChestKey(key) {
+  const [x, y, z] = key.split(",").map(Number);
+  return { x, y, z };
+}
+
+function createDefaultChestInventory() {
+  return new Array(CHEST_SIZE).fill(null);
+}
+
+function getChestState(key, createIfMissing = true) {
+  let chest = chestStates.get(key);
+  if (!chest && createIfMissing) {
+    chest = createDefaultChestInventory();
+    chestStates.set(key, chest);
+  }
+  return chest || null;
+}
+
+function serializeChests() {
+  const serialized = [];
+  for (const [key, slots] of chestStates.entries()) {
+    const { x, y, z } = fromChestKey(key);
+    if (world.get(x, y, z) !== CHEST_BLOCK_TYPE) {
+      continue;
+    }
+    serialized.push({
+      x, y, z,
+      slots: slots.map((slot) => {
+        if (!slot) return null;
+        const entry = { itemId: slot.itemId, count: slot.count };
+        if (hasDurability(slot.itemId) && Number.isFinite(slot.durability)) {
+          entry.durability = slot.durability;
+        }
+        return entry;
+      }),
+    });
+  }
+  return serialized;
+}
+
+function loadChests(serializedChests) {
+  chestStates.clear();
+  if (!Array.isArray(serializedChests)) {
+    return;
+  }
+  for (const raw of serializedChests) {
+    if (
+      !raw ||
+      !Number.isFinite(raw.x) ||
+      !Number.isFinite(raw.y) ||
+      !Number.isFinite(raw.z) ||
+      world.get(raw.x, raw.y, raw.z) !== CHEST_BLOCK_TYPE
+    ) {
+      continue;
+    }
+    const slots = createDefaultChestInventory();
+    if (Array.isArray(raw.slots)) {
+      for (let i = 0; i < CHEST_SIZE && i < raw.slots.length; i += 1) {
+        const slot = raw.slots[i];
+        if (!slot || typeof slot.itemId !== "string" || !ITEM_DEFS[slot.itemId] || !Number.isFinite(slot.count) || slot.count <= 0) {
+          continue;
+        }
+        const entry = { itemId: slot.itemId, count: Math.min(MAX_STACK, Math.floor(slot.count)) };
+        if (hasDurability(slot.itemId)) {
+          entry.count = 1;
+          const maxDur = TOOL_MAX_DURABILITY[slot.itemId] ?? 1;
+          entry.durability = Number.isFinite(slot.durability) && slot.durability > 0
+            ? Math.min(maxDur, slot.durability)
+            : maxDur;
+        }
+        slots[i] = entry;
+      }
+    }
+    chestStates.set(toChestKey(raw.x, raw.y, raw.z), slots);
+  }
+}
+
+function isChestAccessible(key) {
+  if (!key) return false;
+  const { x, y, z } = fromChestKey(key);
+  if (world.get(x, y, z) !== CHEST_BLOCK_TYPE) return false;
+  const dx = x + 0.5 - state.playerPos.x;
+  const dy = y + 0.5 - state.playerPos.y;
+  const dz = z + 0.5 - state.playerPos.z;
+  return Math.hypot(dx, dy, dz) <= CHEST_INTERACT_RADIUS;
 }
 
 function isHostileMobEnabled() {
@@ -3704,6 +3845,424 @@ function updateFurnaceSimulation(deltaMs) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Wave 10 — crafting grid transfer state helpers
+// ---------------------------------------------------------------------------
+
+// Unified transfer state: context + index where context is which panel area
+// the first-click came from.
+function clearTransfer() {
+  state.inventoryTransferIndex = null;
+  state.transferContext = null;
+}
+
+// Return the item at a transfer address { context, index }
+function getTransferSlot(context, index) {
+  if (context === "inventory" || context === "grid-inv") {
+    return state.inventory[index] ?? null;
+  }
+  if (context === "grid") {
+    return state.craftingGrid[index] ?? null;
+  }
+  if (context === "armor") {
+    const slot = ARMOR_SLOTS[index];
+    const itemId = state.wornArmor[slot];
+    return itemId ? { itemId, count: 1 } : null;
+  }
+  if (context === "chest-storage") {
+    const chest = getChestState(state.activeChestKey, false);
+    return chest ? (chest[index] ?? null) : null;
+  }
+  if (context === "chest-inv") {
+    return state.inventory[index] ?? null;
+  }
+  return null;
+}
+
+// Attempt to move/swap between (fromCtx, fromIdx) and (toCtx, toIdx).
+// Returns true on success.
+function executeTransfer(fromCtx, fromIdx, toCtx, toIdx) {
+  // Resolve the two backing arrays / special slots
+  const getArr = (ctx) => {
+    if (ctx === "inventory" || ctx === "grid-inv" || ctx === "chest-inv") return state.inventory;
+    if (ctx === "grid") return state.craftingGrid;
+    return null; // armor + chest-storage handled specially
+  };
+
+  // Handle armor slots specially (must be correct armor type, always count:1)
+  if (toCtx === "armor") {
+    const fromSlot = getTransferSlot(fromCtx, fromIdx);
+    if (!fromSlot) return false;
+    const targetSlot = ARMOR_SLOTS[toIdx];
+    const armorSlot = getArmorSlot(fromSlot.itemId);
+    if (armorSlot !== targetSlot) return false;
+
+    const currentWorn = state.wornArmor[targetSlot];
+    const fromArr = getArr(fromCtx);
+
+    // Equip one piece from the source stack (never consume the whole stack).
+    state.wornArmor[targetSlot] = fromSlot.itemId;
+    if (fromArr) {
+      fromArr[fromIdx] = fromSlot.count > 1 ? { itemId: fromSlot.itemId, count: fromSlot.count - 1 } : null;
+      // If there was already a worn piece, return it: prefer the now-freed source
+      // slot (it may have just become null), otherwise spill into inventory.
+      if (currentWorn) {
+        if (fromArr[fromIdx] === null) {
+          fromArr[fromIdx] = { itemId: currentWorn, count: 1 };
+        } else {
+          addItemToInventory(state.inventory, currentWorn, 1);
+        }
+      }
+    } else if (currentWorn) {
+      // Source was a non-array context (shouldn't happen for armor→armor equip, but guard anyway)
+      addItemToInventory(state.inventory, currentWorn, 1);
+    }
+    return true;
+  }
+
+  if (fromCtx === "armor") {
+    const armorSlot = ARMOR_SLOTS[fromIdx];
+    const wornId = state.wornArmor[armorSlot];
+    if (!wornId) return false;
+    const toArr = getArr(toCtx);
+    if (toCtx === "chest-storage") {
+      const chest = getChestState(state.activeChestKey, false);
+      if (!chest) return false;
+      if (chest[toIdx]) {
+        // swap
+        const tmp = chest[toIdx];
+        chest[toIdx] = { itemId: wornId, count: 1 };
+        const aSlot2 = getArmorSlot(tmp.itemId);
+        if (aSlot2 === armorSlot) {
+          state.wornArmor[armorSlot] = tmp.itemId;
+        } else {
+          // can't swap armor type mismatch into armor slot; put in inventory instead
+          addItemToInventory(state.inventory, tmp.itemId, tmp.count);
+          state.wornArmor[armorSlot] = null;
+        }
+      } else {
+        chest[toIdx] = { itemId: wornId, count: 1 };
+        state.wornArmor[armorSlot] = null;
+      }
+      return true;
+    }
+    if (toArr) {
+      if (toArr[toIdx]) {
+        const tmp = toArr[toIdx];
+        const aSlot2 = getArmorSlot(tmp.itemId);
+        if (aSlot2 === armorSlot) {
+          state.wornArmor[armorSlot] = tmp.itemId;
+        } else {
+          // can't put non-armor back; just add to inventory
+          addItemToInventory(state.inventory, tmp.itemId, tmp.count);
+          state.wornArmor[armorSlot] = null;
+        }
+        toArr[toIdx] = { itemId: wornId, count: 1 };
+      } else {
+        toArr[toIdx] = { itemId: wornId, count: 1 };
+        state.wornArmor[armorSlot] = null;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  // Handle chest-storage as source
+  if (fromCtx === "chest-storage") {
+    const chest = getChestState(state.activeChestKey, false);
+    if (!chest) return false;
+    if (toCtx === "chest-storage") {
+      return transferInventoryStack(chest, fromIdx, toIdx);
+    }
+    if (toCtx === "armor") {
+      // Already handled above
+      return false;
+    }
+    const toArr = getArr(toCtx);
+    if (!toArr) return false;
+    // Build a fake combined array for transferInventoryStack... just do it manually
+    const fromSlot = chest[fromIdx];
+    if (!fromSlot) return false;
+    const toSlot = toArr[toIdx];
+    if (!toSlot) {
+      toArr[toIdx] = { ...fromSlot };
+      chest[fromIdx] = null;
+      return true;
+    }
+    // Merge or swap
+    if (!hasDurability(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
+      const moved = Math.min(MAX_STACK - toSlot.count, fromSlot.count);
+      if (moved <= 0) return false;
+      toSlot.count += moved;
+      fromSlot.count -= moved;
+      if (fromSlot.count <= 0) chest[fromIdx] = null;
+      return true;
+    }
+    chest[fromIdx] = toSlot;
+    toArr[toIdx] = { ...fromSlot };
+    return true;
+  }
+
+  // Handle destination as chest-storage
+  if (toCtx === "chest-storage") {
+    const chest = getChestState(state.activeChestKey, false);
+    if (!chest) return false;
+    const fromArr = getArr(fromCtx);
+    if (!fromArr) return false;
+    const fromSlot = fromArr[fromIdx];
+    if (!fromSlot) return false;
+    const toSlot = chest[toIdx];
+    if (!toSlot) {
+      chest[toIdx] = { ...fromSlot };
+      fromArr[fromIdx] = null;
+      return true;
+    }
+    if (!hasDurability(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
+      const moved = Math.min(MAX_STACK - toSlot.count, fromSlot.count);
+      if (moved <= 0) return false;
+      toSlot.count += moved;
+      fromSlot.count -= moved;
+      if (fromSlot.count <= 0) fromArr[fromIdx] = null;
+      return true;
+    }
+    chest[toIdx] = { ...fromSlot };
+    fromArr[fromIdx] = toSlot;
+    return true;
+  }
+
+  // Both are regular array-backed slots
+  const fromArr = getArr(fromCtx);
+  const toArr = getArr(toCtx);
+  if (!fromArr || !toArr) return false;
+
+  if (fromArr === toArr) {
+    return transferInventoryStack(fromArr, fromIdx, toIdx);
+  }
+
+  // Cross-array (e.g. grid → inventory): manual move/swap
+  const fromSlot = fromArr[fromIdx];
+  if (!fromSlot) return false;
+  const toSlot = toArr[toIdx];
+  if (!toSlot) {
+    toArr[toIdx] = { ...fromSlot };
+    fromArr[fromIdx] = null;
+    return true;
+  }
+  if (!hasDurability(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
+    const moved = Math.min(MAX_STACK - toSlot.count, fromSlot.count);
+    if (moved <= 0) return false;
+    toSlot.count += moved;
+    fromSlot.count -= moved;
+    if (fromSlot.count <= 0) fromArr[fromIdx] = null;
+    return true;
+  }
+  fromArr[fromIdx] = toSlot;
+  toArr[toIdx] = { ...fromSlot };
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 10 — crafting grid logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the recipe currently matched by the crafting grid, or null.
+ */
+function getCurrentGridRecipe() {
+  const needsWorkbench = isWorkbenchNearby();
+  return matchGridRecipe(state.craftingGrid, RECIPES, needsWorkbench);
+}
+
+/**
+ * Take the crafting result: consume exactly one of each ingredient from the grid,
+ * add the output to inventory.
+ */
+function takeCraftingResult() {
+  const recipe = getCurrentGridRecipe();
+  if (!recipe) {
+    state.recentAction = "Nothing to craft";
+    return;
+  }
+  if (recipe.requiredSpecialization) {
+    const lockReason = getRecipeSpecializationLockReason(recipe);
+    if (lockReason) {
+      state.recentAction = lockReason;
+      return;
+    }
+  }
+
+  // Check inventory room before committing. Clone the inventory, try to add
+  // the output, and abort if any leftover remains so the grid is never consumed
+  // when the output would be silently destroyed.
+  const inventoryClone = state.inventory.map((s) => (s ? { ...s } : null));
+  const leftoverCheck = addItemToInventory(inventoryClone, recipe.output.itemId, recipe.output.count);
+  if (leftoverCheck > 0) {
+    state.recentAction = "Inventory full";
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+    return;
+  }
+
+  // For shaped recipes consume one per grid cell (already validated by match).
+  // For shapeless, consume one per required ingredient.
+  if (recipe.pattern) {
+    // Consume one item from each non-empty matched cell.
+    for (let i = 0; i < 9; i += 1) {
+      if (state.craftingGrid[i]) {
+        state.craftingGrid[i].count -= 1;
+        if (state.craftingGrid[i].count <= 0) {
+          state.craftingGrid[i] = null;
+        }
+      }
+    }
+  } else {
+    // Shapeless: consume exact required counts from grid cells
+    const needed = new Map(recipe.inputs.map((inp) => [inp.itemId, inp.count]));
+    for (let i = 0; i < 9; i += 1) {
+      const slot = state.craftingGrid[i];
+      if (!slot) continue;
+      const rem = needed.get(slot.itemId);
+      if (rem && rem > 0) {
+        const take = Math.min(slot.count, rem);
+        needed.set(slot.itemId, rem - take);
+        slot.count -= take;
+        if (slot.count <= 0) state.craftingGrid[i] = null;
+      }
+    }
+  }
+
+  addItemToInventory(state.inventory, recipe.output.itemId, recipe.output.count);
+  {
+    state.recentAction = `Crafted ${recipe.name}`;
+  }
+  markCraftPanelDirty();
+  markInventoryPanelDirty();
+  updateCraftPanel(true);
+  updateInventoryPanel(true);
+  refreshHud();
+}
+
+function onCraftGridSlotClick(gridIndex) {
+  if (!state.craftingOpen) return;
+  if (gridIndex < 0 || gridIndex >= 9) return;
+
+  // Enforce 2x2 restriction: no workbench means col 2 and row 2 are off-limits
+  if (!isWorkbenchNearby()) {
+    const col = gridIndex % 3;
+    const row = Math.floor(gridIndex / 3);
+    if (col === 2 || row === 2) {
+      state.recentAction = "Need crafting table for 3x3 grid";
+      return;
+    }
+  }
+
+  if (state.transferContext === null) {
+    if (!state.craftingGrid[gridIndex]) {
+      state.recentAction = "Grid slot is empty";
+      return;
+    }
+    state.inventoryTransferIndex = gridIndex;
+    state.transferContext = "grid";
+    state.recentAction = `Selected grid slot ${gridIndex + 1}`;
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+    return;
+  }
+
+  if (state.transferContext === "grid" && state.inventoryTransferIndex === gridIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled";
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+    return;
+  }
+
+  // Clicking an inventory slot first then a grid slot: handled from inventory side
+  // But if we're clicking grid->grid or grid->inventory we route here
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIdx, "grid", gridIndex);
+  if (moved) {
+    state.recentAction = "Placed in grid";
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
+    updateCraftPanel(true);
+    updateInventoryPanel(true);
+    refreshHud();
+  } else {
+    state.recentAction = "Cannot place there";
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+  }
+}
+
+/**
+ * Handle a click on the player inventory grid rendered inside the craft panel.
+ * Works like onChestInvClick but uses the "grid-inv" transfer context so that
+ * a subsequent click on a grid cell routes correctly through executeTransfer.
+ */
+function onCraftInvClick(slotIndex) {
+  if (!state.craftingOpen) return;
+  if (!Number.isFinite(slotIndex) || slotIndex < 0 || slotIndex >= INVENTORY_SIZE) return;
+
+  if (state.transferContext === null) {
+    if (!state.inventory[slotIndex]) {
+      state.recentAction = `Slot ${slotIndex + 1} is empty`;
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = "grid-inv";
+    state.recentAction = `Selected slot ${slotIndex + 1}`;
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+    return;
+  }
+
+  if (state.transferContext === "grid-inv" && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled transfer";
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+    return;
+  }
+
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIdx, "grid-inv", slotIndex);
+  if (moved) {
+    state.recentAction = "Moved item";
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
+    updateCraftPanel(true);
+    updateInventoryPanel(true);
+    refreshHud();
+  } else {
+    state.recentAction = "Cannot move item";
+    markCraftPanelDirty();
+    updateCraftPanel(true);
+  }
+}
+
+/**
+ * Return all items in the crafting grid to the player inventory on close.
+ */
+function returnCraftingGridToInventory() {
+  for (let i = 0; i < 9; i += 1) {
+    const slot = state.craftingGrid[i];
+    if (slot) {
+      const leftover = addItemToInventory(state.inventory, slot.itemId, slot.count);
+      if (leftover > 0) {
+        // Inventory couldn't absorb everything; keep the remainder in the grid slot
+        state.craftingGrid[i] = { itemId: slot.itemId, count: leftover };
+      } else {
+        state.craftingGrid[i] = null;
+      }
+    }
+  }
+}
+
 function updateCraftPanel(force = false) {
   if (!state.craftingOpen) {
     return;
@@ -3711,7 +4270,8 @@ function updateCraftPanel(force = false) {
 
   const nearWorkbench = isWorkbenchNearby();
   const specializationSignature = `${state.specialization.selected || "_"}|${state.specialization.completed ? 1 : 0}`;
-  const nextSignature = `${nearWorkbench}|${specializationSignature}|${inventorySignature()}`;
+  const gridSig = craftingGridSignature();
+  const nextSignature = `${nearWorkbench}|${specializationSignature}|${inventorySignature()}|${gridSig}`;
   if (!force && !craftPanelNeedsRefresh && craftPanelSignature === nextSignature) {
     return;
   }
@@ -3719,14 +4279,71 @@ function updateCraftPanel(force = false) {
   craftPanelNeedsRefresh = false;
 
   let contextText = nearWorkbench
-    ? "Workbench nearby: advanced recipes enabled"
-    : "No nearby workbench: basic recipes only";
+    ? "Workbench nearby: 3x3 grid + advanced recipes"
+    : "No workbench: 2x2 area only, basic recipes";
   if (state.specialization.selected) {
     const status = state.specialization.completed ? "trial complete" : "trial active";
     contextText += ` | ${formatSpecializationName(state.specialization.selected)} specialization (${status})`;
   }
   craftContext.textContent = contextText;
 
+  // ----- Crafting grid -----
+  if (craftGridEl) {
+    craftGridEl.innerHTML = "";
+    for (let i = 0; i < 9; i += 1) {
+      const slot = state.craftingGrid[i];
+
+      // In 2x2 mode (no workbench), grey out the 3rd column and bottom row
+      const col = i % 3;
+      const row = Math.floor(i / 3);
+      const is2x2Locked = !nearWorkbench && (col === 2 || row === 2);
+
+      const btn = document.createElement("div");
+      btn.className = "craft-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "grid" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      if (is2x2Locked) {
+        btn.style.opacity = "0.25";
+        btn.style.pointerEvents = "none";
+      }
+      btn.dataset.gridIndex = String(i);
+      btn.textContent = slot ? `${getItemName(slot.itemId)} x${slot.count}` : "·";
+      craftGridEl.appendChild(btn);
+    }
+  }
+
+  // ----- Result slot -----
+  const matchedRecipe = getCurrentGridRecipe();
+  if (craftResultSlotEl) {
+    if (matchedRecipe) {
+      craftResultSlotEl.className = "craft-slot craft-result";
+      craftResultSlotEl.textContent = `${getItemName(matchedRecipe.output.itemId)} x${matchedRecipe.output.count}`;
+    } else {
+      craftResultSlotEl.className = "craft-slot craft-result empty";
+      craftResultSlotEl.textContent = "Empty";
+    }
+  }
+
+  // ----- Player inventory (mirroring chest panel so items can be moved to/from grid) -----
+  if (craftInvGridEl) {
+    craftInvGridEl.innerHTML = "";
+    for (let i = 0; i < INVENTORY_SIZE; i += 1) {
+      const slot = state.inventory[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "inventory-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "grid-inv" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.craftInvIndex = String(i);
+      const label = `${i + 1}`;
+      btn.textContent = slot ? `${label}: ${getItemName(slot.itemId)} x${slot.count}` : `${label}: Empty`;
+      craftInvGridEl.appendChild(btn);
+    }
+  }
+
+  // ----- Recipe list (shapeless shortcut buttons still useful) -----
   craftRecipes.innerHTML = "";
   for (const recipe of RECIPES) {
     const specializationName =
@@ -3919,9 +4536,10 @@ function toggleFurnacePanel() {
     closeInventoryPanel(false);
   }
   if (state.craftingOpen) {
-    state.craftingOpen = false;
-    craftPanel.classList.add("hidden");
-    craftPanelSignature = "";
+    closeCraftPanel(false);
+  }
+  if (state.chestOpen) {
+    closeChestPanel(false);
   }
 
   state.furnaceOpen = true;
@@ -3952,6 +4570,187 @@ function onFurnacePanelAction(action, itemId) {
   updateFurnacePanel(true);
   updateInventoryPanel(true);
   updateCraftPanel(true);
+}
+
+// ---------------------------------------------------------------------------
+// Wave 10 — Chest panel
+// ---------------------------------------------------------------------------
+
+function closeChestPanel(updateAction = true) {
+  if (!state.chestOpen) return;
+  state.chestOpen = false;
+  state.activeChestKey = null;
+  if (chestPanel) chestPanel.classList.add("hidden");
+  chestPanelSignature = "";
+  clearTransfer();
+  markChestPanelDirty();
+  if (updateAction) {
+    state.recentAction = "Closed chest";
+  }
+}
+
+function openChestPanel(key) {
+  if (state.craftingOpen) closeCraftPanel(false);
+  if (state.furnaceOpen) closeFurnacePanel(false);
+  if (state.inventoryOpen) closeInventoryPanel(false);
+  if (state.chestOpen && state.activeChestKey === key) {
+    closeChestPanel(true);
+    return;
+  }
+  if (state.chestOpen) closeChestPanel(false);
+
+  state.chestOpen = true;
+  state.activeChestKey = key;
+  getChestState(key, true); // ensure initialized
+  if (state.pointerLocked && document.pointerLockElement === renderer.domElement) {
+    document.exitPointerLock();
+  }
+  if (chestPanel) chestPanel.classList.remove("hidden");
+  state.keys.clear();
+  state.jumpQueued = false;
+  clearTransfer();
+  markChestPanelDirty();
+  updateChestPanel(true);
+  state.recentAction = "Opened chest";
+}
+
+function updateChestPanel(force = false) {
+  if (!state.chestOpen) return;
+
+  const key = state.activeChestKey;
+  if (!key || !isChestAccessible(key)) {
+    if (state.chestOpen) {
+      closeChestPanel(true);
+    }
+    return;
+  }
+
+  const chestSig = `${key}|${inventorySignature()}|${state.transferContext ?? "-"}|${state.inventoryTransferIndex ?? "-"}`;
+  if (!force && !chestPanelNeedsRefresh && chestPanelSignature === chestSig) return;
+  chestPanelSignature = chestSig;
+  chestPanelNeedsRefresh = false;
+
+  const { x, y, z } = fromChestKey(key);
+  if (chestContext) chestContext.textContent = `Chest @ ${x},${y},${z}`;
+
+  const chest = getChestState(key, true);
+
+  // Chest storage grid (27 slots, 9 per row)
+  if (chestStorageEl) {
+    chestStorageEl.innerHTML = "";
+    for (let i = 0; i < CHEST_SIZE; i += 1) {
+      const slot = chest[i];
+      const btn = document.createElement("div");
+      btn.className = "chest-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "chest-storage" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.chestSlot = String(i);
+      btn.textContent = slot ? `${getItemName(slot.itemId)}\nx${slot.count}` : "·";
+      chestStorageEl.appendChild(btn);
+    }
+  }
+
+  // Player inventory grid below chest
+  if (chestInvGridEl) {
+    chestInvGridEl.innerHTML = "";
+    for (let i = 0; i < INVENTORY_SIZE; i += 1) {
+      const slot = state.inventory[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "inventory-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "chest-inv" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.chestInvIndex = String(i);
+      const label = `${i + 1}`;
+      btn.textContent = slot ? `${label}: ${getItemName(slot.itemId)} x${slot.count}` : `${label}: Empty`;
+      chestInvGridEl.appendChild(btn);
+    }
+  }
+}
+
+function onChestStorageClick(slotIndex) {
+  if (!state.chestOpen || !state.activeChestKey) return;
+
+  if (state.transferContext === null) {
+    const chest = getChestState(state.activeChestKey, false);
+    if (!chest || !chest[slotIndex]) {
+      state.recentAction = "Chest slot empty";
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = "chest-storage";
+    state.recentAction = `Selected chest slot ${slotIndex + 1}`;
+    markChestPanelDirty();
+    updateChestPanel(true);
+    return;
+  }
+
+  if (state.transferContext === "chest-storage" && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled transfer";
+    markChestPanelDirty();
+    updateChestPanel(true);
+    return;
+  }
+
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIdx, "chest-storage", slotIndex);
+  if (moved) {
+    state.recentAction = "Moved item";
+    markInventoryPanelDirty();
+    markChestPanelDirty();
+    updateChestPanel(true);
+    updateInventoryPanel(true);
+  } else {
+    state.recentAction = "Cannot move item";
+    markChestPanelDirty();
+    updateChestPanel(true);
+  }
+}
+
+function onChestInvClick(slotIndex) {
+  if (!state.chestOpen) return;
+
+  if (state.transferContext === null) {
+    if (!state.inventory[slotIndex]) {
+      state.recentAction = `Slot ${slotIndex + 1} is empty`;
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = "chest-inv";
+    state.recentAction = `Selected slot ${slotIndex + 1}`;
+    markChestPanelDirty();
+    updateChestPanel(true);
+    return;
+  }
+
+  if (state.transferContext === "chest-inv" && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled transfer";
+    markChestPanelDirty();
+    updateChestPanel(true);
+    return;
+  }
+
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIdx, "chest-inv", slotIndex);
+  if (moved) {
+    state.recentAction = "Moved item";
+    markInventoryPanelDirty();
+    markChestPanelDirty();
+    updateChestPanel(true);
+    updateInventoryPanel(true);
+  } else {
+    state.recentAction = "Cannot move item";
+    markChestPanelDirty();
+    updateChestPanel(true);
+  }
 }
 
 function renderInventorySlotButton(slotIndex) {
@@ -3999,10 +4798,30 @@ function updateInventoryPanel(force = false) {
   inventoryPanelSignature = nextSignature;
   inventoryPanelNeedsRefresh = false;
 
-  if (state.inventoryTransferIndex === null) {
-    inventoryHint.textContent = "Click one slot, then another slot to move or swap.";
+  if (state.transferContext === null) {
+    inventoryHint.textContent = "Click one slot, then another slot to move or swap. Click an armor slot from inventory to equip.";
   } else {
-    inventoryHint.textContent = `Selected slot ${state.inventoryTransferIndex + 1}. Click destination slot.`;
+    const ctxLabel = state.transferContext === "armor" ? "armor slot" : `slot ${(state.inventoryTransferIndex ?? 0) + 1}`;
+    inventoryHint.textContent = `Selected ${ctxLabel}. Click destination slot.`;
+  }
+
+  // Armor equip slots
+  if (inventoryArmorSlotsEl) {
+    inventoryArmorSlotsEl.innerHTML = "";
+    for (let i = 0; i < ARMOR_SLOTS.length; i += 1) {
+      const slotName = ARMOR_SLOTS[i];
+      const worn = state.wornArmor[slotName];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "armor-slot" + (worn ? "" : " empty");
+      if (state.transferContext === "armor" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.armorSlot = String(i);
+      btn.textContent = worn ? `${slotName}: ${getItemName(worn)}` : `${slotName}: Empty`;
+      btn.title = worn ? `Defense: +${ARMOR_DEFENSE[worn] ?? 0}` : `Equip ${slotName} armor`;
+      inventoryArmorSlotsEl.appendChild(btn);
+    }
   }
 
   renderInventoryGrid(inventoryHotbarGrid, 0, HOTBAR_SIZE - 1);
@@ -4014,7 +4833,7 @@ function closeInventoryPanel(updateAction = true) {
     return;
   }
   state.inventoryOpen = false;
-  state.inventoryTransferIndex = null;
+  clearTransfer();
   inventoryPanel.classList.add("hidden");
   inventoryPanelSignature = "";
   markInventoryPanelDirty();
@@ -4032,32 +4851,35 @@ function onInventorySlotClick(slotIndex) {
   }
 
   const targetIndex = Math.floor(slotIndex);
-  if (state.inventoryTransferIndex === null) {
+
+  if (state.transferContext === null) {
     if (!state.inventory[targetIndex]) {
       state.recentAction = `Slot ${targetIndex + 1} is empty`;
       return;
     }
     state.inventoryTransferIndex = targetIndex;
+    state.transferContext = "inventory";
     state.recentAction = `Selected slot ${targetIndex + 1}`;
     markInventoryPanelDirty();
     updateInventoryPanel(true);
     return;
   }
 
-  if (state.inventoryTransferIndex === targetIndex) {
-    state.inventoryTransferIndex = null;
+  if (state.transferContext === "inventory" && state.inventoryTransferIndex === targetIndex) {
+    clearTransfer();
     state.recentAction = "Cancelled transfer";
     markInventoryPanelDirty();
     updateInventoryPanel(true);
     return;
   }
 
+  const fromCtx = state.transferContext;
   const fromIndex = state.inventoryTransferIndex;
-  const moved = transferInventoryStack(state.inventory, fromIndex, targetIndex);
-  state.inventoryTransferIndex = null;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIndex, "inventory", targetIndex);
 
   if (moved) {
-    state.recentAction = `Moved slot ${fromIndex + 1} -> ${targetIndex + 1}`;
+    state.recentAction = `Moved item`;
     markCraftPanelDirty();
     markInventoryPanelDirty();
     refreshHud();
@@ -4071,6 +4893,50 @@ function onInventorySlotClick(slotIndex) {
   updateInventoryPanel(true);
 }
 
+function onArmorSlotClick(slotIndex) {
+  if (!state.inventoryOpen) return;
+  if (slotIndex < 0 || slotIndex >= 4) return;
+  const armorSlotName = ARMOR_SLOTS[slotIndex];
+
+  if (state.transferContext === null) {
+    // Select this armor slot only if it has something worn
+    if (!state.wornArmor[armorSlotName]) {
+      // Try to auto-equip if something in inventory matches
+      state.recentAction = `${armorSlotName} slot is empty`;
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = "armor";
+    state.recentAction = `Selected ${armorSlotName} armor`;
+    markInventoryPanelDirty();
+    updateInventoryPanel(true);
+    return;
+  }
+
+  if (state.transferContext === "armor" && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled";
+    markInventoryPanelDirty();
+    updateInventoryPanel(true);
+    return;
+  }
+
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  clearTransfer();
+  const moved = executeTransfer(fromCtx, fromIdx, "armor", slotIndex);
+  if (moved) {
+    state.recentAction = `Equipped armor`;
+    markInventoryPanelDirty();
+    refreshHud();
+    updateInventoryPanel(true);
+  } else {
+    state.recentAction = `Cannot equip there`;
+    markInventoryPanelDirty();
+    updateInventoryPanel(true);
+  }
+}
+
 function toggleInventoryPanel() {
   if (state.inventoryOpen) {
     closeInventoryPanel(true);
@@ -4080,15 +4946,15 @@ function toggleInventoryPanel() {
   if (state.furnaceOpen) {
     closeFurnacePanel(false);
   }
-
   if (state.craftingOpen) {
-    state.craftingOpen = false;
-    craftPanel.classList.add("hidden");
-    craftPanelSignature = "";
+    closeCraftPanel(false);
+  }
+  if (state.chestOpen) {
+    closeChestPanel(false);
   }
 
   state.inventoryOpen = true;
-  state.inventoryTransferIndex = null;
+  clearTransfer();
   if (state.pointerLocked && document.pointerLockElement === renderer.domElement) {
     document.exitPointerLock();
   }
@@ -4100,6 +4966,19 @@ function toggleInventoryPanel() {
   state.recentAction = "Opened inventory";
 }
 
+function closeCraftPanel(returnItems = true) {
+  if (!state.craftingOpen) return;
+  state.craftingOpen = false;
+  craftPanel.classList.add("hidden");
+  craftPanelSignature = "";
+  clearTransfer();
+  if (returnItems) {
+    returnCraftingGridToInventory();
+    markInventoryPanelDirty();
+  }
+  markCraftPanelDirty();
+}
+
 function toggleCraftPanel() {
   if (state.inventoryOpen) {
     closeInventoryPanel(false);
@@ -4107,12 +4986,15 @@ function toggleCraftPanel() {
   if (state.furnaceOpen) {
     closeFurnacePanel(false);
   }
-  state.craftingOpen = !state.craftingOpen;
-  craftPanel.classList.toggle("hidden", !state.craftingOpen);
-  if (!state.craftingOpen) {
-    craftPanelSignature = "";
+  if (state.chestOpen) {
+    closeChestPanel(false);
+  }
+  if (state.craftingOpen) {
+    closeCraftPanel(true);
     return;
   }
+  craftPanel.classList.remove("hidden");
+  state.craftingOpen = true;
   if (state.pointerLocked && document.pointerLockElement === renderer.domElement) {
     document.exitPointerLock();
   }
@@ -4122,9 +5004,37 @@ function toggleCraftPanel() {
   updateCraftPanel(true);
 }
 
-function collectSaveSnapshot() {
+function serializeWornArmor() {
   return {
-    version: 4,
+    head: state.wornArmor.head || null,
+    chest: state.wornArmor.chest || null,
+    legs: state.wornArmor.legs || null,
+    feet: state.wornArmor.feet || null,
+  };
+}
+
+function loadWornArmor(raw) {
+  state.wornArmor = { head: null, chest: null, legs: null, feet: null };
+  if (!raw || typeof raw !== "object") return;
+  for (const slot of ARMOR_SLOTS) {
+    const itemId = raw[slot];
+    if (typeof itemId === "string" && ITEM_DEFS[itemId] && ITEM_DEFS[itemId].armor?.slot === slot) {
+      state.wornArmor[slot] = itemId;
+    }
+  }
+}
+
+function collectSaveSnapshot() {
+  // Flush grid contents to inventory before snapshotting so nothing is lost on
+  // reload (the grid is treated as transient state). Any items that don't fit
+  // remain in the grid — they'll be visible if the player re-opens the panel.
+  if (state.craftingOpen) {
+    returnCraftingGridToInventory();
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
+  }
+  return {
+    version: 5, // Wave 10: chests + armor
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -4138,9 +5048,11 @@ function collectSaveSnapshot() {
       hunger: state.hunger,
       saturation: state.saturation,
       selectedSlot: state.selectedSlot,
+      wornArmor: serializeWornArmor(),
     },
     inventory: serializeInventory(),
     furnaces: serializeFurnaces(),
+    chests: serializeChests(),
     mobs: serializeHostileMobs(),
     passiveMobs: serializePassiveMobs(),
     objectives: serializeObjectives(),
@@ -4198,6 +5110,8 @@ function applyPlayerSave(playerData) {
     ? THREE.MathUtils.clamp(playerData.saturation, 0, MAX_SATURATION)
     : 5;
   state.starveAccumSec = 0;
+  // Wave 10 — worn armor; forward-default old saves (no armor).
+  loadWornArmor(playerData.wornArmor ?? null);
   return true;
 }
 
@@ -4222,6 +5136,7 @@ async function loadGame() {
     world.generateTerrain({ preserveEdits: true });
     deactivateTorchLights();
     loadFurnaces(snapshot.furnaces);
+    loadChests(snapshot.chests);
     loadHostileMobs(snapshot.mobs);
     loadPassiveMobs(snapshot.passiveMobs);
     loadObjectives(snapshot.objectives);
@@ -4251,6 +5166,7 @@ async function loadGame() {
     updateCraftPanel(true);
     updateFurnacePanel(true);
     updateInventoryPanel(true);
+    updateChestPanel(true);
     render();
     lastAutosaveAt = performance.now();
     setSaveStatus("Loaded");
@@ -4317,6 +5233,7 @@ function updateTargetBlockFromCenter() {
 }
 
 function breakBlock(ndcX = 0, ndcY = 0) {
+  if (state.chestOpen) return false;
   if (tryHitHostileMob(ndcX, ndcY)) {
     return true;
   }
@@ -4372,6 +5289,24 @@ function breakBlock(ndcX = 0, ndcY = 0) {
       state.activeFurnaceKey = null;
     }
     markFurnacePanelDirty();
+  }
+  if (type === CHEST_BLOCK_TYPE) {
+    // Drop all contents into inventory, then remove state
+    const chestSlots = chestStates.get(targetKey);
+    if (chestSlots) {
+      for (const slot of chestSlots) {
+        if (slot) {
+          addItemToInventory(state.inventory, slot.itemId, slot.count);
+        }
+      }
+      chestStates.delete(targetKey);
+    }
+    if (state.activeChestKey === targetKey) {
+      state.activeChestKey = null;
+      state.chestOpen = false;
+      if (chestPanel) chestPanel.classList.add("hidden");
+    }
+    markChestPanelDirty();
   }
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   if (type === TORCH_BLOCK_TYPE) {
@@ -4467,6 +5402,25 @@ function eatSelectedFood() {
 }
 
 function placeBlock(ndcX = 0, ndcY = 0) {
+  if (state.chestOpen) return false;
+  // Wave 10 — check if player is right-clicking a chest block (before item logic)
+  {
+    const chestHit = hitTest(ndcX, ndcY);
+    if (chestHit) {
+      const normal = getWorldNormal(chestHit);
+      if (normal) {
+        const coords = toBlockCoords(chestHit.point, normal, -1);
+        if (world.get(coords.x, coords.y, coords.z) === CHEST_BLOCK_TYPE) {
+          const key = toChestKey(coords.x, coords.y, coords.z);
+          if (isChestAccessible(key)) {
+            openChestPanel(key);
+            return true;
+          }
+        }
+      }
+    }
+  }
+
   const slot = getSelectedInventorySlot();
   if (!slot) {
     state.recentAction = "Selected slot empty";
@@ -4514,6 +5468,11 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     const furnaceKey = toFurnaceKey(coords.x, coords.y, coords.z);
     getFurnaceState(furnaceKey, true);
     markFurnacePanelDirty();
+  }
+  if (placeType === CHEST_BLOCK_TYPE) {
+    const chestKey = toChestKey(coords.x, coords.y, coords.z);
+    getChestState(chestKey, true);
+    markChestPanelDirty();
   }
   consumeFromSlot(state.inventory, state.selectedSlot, 1);
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
@@ -4671,7 +5630,20 @@ function takeDamage(amount, reason) {
   if (!Number.isFinite(amount) || amount <= 0) {
     return;
   }
-  const damage = Math.max(1, Math.floor(amount));
+  let damage = Math.max(1, Math.floor(amount));
+
+  // Wave 10 — armor reduces physical damage (not starvation or void).
+  // Starvation, void, lava deal full damage regardless.
+  const bypassArmor = reason === "starvation" || reason === "void";
+  if (!bypassArmor) {
+    const defense = getTotalDefense(state.wornArmor);
+    if (defense > 0) {
+      // Minecraft formula: damage * (1 - defense/25) but min 4% of original
+      const reduction = Math.min(0.96, defense / 25);
+      damage = Math.max(1, Math.floor(damage * (1 - reduction)));
+    }
+  }
+
   state.health = Math.max(0, state.health - damage);
   if (state.health <= 0) {
     respawnPlayer({ healToMax: true });
@@ -4699,16 +5671,22 @@ function regenerateWorld() {
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
+  chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
   resetObjectives();
   state.activeFurnaceKey = null;
+  state.activeChestKey = null;
+  state.chestOpen = false;
+  state.wornArmor = { head: null, chest: null, legs: null, feet: null };
+  if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
   respawnPlayer({ healToMax: true });
   state.recentAction = "Regenerated terrain";
   markCraftPanelDirty();
   markFurnacePanelDirty();
   markInventoryPanelDirty();
+  markChestPanelDirty();
   updateObjectives(0, true);
   updateCraftPanel(true);
   updateFurnacePanel(true);
@@ -4721,10 +5699,16 @@ async function createNewWorld() {
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
+  chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
   resetObjectives();
   state.activeFurnaceKey = null;
+  state.activeChestKey = null;
+  state.chestOpen = false;
+  state.wornArmor = { head: null, chest: null, legs: null, feet: null };
+  state.craftingGrid = new Array(9).fill(null);
+  if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
   state.inventory = createStartingInventory();
   state.selectedSlot = 0;
@@ -4797,6 +5781,7 @@ function updateSimulation(dtSeconds) {
     updateTargetBlockFromCenter();
     refreshHud();
     updateFurnacePanel();
+    updateChestPanel();
     return;
   }
 
@@ -5076,6 +6061,7 @@ function updateSimulation(dtSeconds) {
   updateCraftPanel();
   updateFurnacePanel();
   updateInventoryPanel();
+  updateChestPanel();
 
   const now = performance.now();
   const autosaveDue = !isAutomationSession && now - lastAutosaveAt >= simConfig.autosaveIntervalMs;
@@ -5164,6 +6150,7 @@ setupControls({
   toggleCraftPanel,
   toggleInventoryPanel,
   toggleFurnacePanel,
+  closeChestPanel,
   breakBlockAt: breakBlock,
   placeBlockAt: placeBlock,
   toNdc,
@@ -5182,6 +6169,14 @@ newWorldButton.addEventListener("click", () => {
 });
 
 inventoryPanel.addEventListener("click", (event) => {
+  // Armor slot click
+  const armorBtn = event.target.closest("[data-armor-slot]");
+  if (armorBtn) {
+    const slotIndex = Number(armorBtn.dataset.armorSlot);
+    onArmorSlotClick(slotIndex);
+    return;
+  }
+  // Inventory slot click
   const slotButton = event.target.closest("[data-slot-index]");
   if (!slotButton) {
     return;
@@ -5189,6 +6184,51 @@ inventoryPanel.addEventListener("click", (event) => {
   const slotIndex = Number(slotButton.dataset.slotIndex);
   onInventorySlotClick(slotIndex);
 });
+
+// Wave 10 — craft panel grid + result slot + inventory clicks
+if (craftPanel) {
+  craftPanel.addEventListener("click", (event) => {
+    // Grid slot click
+    const gridCell = event.target.closest("[data-grid-index]");
+    if (gridCell) {
+      const gridIndex = Number(gridCell.dataset.gridIndex);
+      onCraftGridSlotClick(gridIndex);
+      return;
+    }
+    // Result slot click
+    if (event.target.closest("#craft-result-slot")) {
+      takeCraftingResult();
+      return;
+    }
+    // Player inventory grid inside craft panel
+    const invBtn = event.target.closest("[data-craft-inv-index]");
+    if (invBtn) {
+      onCraftInvClick(Number(invBtn.dataset.craftInvIndex));
+      return;
+    }
+    // Recipe craft button (existing)
+    const button = event.target.closest("button");
+    if (button && button.closest("#craft-recipes")) {
+      // recipe buttons have their own listeners added dynamically in updateCraftPanel
+    }
+  });
+}
+
+// Wave 10 — chest panel clicks
+if (chestPanel) {
+  chestPanel.addEventListener("click", (event) => {
+    const chestCell = event.target.closest("[data-chest-slot]");
+    if (chestCell) {
+      onChestStorageClick(Number(chestCell.dataset.chestSlot));
+      return;
+    }
+    const invBtn = event.target.closest("[data-chest-inv-index]");
+    if (invBtn) {
+      onChestInvClick(Number(invBtn.dataset.chestInvIndex));
+      return;
+    }
+  });
+}
 
 furnacePanel.addEventListener("click", (event) => {
   const button = event.target.closest("button[data-action]");
@@ -5290,6 +6330,8 @@ window.render_game_to_text = () => {
     crafting: {
       open: state.craftingOpen,
       nearWorkbench: isWorkbenchNearby(),
+      grid: state.craftingGrid.map((s) => (s ? { itemId: s.itemId, count: s.count } : null)),
+      result: (() => { const r = getCurrentGridRecipe(); return r ? { itemId: r.output.itemId, count: r.output.count } : null; })(),
     },
     furnace: {
       open: state.furnaceOpen,
@@ -5373,6 +6415,19 @@ window.render_game_to_text = () => {
       scanRadius:
         (Number.isFinite(torchLightConfig.scanRadius) ? Math.max(1, Math.floor(torchLightConfig.scanRadius)) : 10) +
         combinedBonuses.torchScanRadiusBonus,
+    },
+    armor: {
+      worn: { ...state.wornArmor },
+      totalDefense: getTotalDefense(state.wornArmor),
+    },
+    chests: {
+      count: chestStates.size,
+      sample: (() => {
+        const first = chestStates.entries().next().value;
+        if (!first) return null;
+        const [key, slots] = first;
+        return { key, slotCount: slots.filter(Boolean).length };
+      })(),
     },
     targetBlock: state.targetBlock,
     world: {
@@ -5615,6 +6670,9 @@ window.__exoCraftDebug = {
       if (type === FURNACE_BLOCK_TYPE) {
         getFurnaceState(toFurnaceKey(tx, ty, tz), true);
       }
+      if (type === CHEST_BLOCK_TYPE) {
+        getChestState(toChestKey(tx, ty, tz), true);
+      }
       updateObjectives(0, true);
     }
     return result;
@@ -5666,6 +6724,58 @@ window.__exoCraftDebug = {
     return changed || state.specialization.selected === selected;
   },
   getObjectives: () => buildObjectivePayload(),
+  // Wave 10 — armor, chest, and crafting debug hooks
+  equipArmor: (itemId) => {
+    if (typeof itemId !== "string" || !ITEM_DEFS[itemId]) {
+      return `Unknown item: ${itemId}`;
+    }
+    const armorSlot = getArmorSlot(itemId);
+    if (!armorSlot) {
+      return `${itemId} is not an armor item`;
+    }
+    state.wornArmor[armorSlot] = itemId;
+    markInventoryPanelDirty();
+    refreshHud();
+    return { slot: armorSlot, itemId, defense: ARMOR_DEFENSE[itemId] ?? 0 };
+  },
+  hurtPlayer: (amount = 5) => {
+    const dmg = Number.isFinite(amount) ? Math.max(1, Math.floor(amount)) : 5;
+    takeDamage(dmg, "debug");
+    return { health: state.health, maxHealth: state.maxHealth };
+  },
+  openChestAt: (x, y, z) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return false;
+    }
+    const tx = Math.floor(x);
+    const ty = Math.floor(y);
+    const tz = Math.floor(z);
+    if (world.get(tx, ty, tz) !== CHEST_BLOCK_TYPE) {
+      // Place a chest block for testing
+      world.set(tx, ty, tz, CHEST_BLOCK_TYPE);
+      world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+      updateTargetBlockFromCenter();
+    }
+    const key = toChestKey(tx, ty, tz);
+    getChestState(key, true);
+    openChestPanel(key);
+    return { key, accessible: isChestAccessible(key) };
+  },
+  giveChestItem: (itemId, count = 1, chestKey = null) => {
+    const key = chestKey ?? (chestStates.size > 0 ? chestStates.keys().next().value : null);
+    if (!key) return "No chest found — use openChestAt() first";
+    if (typeof itemId !== "string" || !ITEM_DEFS[itemId]) return `Unknown item: ${itemId}`;
+    const chest = getChestState(key, true);
+    const leftover = addItemToInventory(chest, itemId, count);
+    markChestPanelDirty();
+    updateChestPanel(true);
+    return { added: count - leftover, leftover };
+  },
+  getArmorStats: () => ({
+    worn: { ...state.wornArmor },
+    totalDefense: getTotalDefense(state.wornArmor),
+    maxPossible: 20,
+  }),
 };
 
 function frame(now) {

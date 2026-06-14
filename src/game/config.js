@@ -43,6 +43,8 @@ const DEFAULT_GAME_CONFIG = {
       { id: 20, name: "Redstone Ore", color: 0xc02020 },
       // Wave 8 — lava (emissive fluid)
       { id: 21, name: "Lava", color: 0xff6600, transparent: true, emissive: 0xff3300, emissiveIntensity: 0.9 },
+      // Wave 10 — chest block
+      { id: 22, name: "Chest", color: 0xa0732a },
     ],
     generation: {
       seed: 1337,

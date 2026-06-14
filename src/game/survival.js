@@ -82,6 +82,43 @@ export function hasDurability(itemId) {
   return Object.prototype.hasOwnProperty.call(TOOL_MAX_DURABILITY, itemId);
 }
 
+// ---------------------------------------------------------------------------
+// Wave 10 — Armor slots
+// ---------------------------------------------------------------------------
+export const ARMOR_SLOTS = ["head", "chest", "legs", "feet"];
+
+export const ARMOR_DEFENSE = {
+  leather_helmet:     1,
+  leather_chestplate: 3,
+  leather_leggings:   2,
+  leather_boots:      1,
+  iron_helmet:        2,
+  iron_chestplate:    6,
+  iron_leggings:      5,
+  iron_boots:         2,
+  diamond_helmet:     3,
+  diamond_chestplate: 8,
+  diamond_leggings:   6,
+  diamond_boots:      3,
+};
+
+/** Returns the armor slot ('head'|'chest'|'legs'|'feet') for an armor itemId, or null. */
+export function getArmorSlot(itemId) {
+  return ITEM_DEFS[itemId]?.armor?.slot ?? null;
+}
+
+/** Returns total defense from a worn armor object { head, chest, legs, feet }. */
+export function getTotalDefense(wornArmor) {
+  let total = 0;
+  for (const slot of ARMOR_SLOTS) {
+    const itemId = wornArmor[slot];
+    if (itemId && ARMOR_DEFENSE[itemId]) {
+      total += ARMOR_DEFENSE[itemId];
+    }
+  }
+  return total;
+}
+
 export const ITEM_DEFS = {
   grass: { id: "grass", name: "Grass", placeBlockType: 1 },
   dirt: { id: "dirt", name: "Dirt", placeBlockType: 2 },
@@ -100,6 +137,8 @@ export const ITEM_DEFS = {
   glass: { id: "glass", name: "Glass", placeBlockType: 14 },
   // Wave 5 — water is not placeable or obtainable by the player (bucket later)
   water: { id: "water", name: "Water" },
+  // Wave 10 — chest block
+  chest: { id: "chest", name: "Chest", placeBlockType: 22 },
   plank: { id: "plank", name: "Plank" },
   stick: { id: "stick", name: "Stick" },
   bone_shard: { id: "bone_shard", name: "Bone Shard" },
@@ -130,6 +169,21 @@ export const ITEM_DEFS = {
   wool:    { id: "wool",    name: "Wool"    },
   leather: { id: "leather", name: "Leather" },
   feather: { id: "feather", name: "Feather" },
+  // Wave 10 — armor items (leather tier)
+  leather_helmet:     { id: "leather_helmet",     name: "Leather Helmet",     armor: { slot: "head",  defense: 1 } },
+  leather_chestplate: { id: "leather_chestplate", name: "Leather Chestplate", armor: { slot: "chest", defense: 3 } },
+  leather_leggings:   { id: "leather_leggings",   name: "Leather Leggings",   armor: { slot: "legs",  defense: 2 } },
+  leather_boots:      { id: "leather_boots",      name: "Leather Boots",      armor: { slot: "feet",  defense: 1 } },
+  // Wave 10 — armor items (iron tier)
+  iron_helmet:        { id: "iron_helmet",        name: "Iron Helmet",        armor: { slot: "head",  defense: 2 } },
+  iron_chestplate:    { id: "iron_chestplate",    name: "Iron Chestplate",    armor: { slot: "chest", defense: 6 } },
+  iron_leggings:      { id: "iron_leggings",      name: "Iron Leggings",      armor: { slot: "legs",  defense: 5 } },
+  iron_boots:         { id: "iron_boots",         name: "Iron Boots",         armor: { slot: "feet",  defense: 2 } },
+  // Wave 10 — armor items (diamond tier)
+  diamond_helmet:     { id: "diamond_helmet",     name: "Diamond Helmet",     armor: { slot: "head",  defense: 3 } },
+  diamond_chestplate: { id: "diamond_chestplate", name: "Diamond Chestplate", armor: { slot: "chest", defense: 8 } },
+  diamond_leggings:   { id: "diamond_leggings",   name: "Diamond Leggings",   armor: { slot: "legs",  defense: 6 } },
+  diamond_boots:      { id: "diamond_boots",      name: "Diamond Boots",      armor: { slot: "feet",  defense: 3 } },
   wood_pickaxe: { id: "wood_pickaxe", name: "Wood Pickaxe", toolKind: "pickaxe", toolPower: 2.1 },
   wood_axe: { id: "wood_axe", name: "Wood Axe", toolKind: "axe", toolPower: 2.1 },
   wood_shovel: { id: "wood_shovel", name: "Wood Shovel", toolKind: "shovel", toolPower: 2.1 },
@@ -179,6 +233,8 @@ export const BLOCK_DROPS = {
   // 13 = bedrock: no drop (handled by breakBlock guard)
   14: "glass",
   // 15 = water: no drop (bucket mechanic deferred)
+  // Wave 10 — chest drops itself (contents handled in breakBlock)
+  22: "chest",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -242,6 +298,8 @@ const BLOCK_HARDNESS = {
   19: 5.0,  // diamond ore
   20: 4.5,  // redstone ore
   21: Infinity, // lava — not breakable
+  // Wave 10
+  22: 2.0,  // chest — axe preferred
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -258,6 +316,8 @@ const BLOCK_PREFERRED_TOOL = {
   12: "shovel",  // gravel
   // 13 bedrock: no tool matters — always Infinity hardness
   // 14 glass: no preferred tool (any breaks it equally)
+  // Wave 10
+  22: "axe",   // chest
   // Wave 8 — all ores need a pickaxe
   16: "pickaxe", // coal ore
   17: "pickaxe", // iron ore
@@ -265,6 +325,121 @@ const BLOCK_PREFERRED_TOOL = {
   19: "pickaxe", // diamond ore
   20: "pickaxe", // redstone ore
 };
+
+// ---------------------------------------------------------------------------
+// Recipe matching helpers — shared by the crafting grid and applyRecipe.
+// ---------------------------------------------------------------------------
+
+/**
+ * Try to match a 3x3 grid (9-slot array, row-major) against a shaped recipe.
+ * pattern: array of strings (rows), each char maps to an itemId via `key`.
+ * Matching is offset-normalized: trim empty rows and columns, then compare.
+ * Returns true when the non-empty layout matches regardless of position.
+ */
+export function matchShapedRecipe(gridSlots, recipe) {
+  if (!recipe.pattern || !recipe.key) return false;
+
+  // Build a 3x3 canonical grid from the pattern.
+  const patRows = recipe.pattern;
+  const keyMap = recipe.key;
+  const patGrid = [];
+  for (let row = 0; row < patRows.length; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const ch = patRows[row]?.[col] ?? "_";
+      patGrid.push(ch === "_" || ch === " " ? null : (keyMap[ch] ?? null));
+    }
+  }
+  // Pad to 9 slots
+  while (patGrid.length < 9) patGrid.push(null);
+
+  // Compute bounding box of non-null cells in pattern and in grid.
+  function bbox(arr) {
+    let minR = 3, maxR = -1, minC = 3, maxC = -1;
+    for (let i = 0; i < 9; i += 1) {
+      if (arr[i] !== null) {
+        const r = Math.floor(i / 3);
+        const c = i % 3;
+        if (r < minR) minR = r;
+        if (r > maxR) maxR = r;
+        if (c < minC) minC = c;
+        if (c > maxC) maxC = c;
+      }
+    }
+    return { minR, maxR, minC, maxC };
+  }
+
+  const pb = bbox(patGrid);
+  const gb = bbox(gridSlots.map((s) => (s ? s.itemId : null)));
+
+  // Both must be empty or both non-empty
+  const patEmpty = pb.maxR < 0;
+  const gridEmpty = gb.maxR < 0;
+  if (patEmpty !== gridEmpty) return false;
+  if (patEmpty) return false;
+
+  // Bounding-box dimensions must match
+  const patH = pb.maxR - pb.minR + 1;
+  const patW = pb.maxC - pb.minC + 1;
+  const gridH = gb.maxR - gb.minR + 1;
+  const gridW = gb.maxC - gb.minC + 1;
+  if (patH !== gridH || patW !== gridW) return false;
+
+  // Compare cell-by-cell within the bounding box
+  for (let dr = 0; dr < patH; dr += 1) {
+    for (let dc = 0; dc < patW; dc += 1) {
+      const pIdx = (pb.minR + dr) * 3 + (pb.minC + dc);
+      const gIdx = (gb.minR + dr) * 3 + (gb.minC + dc);
+      const pId = patGrid[pIdx];
+      const gSlot = gridSlots[gIdx];
+      const gId = gSlot ? gSlot.itemId : null;
+      if (pId !== gId) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Try to match a grid (or inventory for shapeless) against a shapeless recipe.
+ * For grid matching: each grid slot contributes exactly 1 of its item.
+ * For applyRecipe: uses countInventoryItems against each required input.count.
+ */
+export function matchShapelessRecipeFromGrid(gridSlots, recipe) {
+  // Build a count map from what's in the grid (1 per non-null slot)
+  const gridCounts = new Map();
+  for (const slot of gridSlots) {
+    if (!slot) continue;
+    gridCounts.set(slot.itemId, (gridCounts.get(slot.itemId) ?? 0) + 1);
+  }
+  // Check every required input is satisfied
+  for (const input of recipe.inputs) {
+    const have = gridCounts.get(input.itemId) ?? 0;
+    if (have < input.count) return false;
+  }
+  // Check the grid doesn't have extra items not in the recipe
+  const recipeItems = new Set(recipe.inputs.map((i) => i.itemId));
+  for (const [itemId] of gridCounts) {
+    if (!recipeItems.has(itemId)) return false;
+  }
+  // Also check total item count in grid matches total required
+  const gridTotal = [...gridCounts.values()].reduce((a, b) => a + b, 0);
+  const recipeTotal = recipe.inputs.reduce((a, i) => a + i.count, 0);
+  return gridTotal === recipeTotal;
+}
+
+/**
+ * Match a grid against any recipe (shaped first, then shapeless).
+ * Returns the matching recipe or null.
+ */
+export function matchGridRecipe(gridSlots, recipes, needsWorkbench) {
+  for (const recipe of recipes) {
+    if (recipe.requiresWorkbench && !needsWorkbench) continue;
+    const matched = recipe.pattern
+      ? matchShapedRecipe(gridSlots, recipe)
+      : matchShapelessRecipeFromGrid(gridSlots, recipe);
+    if (matched) return recipe;
+  }
+  return null;
+}
 
 export const RECIPES = [
   {
@@ -308,6 +483,9 @@ export const RECIPES = [
   {
     id: "wood_pickaxe",
     name: "Wood Pickaxe",
+    // XXX_   (3 planks top row, sticks middle and bottom of center col)
+    pattern: ["XXX", "_S_", "_S_"],
+    key: { X: "plank", S: "stick" },
     inputs: [
       { itemId: "plank", count: 3 },
       { itemId: "stick", count: 2 },
@@ -318,16 +496,22 @@ export const RECIPES = [
   {
     id: "wood_sword",
     name: "Wood Sword",
+    // Plank over plank over stick
+    pattern: ["_X_", "_X_", "_S_"],
+    key: { X: "plank", S: "stick" },
     inputs: [
       { itemId: "plank", count: 2 },
       { itemId: "stick", count: 1 },
     ],
     output: { itemId: "wood_sword", count: 1 },
-    requiresWorkbench: false,
+    requiresWorkbench: true,
   },
   {
     id: "wood_axe",
     name: "Wood Axe",
+    // XX_ / _S_ / _S_ (2 planks + 2 sticks, matching original inputs)
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "plank", S: "stick" },
     inputs: [
       { itemId: "plank", count: 2 },
       { itemId: "stick", count: 2 },
@@ -338,6 +522,9 @@ export const RECIPES = [
   {
     id: "wood_shovel",
     name: "Wood Shovel",
+    // _X_ / _S_ / _S_
+    pattern: ["_X_", "_S_", "_S_"],
+    key: { X: "plank", S: "stick" },
     inputs: [
       { itemId: "plank", count: 1 },
       { itemId: "stick", count: 2 },
@@ -348,6 +535,8 @@ export const RECIPES = [
   {
     id: "stone_pickaxe",
     name: "Stone Pickaxe",
+    pattern: ["XXX", "_S_", "_S_"],
+    key: { X: "stone", S: "stick" },
     inputs: [
       { itemId: "stone", count: 3 },
       { itemId: "stick", count: 2 },
@@ -358,6 +547,8 @@ export const RECIPES = [
   {
     id: "stone_axe",
     name: "Stone Axe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "stone", S: "stick" },
     inputs: [
       { itemId: "stone", count: 2 },
       { itemId: "stick", count: 2 },
@@ -368,6 +559,8 @@ export const RECIPES = [
   {
     id: "stone_shovel",
     name: "Stone Shovel",
+    pattern: ["_X_", "_S_", "_S_"],
+    key: { X: "stone", S: "stick" },
     inputs: [
       { itemId: "stone", count: 1 },
       { itemId: "stick", count: 2 },
@@ -399,6 +592,8 @@ export const RECIPES = [
   {
     id: "copper_pickaxe",
     name: "Copper Pickaxe",
+    pattern: ["XXX", "_S_", "_S_"],
+    key: { X: "copper_ingot", S: "stick" },
     inputs: [
       { itemId: "copper_ingot", count: 3 },
       { itemId: "stick", count: 2 },
@@ -479,6 +674,8 @@ export const RECIPES = [
   {
     id: "iron_pickaxe",
     name: "Iron Pickaxe",
+    pattern: ["XXX", "_S_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
     inputs: [
       { itemId: "iron_ingot", count: 3 },
       { itemId: "stick", count: 2 },
@@ -489,6 +686,8 @@ export const RECIPES = [
   {
     id: "iron_axe",
     name: "Iron Axe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
     inputs: [
       { itemId: "iron_ingot", count: 2 },
       { itemId: "stick", count: 2 },
@@ -499,6 +698,8 @@ export const RECIPES = [
   {
     id: "iron_shovel",
     name: "Iron Shovel",
+    pattern: ["_X_", "_S_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
     inputs: [
       { itemId: "iron_ingot", count: 1 },
       { itemId: "stick", count: 2 },
@@ -509,17 +710,21 @@ export const RECIPES = [
   {
     id: "iron_sword",
     name: "Iron Sword",
+    pattern: ["_X_", "_X_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
     inputs: [
       { itemId: "iron_ingot", count: 2 },
       { itemId: "stick", count: 1 },
     ],
     output: { itemId: "iron_sword", count: 1 },
-    requiresWorkbench: false,
+    requiresWorkbench: true,
   },
   // Wave 8 — diamond tools (3 diamonds + 2 sticks)
   {
     id: "diamond_pickaxe",
     name: "Diamond Pickaxe",
+    pattern: ["XXX", "_S_", "_S_"],
+    key: { X: "diamond", S: "stick" },
     inputs: [
       { itemId: "diamond", count: 3 },
       { itemId: "stick", count: 2 },
@@ -530,6 +735,8 @@ export const RECIPES = [
   {
     id: "diamond_axe",
     name: "Diamond Axe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "diamond", S: "stick" },
     inputs: [
       { itemId: "diamond", count: 2 },
       { itemId: "stick", count: 2 },
@@ -540,6 +747,8 @@ export const RECIPES = [
   {
     id: "diamond_shovel",
     name: "Diamond Shovel",
+    pattern: ["_X_", "_S_", "_S_"],
+    key: { X: "diamond", S: "stick" },
     inputs: [
       { itemId: "diamond", count: 1 },
       { itemId: "stick", count: 2 },
@@ -550,12 +759,14 @@ export const RECIPES = [
   {
     id: "diamond_sword",
     name: "Diamond Sword",
+    pattern: ["_X_", "_X_", "_S_"],
+    key: { X: "diamond", S: "stick" },
     inputs: [
       { itemId: "diamond", count: 2 },
       { itemId: "stick", count: 1 },
     ],
     output: { itemId: "diamond_sword", count: 1 },
-    requiresWorkbench: false,
+    requiresWorkbench: true,
   },
   // Wave 8 — coal is also a fuel; allow crafting torches with coal (same recipe path)
   {
@@ -567,6 +778,127 @@ export const RECIPES = [
     ],
     output: { itemId: "torch", count: 4 },
     requiresWorkbench: false,
+  },
+  // Wave 10 — chest (8 planks around the perimeter, empty center)
+  {
+    id: "chest",
+    name: "Chest",
+    pattern: ["XXX", "X_X", "XXX"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 8 }],
+    output: { itemId: "chest", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave 10 — leather armor
+  {
+    id: "leather_helmet",
+    name: "Leather Helmet",
+    pattern: ["XXX", "X_X", "___"],
+    key: { X: "leather" },
+    inputs: [{ itemId: "leather", count: 5 }],
+    output: { itemId: "leather_helmet", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "leather_chestplate",
+    name: "Leather Chestplate",
+    pattern: ["X_X", "XXX", "XXX"],
+    key: { X: "leather" },
+    inputs: [{ itemId: "leather", count: 8 }],
+    output: { itemId: "leather_chestplate", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "leather_leggings",
+    name: "Leather Leggings",
+    pattern: ["XXX", "X_X", "X_X"],
+    key: { X: "leather" },
+    inputs: [{ itemId: "leather", count: 7 }],
+    output: { itemId: "leather_leggings", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "leather_boots",
+    name: "Leather Boots",
+    pattern: ["___", "X_X", "X_X"],
+    key: { X: "leather" },
+    inputs: [{ itemId: "leather", count: 4 }],
+    output: { itemId: "leather_boots", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave 10 — iron armor
+  {
+    id: "iron_helmet",
+    name: "Iron Helmet",
+    pattern: ["XXX", "X_X", "___"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 5 }],
+    output: { itemId: "iron_helmet", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_chestplate",
+    name: "Iron Chestplate",
+    pattern: ["X_X", "XXX", "XXX"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 8 }],
+    output: { itemId: "iron_chestplate", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_leggings",
+    name: "Iron Leggings",
+    pattern: ["XXX", "X_X", "X_X"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 7 }],
+    output: { itemId: "iron_leggings", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_boots",
+    name: "Iron Boots",
+    pattern: ["___", "X_X", "X_X"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 4 }],
+    output: { itemId: "iron_boots", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave 10 — diamond armor
+  {
+    id: "diamond_helmet",
+    name: "Diamond Helmet",
+    pattern: ["XXX", "X_X", "___"],
+    key: { X: "diamond" },
+    inputs: [{ itemId: "diamond", count: 5 }],
+    output: { itemId: "diamond_helmet", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_chestplate",
+    name: "Diamond Chestplate",
+    pattern: ["X_X", "XXX", "XXX"],
+    key: { X: "diamond" },
+    inputs: [{ itemId: "diamond", count: 8 }],
+    output: { itemId: "diamond_chestplate", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_leggings",
+    name: "Diamond Leggings",
+    pattern: ["XXX", "X_X", "X_X"],
+    key: { X: "diamond" },
+    inputs: [{ itemId: "diamond", count: 7 }],
+    output: { itemId: "diamond_leggings", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "diamond_boots",
+    name: "Diamond Boots",
+    pattern: ["___", "X_X", "X_X"],
+    key: { X: "diamond" },
+    inputs: [{ itemId: "diamond", count: 4 }],
+    output: { itemId: "diamond_boots", count: 1 },
+    requiresWorkbench: true,
   },
 ];
 

@@ -1,4 +1,4 @@
-import { HOTBAR_SIZE, ITEM_DEFS, hasDurability, TOOL_MAX_DURABILITY } from "./survival";
+import { HOTBAR_SIZE, ITEM_DEFS, hasDurability, TOOL_MAX_DURABILITY, ARMOR_SLOTS, getTotalDefense } from "./survival";
 import { MAX_HUNGER } from "./hunger";
 import { getItemIconCanvas } from "./textures";
 
@@ -11,10 +11,17 @@ let _slotDurabilityBarEls = /** @type {(HTMLElement|null)[]} */ ([]);
 let _heartsEl = null;
 let _hungerEl = null;
 let _hotbarWrapEl = null;
+// Wave 10 — armor bar
+let _armorEl = null;
 
 function buildHotbarDOM(hotbarEl) {
   // Replace hotbar inner content with a wrapper containing hearts + hunger + slot cells.
   hotbarEl.innerHTML = "";
+
+  // Wave 10: armor bar sits above the status row
+  _armorEl = document.createElement("div");
+  _armorEl.id = "mc-armor";
+  hotbarEl.appendChild(_armorEl);
 
   // Top HUD row: hearts (left) and hunger shanks (right) sit above the hotbar slots.
   const statusRow = document.createElement("div");
@@ -77,6 +84,7 @@ let lastStats = "";
 let lastHotbar = "";
 let lastHearts = "";
 let lastHunger = "";
+let lastArmor = "";
 
 // ----- Heart drawing -----
 const HEART_SIZE = 9; // Minecraft heart icon size in pixels (rendered at 2x = 18px CSS)
@@ -284,6 +292,103 @@ function rebuildHearts(health, maxHealth) {
   }
 }
 
+// ----- Wave 10: Armor bar -----
+const ARMOR_ICON_SIZE = 9;
+
+/**
+ * Draw a shield-style armor icon.
+ * fill: "full" | "half" | "empty"
+ */
+function drawArmorIcon(ctx, fill) {
+  const s = ARMOR_ICON_SIZE;
+  ctx.clearRect(0, 0, s, s);
+
+  // Dark background
+  ctx.fillStyle = "#1a1f2a";
+  ctx.fillRect(0, 0, s, s);
+
+  // Shield pixel shape (inverted-V top, squared sides, pointed bottom)
+  // Row 0: _###_####  etc — a simple 9x9 chestplate silhouette
+  const ROWS = [
+    0b011111110, // row 0
+    0b111111111, // row 1
+    0b111111111, // row 2
+    0b111111111, // row 3
+    0b011111110, // row 4
+    0b001111100, // row 5
+    0b000111000, // row 6
+    0b000111000, // row 7
+    0b000010000, // row 8
+  ];
+
+  if (fill === "empty") {
+    ctx.fillStyle = "#3a3f4a";
+  } else if (fill === "half") {
+    ctx.fillStyle = "#7098c0";
+  } else {
+    ctx.fillStyle = "#80b8e8";
+  }
+
+  for (let y = 0; y < s; y += 1) {
+    for (let x = 0; x < s; x += 1) {
+      if (((ROWS[y] >> (s - 1 - x)) & 1) === 1) {
+        if (fill === "half" && x >= Math.ceil(s / 2)) {
+          ctx.fillStyle = "#3a3f4a";
+          ctx.fillRect(x, y, 1, 1);
+          ctx.fillStyle = "#7098c0";
+        } else {
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+  }
+
+  if (fill === "full") {
+    ctx.fillStyle = "rgba(200, 230, 255, 0.5)";
+    ctx.fillRect(2, 1, 1, 1);
+  }
+}
+
+function armorSignature(wornArmor) {
+  if (!wornArmor) return "none";
+  return ARMOR_SLOTS.map((s) => wornArmor[s] || "_").join("|");
+}
+
+function rebuildArmorBar(wornArmor) {
+  if (!_armorEl) return;
+  _armorEl.innerHTML = "";
+
+  if (!wornArmor) return;
+
+  const totalDefense = getTotalDefense(wornArmor);
+  if (totalDefense <= 0) return;
+
+  // Max armor in the game: leather=7, iron=15, diamond=20
+  const MAX_ARMOR = 20;
+  const iconCount = 10;
+  for (let i = 0; i < iconCount; i += 1) {
+    const canvas = document.createElement("canvas");
+    canvas.width = ARMOR_ICON_SIZE;
+    canvas.height = ARMOR_ICON_SIZE;
+    canvas.className = "mc-armor-icon";
+    const ctx = canvas.getContext("2d");
+
+    const iconValue = (i + 1) * 2;
+    const normalized = Math.round((totalDefense / MAX_ARMOR) * iconCount * 2);
+    let fill;
+    if (normalized >= iconValue) {
+      fill = "full";
+    } else if (normalized >= iconValue - 1) {
+      fill = "half";
+    } else {
+      fill = "empty";
+    }
+
+    drawArmorIcon(ctx, fill);
+    _armorEl.appendChild(canvas);
+  }
+}
+
 // ----- Hotbar slot updates -----
 function hotbarSignature(inventory, selectedSlot) {
   let s = `sel:${selectedSlot}`;
@@ -367,6 +472,13 @@ export function updateHud({ state, world, statsEl, hotbarEl }) {
   // Build DOM once.
   if (!_slotsBuilt) {
     buildHotbarDOM(hotbarEl);
+  }
+
+  // Armor bar (above hearts).
+  const aSig = armorSignature(state.wornArmor);
+  if (aSig !== lastArmor) {
+    rebuildArmorBar(state.wornArmor);
+    lastArmor = aSig;
   }
 
   // Stats (unchanged — top-left debug text).

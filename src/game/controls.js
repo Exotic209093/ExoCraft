@@ -17,6 +17,7 @@ export function setupControls({
   toggleCraftPanel,
   toggleInventoryPanel,
   toggleFurnacePanel,
+  closeChestPanel,
   breakBlockAt,
   placeBlockAt,
   toNdc,
@@ -44,7 +45,7 @@ export function setupControls({
     }
 
     const isRepeat = event.repeat;
-    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen;
+    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen;
 
     if (code === "Escape" && !isRepeat) {
       if (state.inventoryOpen && typeof toggleInventoryPanel === "function") {
@@ -57,6 +58,10 @@ export function setupControls({
       }
       if (state.furnaceOpen && typeof toggleFurnacePanel === "function") {
         toggleFurnacePanel();
+        return;
+      }
+      if (state.chestOpen && typeof closeChestPanel === "function") {
+        closeChestPanel(true);
         return;
       }
     }
@@ -134,7 +139,7 @@ export function setupControls({
     if (state.mode !== "playing") {
       return;
     }
-    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen) {
+    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen || state.chestOpen) {
       return;
     }
     renderer.domElement.focus();
