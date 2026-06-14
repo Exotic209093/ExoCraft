@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -554,7 +554,18 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   applyFloraWindShaderPatch(floraMaterial);
   const floraMat = floraMaterial;
 
-  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat, flora: floraMat };
+  // Wave F4 — partial-geometry material (slabs + stairs): opaque, lit by same shader as cubes.
+  // No alpha cutout, no transparency — these are solid opaque blocks rendered with custom geometry.
+  const partialMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: false,
+    alphaTest: 0,
+    vertexColors: true,
+  });
+  applyLightingShaderPatch(partialMaterial);
+  const partialMat = partialMaterial;
+
+  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat, flora: floraMat, partial: partialMat };
 }
 
 // ---------------------------------------------------------------------------
@@ -1800,6 +1811,13 @@ export class VoxelWorld {
     const floraTint  = []; // Wave 12
     const floraSway  = []; // Graphics-B: per-vertex sway weight (0=bottom, 1=top)
     const floraIdx   = [];
+    // Wave F4: partial-geometry buffer (slabs + stairs — custom box geometry, no sway).
+    const partialPos  = [];
+    const partialNorm = [];
+    const partialUv   = [];
+    const partialCol  = [];
+    const partialTint = [];
+    const partialIdx  = [];
 
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
@@ -1881,6 +1899,138 @@ export class VoxelWorld {
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
             }
             continue; // skip the cube-face loop for flora
+          } else if (PARTIAL_BLOCK_IDS.has(blockType)) {
+            // --- Wave F4: partial-geometry emitter (slabs and stairs) ---
+            // Sample light from the voxel above (open sky side), same pattern as flora.
+            const aboveX = worldX;
+            const aboveY = y + 1;
+            const aboveZ = worldZ;
+            const aLX = aboveX - baseX;
+            const aLZ = aboveZ - baseZ;
+            let partSky = 0;
+            let partBlk = 0;
+            if (aboveY >= 0 && aboveY < H &&
+                aLX >= 0 && aLX < S && aLZ >= 0 && aLZ < S) {
+              partSky = skylight[lIndex(aLX, aboveY, aLZ)];
+              partBlk = blocklight[lIndex(aLX, aboveY, aLZ)];
+            } else if (aboveY >= H) {
+              partSky = 15;
+            }
+            const AO_NEUTRAL = 1.0;
+            const pLightR = partSky / 15.0;
+            const pLightG = partBlk / 15.0;
+            // No biome tint for stone/cobble/plank slabs & stairs.
+            const pTR = 1.0, pTG = 1.0, pTB = 1.0;
+
+            // Helper: emit a single quad (4 verts + 2 tris) into the partial buffer.
+            // verts: array of 4 [x,y,z] world positions [bl, br, tl, tr].
+            // nx,ny,nz: face normal.
+            // uvRect: {uMin,uMax,vMin,vMax} atlas rect for this face.
+            const emitPartialQuad = (verts, nx, ny, nz, uvRect) => {
+              const base = partialPos.length / 3;
+              const { uMin, uMax, vMin, vMax } = uvRect;
+              for (let v = 0; v < 4; v += 1) {
+                partialPos.push(...verts[v]);
+                partialNorm.push(nx, ny, nz);
+                const [ut, vt] = FACE_UV_INDICES[v];
+                partialUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+                partialCol.push(pLightR, pLightG, AO_NEUTRAL);
+                partialTint.push(pTR, pTG, pTB);
+              }
+              // Two CCW triangles; PY/NY faces need reversed winding (same rule as cube mesher).
+              const isPyNy = (ny !== 0);
+              if (isPyNy) {
+                partialIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+              } else {
+                partialIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+              }
+            };
+
+            // Helper: emit all 6 faces of an axis-aligned box.
+            // ox,oy,oz = world-space min corner; sx,sy,sz = box dimensions.
+            // blockId = which block's tile map to use for face UVs.
+            const emitBox = (ox, oy, oz, sx, sy, sz, blockId) => {
+              // PX (+X) face: normal +1,0,0
+              emitPartialQuad(
+                [[ox+sx, oy,    oz+sz], [ox+sx, oy,    oz   ], [ox+sx, oy+sy, oz+sz], [ox+sx, oy+sy, oz   ]],
+                1, 0, 0, getFaceUvRect(blockId, FACE_PX),
+              );
+              // NX (-X) face: normal -1,0,0
+              emitPartialQuad(
+                [[ox,    oy,    oz   ], [ox,    oy,    oz+sz], [ox,    oy+sy, oz   ], [ox,    oy+sy, oz+sz]],
+                -1, 0, 0, getFaceUvRect(blockId, FACE_NX),
+              );
+              // PY (+Y) face: normal 0,+1,0
+              emitPartialQuad(
+                [[ox,    oy+sy, oz   ], [ox+sx, oy+sy, oz   ], [ox,    oy+sy, oz+sz], [ox+sx, oy+sy, oz+sz]],
+                0, 1, 0, getFaceUvRect(blockId, FACE_PY),
+              );
+              // NY (-Y) face: normal 0,-1,0
+              emitPartialQuad(
+                [[ox,    oy,    oz+sz], [ox+sx, oy,    oz+sz], [ox,    oy,    oz   ], [ox+sx, oy,    oz   ]],
+                0, -1, 0, getFaceUvRect(blockId, FACE_NY),
+              );
+              // PZ (+Z) face: normal 0,0,+1
+              emitPartialQuad(
+                [[ox,    oy,    oz+sz], [ox+sx, oy,    oz+sz], [ox,    oy+sy, oz+sz], [ox+sx, oy+sy, oz+sz]],
+                0, 0, 1, getFaceUvRect(blockId, FACE_PZ),
+              );
+              // NZ (-Z) face: normal 0,0,-1
+              emitPartialQuad(
+                [[ox+sx, oy,    oz   ], [ox,    oy,    oz   ], [ox+sx, oy+sy, oz   ], [ox,    oy+sy, oz   ]],
+                0, 0, -1, getFaceUvRect(blockId, FACE_NZ),
+              );
+            };
+
+            const x0 = worldX;
+            const y0 = y;
+            const z0 = worldZ;
+
+            if (SLAB_BLOCK_IDS.has(blockType)) {
+              // Slab: full-footprint bottom half (y0..y0+0.5).
+              emitBox(x0, y0, z0, 1.0, 0.5, 1.0, blockType);
+            } else {
+              // Stair: bottom slab (y0..y0+0.5) + upper step on back half (y0+0.5..y0+1.0).
+              // Orientation encodes which side is the "back" (step side):
+              //   North (+Z) : step on +Z half  (z0+0.5 .. z0+1)
+              //   East  (+X) : step on +X half  (x0+0.5 .. x0+1)
+              //   South (-Z) : step on -Z half  (z0      .. z0+0.5)
+              //   West  (-X) : step on -X half  (x0      .. x0+0.5)
+              // The player walks UP from the open (lower) side toward the step.
+              // Orientation offset within the material group: 0=N,1=E,2=S,3=W.
+              // Determine base id for this stair's material group.
+              let stairBaseId;
+              if (blockType >= 34 && blockType <= 37) stairBaseId = 34;
+              else if (blockType >= 38 && blockType <= 41) stairBaseId = 38;
+              else stairBaseId = 42;
+              const orient = blockType - stairBaseId; // 0=N,1=E,2=S,3=W
+
+              // Bottom slab (always full footprint)
+              emitBox(x0, y0, z0, 1.0, 0.5, 1.0, blockType);
+
+              // Upper step box — half-depth on the tall (back) side.
+              // Convention: orient N means the open/low side faces the placing player.
+              // At orient 0 (North) the player faces -Z, so the open side is -Z and the
+              // tall step must be on the -Z half.  orient 2 (South) is the mirror.
+              // orient 1/3 (East/West) are unchanged.
+              switch (orient) {
+                case 0: // North: tall step on -Z half
+                  emitBox(x0, y0 + 0.5, z0, 1.0, 0.5, 0.5, blockType);
+                  break;
+                case 1: // East: tall step on +X half
+                  emitBox(x0 + 0.5, y0 + 0.5, z0, 0.5, 0.5, 1.0, blockType);
+                  break;
+                case 2: // South: tall step on +Z half
+                  emitBox(x0, y0 + 0.5, z0 + 0.5, 1.0, 0.5, 0.5, blockType);
+                  break;
+                case 3: // West: tall step on -X half
+                  emitBox(x0, y0 + 0.5, z0, 0.5, 0.5, 1.0, blockType);
+                  break;
+                default:
+                  emitBox(x0, y0 + 0.5, z0, 1.0, 0.5, 0.5, blockType);
+              }
+            }
+            continue; // skip the cube-face loop for partial blocks
           } else if (blockType === 21) {
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
             colArr  = lavaCol;   tintArr = lavaTint;  swayArr = null;     idxArr  = lavaIdx;
@@ -2111,6 +2261,16 @@ export class VoxelWorld {
       const mesh = new THREE.Mesh(floraGeo, mats.flora);
       mesh.renderOrder = 5;
       mesh.userData.isFlora = true;
+      chunk.meshes.push(mesh);
+      this.meshGroup.add(mesh);
+    }
+
+    // Wave F4: partial-geometry mesh (slabs + stairs), rendered after flora (renderOrder 6).
+    const partialGeo = makeGeometry(partialPos, partialNorm, partialUv, partialCol, partialTint, partialIdx);
+    if (partialGeo) {
+      const mesh = new THREE.Mesh(partialGeo, mats.partial);
+      mesh.renderOrder = 6;
+      mesh.userData.isPartial = true;
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }

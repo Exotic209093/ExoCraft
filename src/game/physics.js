@@ -1,3 +1,5 @@
+import { SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
+
 export function playerAABBAt(position, playerRadius, playerHeight) {
   return {
     minX: position.x - playerRadius,
@@ -18,6 +20,83 @@ export function aabbIntersectsBlock(aabb, x, y, z) {
     aabb.maxZ > z &&
     aabb.minZ < z + 1
   );
+}
+
+// Wave F4 — block-height-aware AABB test.
+// Slabs occupy the lower half of the cell; everything else is full-height.
+function getBlockTopY(blockType) {
+  return SLAB_BLOCK_IDS.has(blockType) ? 0.5 : 1.0;
+}
+
+function aabbIntersectsBlockH(aabb, x, y, z, topFrac) {
+  return (
+    aabb.maxX > x &&
+    aabb.minX < x + 1 &&
+    aabb.maxY > y &&
+    aabb.minY < y + topFrac &&
+    aabb.maxZ > z &&
+    aabb.minZ < z + 1
+  );
+}
+
+// Returns the stair orientation (0=N,1=E,2=S,3=W) from the block id.
+// Stair material groups: 34-37 (stone), 38-41 (cobble), 42-45 (plank).
+function stairOrient(blockType) {
+  if (blockType >= 34 && blockType <= 37) return blockType - 34;
+  if (blockType >= 38 && blockType <= 41) return blockType - 38;
+  if (blockType >= 42 && blockType <= 45) return blockType - 42;
+  return 0;
+}
+
+// Test player AABB against a stair cell's two-box collision profile.
+// Bottom slab: full footprint (x, y, z) -> (x+1, y+0.5, z+1).
+// Upper step:  half footprint on the tall side, (y+0.5..y+1.0).
+//   orient 0 (North, tall step on -Z half): x full, z = [z, z+0.5]
+//   orient 1 (East,  tall step on +X half): x = [x+0.5, x+1], z full
+//   orient 2 (South, tall step on +Z half): x full, z = [z+0.5, z+1]
+//   orient 3 (West,  tall step on -X half): x = [x, x+0.5], z full
+// These boxes mirror exactly the emitBox calls in world.js ~lines 2008-2027.
+function aabbIntersectsStair(aabb, x, y, z, orient) {
+  // Bottom slab — full footprint, half height.
+  const hitsBottom = (
+    aabb.maxX > x && aabb.minX < x + 1 &&
+    aabb.maxY > y && aabb.minY < y + 0.5 &&
+    aabb.maxZ > z && aabb.minZ < z + 1
+  );
+  if (hitsBottom) return true;
+
+  // Upper step — orientation-dependent half footprint, upper half.
+  let sx0 = x, sx1 = x + 1, sz0 = z, sz1 = z + 1;
+  switch (orient) {
+    case 0: sz1 = z + 0.5; break; // North: tall step on -Z half
+    case 1: sx0 = x + 0.5; break; // East:  tall step on +X half
+    case 2: sz0 = z + 0.5; break; // South: tall step on +Z half
+    case 3: sx1 = x + 0.5; break; // West:  tall step on -X half
+  }
+  return (
+    aabb.maxX > sx0 && aabb.minX < sx1 &&
+    aabb.maxY > y + 0.5 && aabb.minY < y + 1.0 &&
+    aabb.maxZ > sz0 && aabb.minZ < sz1
+  );
+}
+
+// Returns the effective top-Y fraction for the stair box that the player is
+// standing on (used by the Y-axis resolver to land the player at the right height).
+// If the player overlaps the upper step sub-box, they land at 1.0; otherwise
+// they're on the bottom slab and land at 0.5.
+function stairTopFracForAabb(aabb, x, y, z, orient) {
+  let sx0 = x, sx1 = x + 1, sz0 = z, sz1 = z + 1;
+  switch (orient) {
+    case 0: sz1 = z + 0.5; break;
+    case 1: sx0 = x + 0.5; break;
+    case 2: sz0 = z + 0.5; break;
+    case 3: sx1 = x + 0.5; break;
+  }
+  const upperStepOverlap = (
+    aabb.maxX > sx0 && aabb.minX < sx1 &&
+    aabb.maxZ > sz0 && aabb.minZ < sz1
+  );
+  return upperStepOverlap ? 1.0 : 0.5;
 }
 
 // Block ids that the player can move through (passable for collision purposes).
@@ -47,10 +126,13 @@ function aabbCollidesWorld(aabb, world, epsilon) {
   for (let y = minY; y <= maxY; y += 1) {
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (isPassable(world.get(x, y, z))) {
+        const bt = world.get(x, y, z);
+        if (isPassable(bt)) {
           continue;
         }
-        if (aabbIntersectsBlock(aabb, x, y, z)) {
+        if (STAIR_BLOCK_IDS.has(bt)) {
+          if (aabbIntersectsStair(aabb, x, y, z, stairOrient(bt))) return true;
+        } else if (aabbIntersectsBlockH(aabb, x, y, z, getBlockTopY(bt))) {
           return true;
         }
       }
@@ -87,11 +169,17 @@ export function resolveAxis({
   for (let y = minY; y <= maxY; y += 1) {
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (isPassable(world.get(x, y, z))) {
+        const bt = world.get(x, y, z);
+        if (isPassable(bt)) {
           continue;
         }
-        if (!aabbIntersectsBlock(aabb, x, y, z)) {
-          continue;
+        const isStair = STAIR_BLOCK_IDS.has(bt);
+        const orient = isStair ? stairOrient(bt) : 0;
+        if (isStair) {
+          if (!aabbIntersectsStair(aabb, x, y, z, orient)) continue;
+        } else {
+          const topFrac = getBlockTopY(bt);
+          if (!aabbIntersectsBlockH(aabb, x, y, z, topFrac)) continue;
         }
 
         if (axis === "x") {
@@ -117,10 +205,16 @@ export function resolveAxis({
           if (delta > 0) {
             state.playerPos.y = y - playerHeight - epsilon;
           } else {
-            state.playerPos.y = y + 1 + epsilon;
+            // Land on top of the colliding box.
+            // For stairs, this depends on which sub-box (bottom slab vs upper step)
+            // the player's XZ footprint overlaps; for slabs/cubes use the scalar topFrac.
+            const topFrac = isStair
+              ? stairTopFracForAabb(aabb, x, y, z, orient)
+              : getBlockTopY(bt);
+            state.playerPos.y = y + topFrac + epsilon;
             state.onGround = true;
           }
-            state.playerVel.y = 0;
+          state.playerVel.y = 0;
         } else if (axis === "z") {
           if (allowStepUp && stepHeight > 0) {
             const originalY = state.playerPos.y;
@@ -146,4 +240,3 @@ export function resolveAxis({
     }
   }
 }
-

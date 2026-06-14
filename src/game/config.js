@@ -55,6 +55,25 @@ const DEFAULT_GAME_CONFIG = {
       { id: 28, name: "Spruce Log",   color: 0x5a3d1a },
       { id: 29, name: "Spruce Leaf",  color: 0x2d5a2d },
       { id: 30, name: "Snow",         color: 0xe8eef0 },
+      // Wave F4 — slabs
+      { id: 31, name: "Stone Slab",        color: 0x80878f },
+      { id: 32, name: "Cobblestone Slab",  color: 0x808080 },
+      { id: 33, name: "Wood Plank Slab",   color: 0xc8a060 },
+      // Wave F4 — stone stairs (N/E/S/W orientations)
+      { id: 34, name: "Stone Stairs (N)",  color: 0x80878f },
+      { id: 35, name: "Stone Stairs (E)",  color: 0x80878f },
+      { id: 36, name: "Stone Stairs (S)",  color: 0x80878f },
+      { id: 37, name: "Stone Stairs (W)",  color: 0x80878f },
+      // Wave F4 — cobblestone stairs
+      { id: 38, name: "Cobblestone Stairs (N)", color: 0x808080 },
+      { id: 39, name: "Cobblestone Stairs (E)", color: 0x808080 },
+      { id: 40, name: "Cobblestone Stairs (S)", color: 0x808080 },
+      { id: 41, name: "Cobblestone Stairs (W)", color: 0x808080 },
+      // Wave F4 — wood plank stairs
+      { id: 42, name: "Wood Stairs (N)", color: 0xc8a060 },
+      { id: 43, name: "Wood Stairs (E)", color: 0xc8a060 },
+      { id: 44, name: "Wood Stairs (S)", color: 0xc8a060 },
+      { id: 45, name: "Wood Stairs (W)", color: 0xc8a060 },
     ],
     generation: {
       seed: 1337,

@@ -125,6 +125,15 @@ export const ITEM_DEFS = {
   flower:      { id: "flower",      name: "Flower",      placeBlockType: 24 },
   sapling:     { id: "sapling",     name: "Sapling",     placeBlockType: 25 },
   seeds:       { id: "seeds",       name: "Seeds" },
+  // Wave F4 — slab items (one item id per material; placement just sets the slab block)
+  stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
+  cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
+  wood_slab:        { id: "wood_slab",        name: "Wood Slab",        placeBlockType: 33 },
+  // Wave F4 — stair items (one item per material; placement chooses orientation id from yaw)
+  // placeBlockType is the NORTH orientation by default; placement logic overrides this.
+  stone_stairs:       { id: "stone_stairs",       name: "Stone Stairs",       placeBlockType: 34 },
+  cobblestone_stairs: { id: "cobblestone_stairs", name: "Cobblestone Stairs", placeBlockType: 38 },
+  wood_stairs:        { id: "wood_stairs",        name: "Wood Stairs",        placeBlockType: 42 },
   // Wave 12 — wood/snow blocks
   birch_log:   { id: "birch_log",   name: "Birch Log",   placeBlockType: 26 },
   birch_leaf:  { id: "birch_leaf",  name: "Birch Leaf",  placeBlockType: 27 },
@@ -250,6 +259,23 @@ export const BLOCK_DROPS = {
   23: "seeds",       // tall grass → seeds
   24: "flower",      // flower → flower
   25: "sapling",     // sapling → sapling
+  // Wave F4 — slabs drop their slab item
+  31: "stone_slab",
+  32: "cobblestone_slab",
+  33: "wood_slab",
+  // Wave F4 — all stair orientations drop the single stair item for that material
+  34: "stone_stairs",
+  35: "stone_stairs",
+  36: "stone_stairs",
+  37: "stone_stairs",
+  38: "cobblestone_stairs",
+  39: "cobblestone_stairs",
+  40: "cobblestone_stairs",
+  41: "cobblestone_stairs",
+  42: "wood_stairs",
+  43: "wood_stairs",
+  44: "wood_stairs",
+  45: "wood_stairs",
   // Wave 12 — wood/snow variants
   26: "birch_log",   // birch log → birch log item
   27: "birch_leaf",  // birch leaf → birch leaf item
@@ -327,6 +353,13 @@ const BLOCK_HARDNESS = {
   23: 0.05,
   24: 0.05,
   25: 0.05,
+  // Wave F4 — slabs and stairs: same hardness as source material
+  31: 2.2,  // stone slab
+  32: 3.0,  // cobblestone slab
+  33: 1.5,  // wood plank slab
+  34: 2.2,  35: 2.2,  36: 2.2,  37: 2.2,  // stone stairs
+  38: 3.0,  39: 3.0,  40: 3.0,  41: 3.0,  // cobblestone stairs
+  42: 1.5,  43: 1.5,  44: 1.5,  45: 1.5,  // wood stairs
   // Wave 12 — wood/snow variants
   26: 1.6,   // birch log — same as oak
   27: 0.8,   // birch leaf — same as oak leaf
@@ -342,6 +375,12 @@ const BLOCK_PREFERRED_TOOL = {
   4: "axe",
   6: "axe",
   7: "pickaxe",
+  // Wave F4 — slabs and stairs
+  31: "pickaxe", 32: "pickaxe",               // stone + cobblestone slabs
+  34: "pickaxe", 35: "pickaxe", 36: "pickaxe", 37: "pickaxe", // stone stairs
+  38: "pickaxe", 39: "pickaxe", 40: "pickaxe", 41: "pickaxe", // cobblestone stairs
+  33: "axe",                                   // wood plank slab
+  42: "axe", 43: "axe", 44: "axe", 45: "axe", // wood stairs
   // Wave 12 — wood/snow variants
   26: "axe",    // birch log
   28: "axe",    // spruce log
@@ -949,6 +988,63 @@ export const RECIPES = [
     key: { X: "diamond" },
     inputs: [{ itemId: "diamond", count: 4 }],
     output: { itemId: "diamond_boots", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave F4 — slabs: 3 of the material in a horizontal row → 6 slabs
+  {
+    id: "stone_slab",
+    name: "Stone Slab x6",
+    pattern: ["___", "___", "XXX"],
+    key: { X: "stone" },
+    inputs: [{ itemId: "stone", count: 3 }],
+    output: { itemId: "stone_slab", count: 6 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "cobblestone_slab",
+    name: "Cobblestone Slab x6",
+    pattern: ["___", "___", "XXX"],
+    key: { X: "cobblestone" },
+    inputs: [{ itemId: "cobblestone", count: 3 }],
+    output: { itemId: "cobblestone_slab", count: 6 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "wood_slab",
+    name: "Wood Slab x6",
+    pattern: ["___", "___", "XXX"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 3 }],
+    output: { itemId: "wood_slab", count: 6 },
+    requiresWorkbench: false,
+  },
+  // Wave F4 — stairs: Minecraft stair pattern (6 blocks → 4 stairs)
+  // Pattern: X__/ XX_/ XXX  (staircase shape, 6 inputs)
+  {
+    id: "stone_stairs",
+    name: "Stone Stairs x4",
+    pattern: ["X__", "XX_", "XXX"],
+    key: { X: "stone" },
+    inputs: [{ itemId: "stone", count: 6 }],
+    output: { itemId: "stone_stairs", count: 4 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "cobblestone_stairs",
+    name: "Cobblestone Stairs x4",
+    pattern: ["X__", "XX_", "XXX"],
+    key: { X: "cobblestone" },
+    inputs: [{ itemId: "cobblestone", count: 6 }],
+    output: { itemId: "cobblestone_stairs", count: 4 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "wood_stairs",
+    name: "Wood Stairs x4",
+    pattern: ["X__", "XX_", "XXX"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 6 }],
+    output: { itemId: "wood_stairs", count: 4 },
     requiresWorkbench: true,
   },
 ];

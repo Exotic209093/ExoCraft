@@ -109,6 +109,25 @@ export const BLOCK_FACE_TILES = {
   29: { px: "spruce_leaf",  nx: "spruce_leaf",  py: "spruce_leaf",  ny: "spruce_leaf",  pz: "spruce_leaf",  nz: "spruce_leaf"  },
   // Wave 12 — snow: uniform white-blue top/sides.
   30: { px: "snow",         nx: "snow",         py: "snow",         ny: "snow",         pz: "snow",         nz: "snow"         },
+  // Wave F4 — slabs (IDs 31-33): reuse material tile for all faces
+  31: { px: "stone",        nx: "stone",        py: "stone",        ny: "stone",        pz: "stone",        nz: "stone"        },
+  32: { px: "cobblestone",  nx: "cobblestone",  py: "cobblestone",  ny: "cobblestone",  pz: "cobblestone",  nz: "cobblestone"  },
+  33: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
+  // Wave F4 — stone stairs (IDs 34-37: N/E/S/W)
+  34: { px: "stone",        nx: "stone",        py: "stone",        ny: "stone",        pz: "stone",        nz: "stone"        },
+  35: { px: "stone",        nx: "stone",        py: "stone",        ny: "stone",        pz: "stone",        nz: "stone"        },
+  36: { px: "stone",        nx: "stone",        py: "stone",        ny: "stone",        pz: "stone",        nz: "stone"        },
+  37: { px: "stone",        nx: "stone",        py: "stone",        ny: "stone",        pz: "stone",        nz: "stone"        },
+  // Wave F4 — cobblestone stairs (IDs 38-41: N/E/S/W)
+  38: { px: "cobblestone",  nx: "cobblestone",  py: "cobblestone",  ny: "cobblestone",  pz: "cobblestone",  nz: "cobblestone"  },
+  39: { px: "cobblestone",  nx: "cobblestone",  py: "cobblestone",  ny: "cobblestone",  pz: "cobblestone",  nz: "cobblestone"  },
+  40: { px: "cobblestone",  nx: "cobblestone",  py: "cobblestone",  ny: "cobblestone",  pz: "cobblestone",  nz: "cobblestone"  },
+  41: { px: "cobblestone",  nx: "cobblestone",  py: "cobblestone",  ny: "cobblestone",  pz: "cobblestone",  nz: "cobblestone"  },
+  // Wave F4 — wood plank stairs (IDs 42-45: N/E/S/W); top face = crafting_top (plank grain)
+  42: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
+  43: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
+  44: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
+  45: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -941,11 +960,58 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   // Wave 12 — birch/spruce leaves use the same alpha-cutout class as oak leaves (1).
   27: 1, // birch leaf
   29: 1, // spruce leaf
+  // Wave F4 — partial-geometry blocks (slabs, stairs).
+  // Class 5 = opaque-but-partial: ensures neighboring full-blocks never cull their face
+  // when adjacent to a slab or stair (because class 5 ≠ 0 → neighbor face is always exposed).
+  // The partial blocks themselves are emitted via their own mesher branch (not isFaceExposed).
+  31: 5, 32: 5, 33: 5,
+  34: 5, 35: 5, 36: 5, 37: 5,
+  38: 5, 39: 5, 40: 5, 41: 5,
+  42: 5, 43: 5, 44: 5, 45: 5,
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
 // Only cross-quad (class 4) blocks are in this set; leaf blocks (class 1) are NOT.
 export const FLORA_BLOCK_IDS = new Set([23, 24, 25]);
+
+// Wave F4 — partial-geometry block id sets.
+// Slabs: one id per material (bottom-half box).
+export const SLAB_BLOCK_IDS = new Set([
+  31, // stone slab
+  32, // cobblestone slab
+  33, // wood plank slab
+]);
+
+// Stairs: 4 orientation ids per material (N / E / S / W facing).
+// "Facing" = the direction the placing player was looking = the open/low side of the stair.
+export const STAIR_BLOCK_IDS = new Set([
+  34, 35, 36, 37, // stone stairs  N E S W
+  38, 39, 40, 41, // cobblestone stairs  N E S W
+  42, 43, 44, 45, // wood plank stairs  N E S W
+]);
+
+// Orientation index within each stair material group (offset from material's first id).
+// "North" = the player was facing -Z when they placed the stair (camera yaw ≈ 0).
+// The tall step is on the opposite side from the placing player; the open/low side
+// faces the player (so you walk up a stair from the side you were facing when placing it).
+//   orient 0 (North): tall step on -Z half, open/low side on +Z  (player was at +Z)
+//   orient 1 (East):  tall step on +X half, open/low side on -X  (player was at -X)
+//   orient 2 (South): tall step on +Z half, open/low side on -Z  (player was at -Z)
+//   orient 3 (West):  tall step on -X half, open/low side on +X  (player was at +X)
+export const STAIR_ORIENTATION_NORTH = 0;
+export const STAIR_ORIENTATION_EAST  = 1;
+export const STAIR_ORIENTATION_SOUTH = 2;
+export const STAIR_ORIENTATION_WEST  = 3;
+
+// First id of each stair material group.
+export const STAIR_BASE_IDS = {
+  stone:       34,
+  cobblestone: 38,
+  plank:       42,
+};
+
+// Combined set for fast mesher dispatch.
+export const PARTIAL_BLOCK_IDS = new Set([...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS]);
 
 // ----- Item icon canvases -----
 // Returns a lazily-painted atlas canvas (shared, painted once).
@@ -1045,6 +1111,13 @@ const ITEM_CHIP_COLORS = {
   diamond_boots:      "#60f0e0",
   // Wave 11 — flora/plant blocks
   tall_grass:         "#6ab040",
+  // Wave F4 — slabs and stairs
+  stone_slab:         "#8890a0",
+  cobblestone_slab:   "#808080",
+  wood_slab:          "#c8a060",
+  stone_stairs:       "#8890a0",
+  cobblestone_stairs: "#808080",
+  wood_stairs:        "#c8a060",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */

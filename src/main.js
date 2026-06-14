@@ -86,6 +86,10 @@ import {
   createSunTexture,
   createMoonTexture,
   FLORA_BLOCK_IDS,
+  SLAB_BLOCK_IDS,
+  STAIR_BLOCK_IDS,
+  PARTIAL_BLOCK_IDS,
+  STAIR_BASE_IDS,
 } from "./game/textures";
 import {
   ensureAudio as _ensureAudioModule,
@@ -5842,10 +5846,41 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     return eatSelectedFood();
   }
 
-  const placeType = getPlaceableBlockType(slot.itemId);
+  let placeType = getPlaceableBlockType(slot.itemId);
   if (!placeType) {
     state.recentAction = "Selected item not placeable";
     return false;
+  }
+
+  // Wave F4 — stair placement: choose orientation id from camera yaw (4-way).
+  // The stair item's placeBlockType defaults to the North variant (orient 0).
+  // We override it based on which cardinal direction the player faces.
+  if (STAIR_BLOCK_IDS.has(placeType)) {
+    // Determine the stair material's base id.
+    let stairBase = placeType; // placeType is already the North (orient 0) id
+    // Normalize yaw to [0, 2π)
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    // Camera convention: forwardX=-sinYaw, forwardZ=-cosYaw.
+    // yaw=0 faces -Z (North), yaw=π/2 faces -X (West), yaw=π faces +Z (South), yaw=3π/2 faces +X (East).
+    // The placed stair's open/low side faces the player's current side of the block (opposite look direction).
+    // Partition into 4 quadrants of 90° each, centred on N/E/S/W:
+    //   [315°-45°)   → North  (orient 0, id = base+0)  — player looks -Z
+    //   [45°-135°)   → West   (orient 3, id = base+3)  — player looks -X
+    //   [135°-225°)  → South  (orient 2, id = base+2)  — player looks +Z
+    //   [225°-315°)  → East   (orient 1, id = base+1)  — player looks +X
+    const deg = (normYaw / Math.PI) * 180; // [0, 360)
+    let orient;
+    if (deg < 45 || deg >= 315) {
+      orient = 0; // North
+    } else if (deg < 135) {
+      orient = 3; // West
+    } else if (deg < 225) {
+      orient = 2; // South
+    } else {
+      orient = 1; // East
+    }
+    placeType = stairBase + orient;
   }
 
   const hit = hitTest(ndcX, ndcY);
@@ -7117,6 +7152,19 @@ window.__exoCraftDebug = {
   },
   // Wave F3 — mob animation debug snapshot (scalar-only, safe to log)
   getMobDebug: () => getMobDebugSnapshot(hostileMobs, passiveMobs),
+  // Wave F4 — partial block id registry for orchestrator verification
+  listPartialBlockIds: () => ({
+    slabs: {
+      stone:       31,
+      cobblestone: 32,
+      plank:       33,
+    },
+    stairs: {
+      stone:       { north: 34, east: 35, south: 36, west: 37 },
+      cobblestone: { north: 38, east: 39, south: 40, west: 41 },
+      plank:       { north: 42, east: 43, south: 44, west: 45 },
+    },
+  }),
   scanExplorationStructures: (radius = 18) => scanExplorationStructures(radius),
   findNearestCopperOre: (radius = 26) => {
     const ore = findNearestCopperOre(radius);
