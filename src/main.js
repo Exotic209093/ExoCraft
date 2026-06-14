@@ -21,6 +21,7 @@ import {
   countInventoryItems,
   createStartingInventory,
   getBlockDropItem,
+  rollExtraDrops,
   getFuelValue,
   getBlockHardness,
   getBreakPower,
@@ -30,7 +31,12 @@ import {
   getSelectedSlot,
   getSmeltingRecipeByInput,
   transferInventoryStack,
+  getFoodDef,
+  decrementDurability,
+  hasDurability,
+  TOOL_MAX_DURABILITY,
 } from "./game/survival";
+import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
 import {
   createAtlasTexture,
@@ -528,6 +534,11 @@ const state = {
   objectiveStats: createDefaultObjectiveStats(),
   objectiveWaypoint: null,
   specialization: createDefaultSpecializationState(),
+  // Wave 7 — hunger / saturation / starvation accumulator
+  hunger: MAX_HUNGER,
+  maxHunger: MAX_HUNGER,
+  saturation: 5,          // start with a little saturation (like Minecraft)
+  starveAccumSec: 0,
   // Camera-feel state: bob phase advances with horizontal walk speed; FOV lerps between
   // base and sprint values so sprinting "pulls" the world in slightly.
   bobPhase: 0,
@@ -2119,7 +2130,15 @@ function markInventoryPanelDirty() {
 }
 
 function serializeInventory() {
-  return state.inventory.map((slot) => (slot ? { itemId: slot.itemId, count: slot.count } : null));
+  return state.inventory.map((slot) => {
+    if (!slot) return null;
+    const entry = { itemId: slot.itemId, count: slot.count };
+    // Persist durability for tool items.
+    if (hasDurability(slot.itemId) && Number.isFinite(slot.durability)) {
+      entry.durability = slot.durability;
+    }
+    return entry;
+  });
 }
 
 function loadInventory(serializedInventory) {
@@ -2137,7 +2156,16 @@ function loadInventory(serializedInventory) {
     if (!ITEM_DEFS[slot.itemId]) {
       continue;
     }
-    state.inventory[i] = { itemId: slot.itemId, count: Math.min(MAX_STACK, Math.floor(slot.count)) };
+    const entry = { itemId: slot.itemId, count: Math.min(MAX_STACK, Math.floor(slot.count)) };
+    // Restore durability for tool items; default to max if missing (forward-compat).
+    if (hasDurability(slot.itemId)) {
+      entry.count = 1; // tools are always count:1
+      const maxDur = TOOL_MAX_DURABILITY[slot.itemId] ?? 1;
+      entry.durability = Number.isFinite(slot.durability) && slot.durability > 0
+        ? Math.min(maxDur, slot.durability)
+        : maxDur;
+    }
+    state.inventory[i] = entry;
   }
   markInventoryPanelDirty();
 }
@@ -2889,6 +2917,8 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   const playerDamage = getSelectedMobDamage();
   const mob = hostileMobs[index];
   mob.health -= Math.max(1, Math.floor(playerDamage));
+  // Decrement weapon durability on hit.
+  decrementDurability(state.inventory, state.selectedSlot, 1);
   if (mob.health <= 0) {
     const killWeaponItemId = getSelectedItemId();
     removeHostileMobAt(index);
@@ -2897,6 +2927,7 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
     markInventoryPanelDirty();
   } else {
     state.recentAction = `Hit hostile mob (${mob.health} hp)`;
+    markInventoryPanelDirty();
   }
   return true;
 }
@@ -3586,7 +3617,7 @@ function toggleCraftPanel() {
 
 function collectSaveSnapshot() {
   return {
-    version: 3,
+    version: 4,
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -3597,6 +3628,8 @@ function collectSaveSnapshot() {
       yaw: state.yaw,
       pitch: state.pitch,
       health: state.health,
+      hunger: state.hunger,
+      saturation: state.saturation,
       selectedSlot: state.selectedSlot,
     },
     inventory: serializeInventory(),
@@ -3649,6 +3682,14 @@ function applyPlayerSave(playerData) {
   if (Number.isFinite(playerData.selectedSlot) && playerData.selectedSlot >= 0 && playerData.selectedSlot < HOTBAR_SIZE) {
     state.selectedSlot = Math.floor(playerData.selectedSlot);
   }
+  // Wave 7 — hunger/saturation; forward-default old saves.
+  state.hunger = Number.isFinite(playerData.hunger)
+    ? THREE.MathUtils.clamp(playerData.hunger, 0, state.maxHunger)
+    : state.maxHunger;
+  state.saturation = Number.isFinite(playerData.saturation)
+    ? THREE.MathUtils.clamp(playerData.saturation, 0, MAX_SATURATION)
+    : 5;
+  state.starveAccumSec = 0;
   return true;
 }
 
@@ -3827,18 +3868,35 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     registerDeepCopperProgress();
   }
 
+  // Decrement durability on the held tool before picking up drops.
+  const heldSlotIndex = state.selectedSlot;
+  const toolBroke = decrementDurability(state.inventory, heldSlotIndex, 1);
+  if (toolBroke) {
+    state.recentAction = `Tool broke!`;
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
+  }
+
   const dropItemId = getBlockDropItem(type);
   if (dropItemId) {
     const leftover = addItemToInventory(state.inventory, dropItemId, 1);
     if (leftover > 0) {
-      state.recentAction = `Broke ${blockName(type)}, inventory full`;
+      state.recentAction = toolBroke ? `Tool broke, ${blockName(type)} dropped (inv full)` : `Broke ${blockName(type)}, inventory full`;
     } else {
-      state.recentAction = `Broke ${blockName(type)}`;
+      state.recentAction = toolBroke ? `Tool broke! Got ${blockName(type)}` : `Broke ${blockName(type)}`;
     }
     markCraftPanelDirty();
     markInventoryPanelDirty();
-  } else {
+  } else if (!toolBroke) {
     state.recentAction = `Broke ${blockName(type)}`;
+  }
+
+  // Roll extra probabilistic drops (e.g. apple from leaves).
+  const extraDrops = rollExtraDrops(type);
+  for (const extraItemId of extraDrops) {
+    addItemToInventory(state.inventory, extraItemId, 1);
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
   }
 
   state.breakProgress.targetKey = null;
@@ -3866,11 +3924,37 @@ function hideCrackOverlay() {
   lastCrackStage = -1;
 }
 
+function eatSelectedFood() {
+  const slot = getSelectedInventorySlot();
+  if (!slot) return false;
+  const foodDef = getFoodDef(slot.itemId);
+  if (!foodDef) return false;
+  // Can only eat when not at full hunger.
+  if (state.hunger >= state.maxHunger) {
+    state.recentAction = "Not hungry";
+    return false;
+  }
+  const result = applyFood(state.hunger, state.saturation, foodDef);
+  state.hunger = result.hunger;
+  state.saturation = result.saturation;
+  consumeFromSlot(state.inventory, state.selectedSlot, 1);
+  state.recentAction = `Ate ${getItemName(slot.itemId)} (hunger ${Math.ceil(state.hunger)}/${state.maxHunger})`;
+  markCraftPanelDirty();
+  markInventoryPanelDirty();
+  refreshHud();
+  return true;
+}
+
 function placeBlock(ndcX = 0, ndcY = 0) {
   const slot = getSelectedInventorySlot();
   if (!slot) {
     state.recentAction = "Selected slot empty";
     return false;
+  }
+
+  // Food items: eat before attempting block placement.
+  if (getFoodDef(slot.itemId)) {
+    return eatSelectedFood();
   }
 
   const placeType = getPlaceableBlockType(slot.itemId);
@@ -4042,6 +4126,10 @@ function respawnPlayer(options = {}) {
   state.pitch = -0.2;
   if (healToMax) {
     state.health = state.maxHealth;
+    // Reset hunger on respawn (like Minecraft).
+    state.hunger = state.maxHunger;
+    state.saturation = 5;
+    state.starveAccumSec = 0;
   }
   state.breakProgress.targetKey = null;
   state.breakProgress.amount = 0;
@@ -4312,6 +4400,12 @@ function updateSimulation(dtSeconds) {
       state.recentAction = "Jumped";
       jumpedThisFrame = true;
       playJumpSound();
+      // Jumping costs a small amount of hunger (saturation absorbs first).
+      if (state.saturation > 0) {
+        state.saturation = Math.max(0, state.saturation - JUMP_HUNGER_COST);
+      } else {
+        state.hunger = Math.max(0, state.hunger - JUMP_HUNGER_COST);
+      }
     }
     state.jumpQueued = false;
 
@@ -4395,6 +4489,28 @@ function updateSimulation(dtSeconds) {
     }
   } else {
     state.bobAmplitude += (0 - state.bobAmplitude) * Math.min(1, dtSeconds * 14);
+  }
+
+  // Wave 7 — hunger tick (playing mode only; skip in menu/dead states).
+  {
+    const hungerResult = tickHunger({
+      hunger: state.hunger,
+      saturation: state.saturation,
+      starveAccumSec: state.starveAccumSec,
+      health: state.health,
+      maxHealth: state.maxHealth,
+      dtSeconds,
+      isSprinting: state.isSprinting && state.onGround,
+    });
+    state.hunger = hungerResult.hunger;
+    state.saturation = hungerResult.saturation;
+    state.starveAccumSec = hungerResult.starveAccumSec;
+    if (hungerResult.regenHp > 0) {
+      state.health = Math.min(state.maxHealth, state.health + hungerResult.regenHp);
+    }
+    if (hungerResult.starveHp > 0) {
+      takeDamage(hungerResult.starveHp, "starvation");
+    }
   }
 
   clampPlayer();
@@ -4582,6 +4698,9 @@ window.render_game_to_text = () => {
       eyeInWater: state.eyeInWater,
       health: Number(state.health.toFixed(2)),
       maxHealth: state.maxHealth,
+      hunger: Number(state.hunger.toFixed(2)),
+      maxHunger: state.maxHunger,
+      saturation: Number(state.saturation.toFixed(2)),
       moveSpeed: Number(getCurrentMoveSpeed().toFixed(3)),
     },
     view: {
@@ -4596,11 +4715,27 @@ window.render_game_to_text = () => {
     },
     selectedBlock: getSelectedItemName(),
     selectedSlot: state.selectedSlot,
-    hotbar: state.inventory.slice(0, HOTBAR_SIZE).map((slot) => (slot ? { ...slot } : null)),
+    hotbar: state.inventory.slice(0, HOTBAR_SIZE).map((slot) => {
+      if (!slot) return null;
+      const entry = { itemId: slot.itemId, count: slot.count };
+      if (hasDurability(slot.itemId)) {
+        entry.durability = slot.durability ?? TOOL_MAX_DURABILITY[slot.itemId] ?? 0;
+        entry.maxDurability = TOOL_MAX_DURABILITY[slot.itemId] ?? 0;
+      }
+      return entry;
+    }),
     inventory: {
       open: state.inventoryOpen,
       transferIndex: state.inventoryTransferIndex,
-      slots: state.inventory.map((slot) => (slot ? { ...slot } : null)),
+      slots: state.inventory.map((slot) => {
+        if (!slot) return null;
+        const entry = { itemId: slot.itemId, count: slot.count };
+        if (hasDurability(slot.itemId)) {
+          entry.durability = slot.durability ?? TOOL_MAX_DURABILITY[slot.itemId] ?? 0;
+          entry.maxDurability = TOOL_MAX_DURABILITY[slot.itemId] ?? 0;
+        }
+        return entry;
+      }),
     },
     crafting: {
       open: state.craftingOpen,
@@ -4693,6 +4828,15 @@ window.render_game_to_text = () => {
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Wave 7 debug hooks
+  setHunger: (n) => {
+    state.hunger = Math.max(0, Math.min(state.maxHunger, Number(n) || 0));
+    state.saturation = 0;
+    state.starveAccumSec = 0;
+    refreshHud();
+    return state.hunger;
+  },
+  eatSelected: () => eatSelectedFood(),
   spawnHostileMobNearPlayer: (distance = 2.2) => Boolean(spawnHostileMobNearPlayer(distance)),
   grantInventoryItem: (itemId, count = 1) => {
     if (typeof itemId !== "string" || !ITEM_DEFS[itemId]) {

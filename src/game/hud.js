@@ -1,4 +1,5 @@
-import { HOTBAR_SIZE, ITEM_DEFS } from "./survival";
+import { HOTBAR_SIZE, ITEM_DEFS, hasDurability, TOOL_MAX_DURABILITY } from "./survival";
+import { MAX_HUNGER } from "./hunger";
 import { getItemIconCanvas } from "./textures";
 
 // ----- Cached DOM handles built on first call -----
@@ -6,17 +7,27 @@ let _slotsBuilt = false;
 let _slotEls = /** @type {HTMLElement[]} */ ([]);
 let _slotIconEls = /** @type {HTMLCanvasElement[]} */ ([]);
 let _slotBadgeEls = /** @type {HTMLElement[]} */ ([]);
+let _slotDurabilityBarEls = /** @type {(HTMLElement|null)[]} */ ([]);
 let _heartsEl = null;
+let _hungerEl = null;
 let _hotbarWrapEl = null;
 
 function buildHotbarDOM(hotbarEl) {
-  // Replace hotbar inner content with a wrapper containing hearts + slot cells.
+  // Replace hotbar inner content with a wrapper containing hearts + hunger + slot cells.
   hotbarEl.innerHTML = "";
 
-  // Hearts row sits above the hotbar slots.
+  // Top HUD row: hearts (left) and hunger shanks (right) sit above the hotbar slots.
+  const statusRow = document.createElement("div");
+  statusRow.id = "mc-status-row";
+  hotbarEl.appendChild(statusRow);
+
   _heartsEl = document.createElement("div");
   _heartsEl.id = "mc-hearts";
-  hotbarEl.appendChild(_heartsEl);
+  statusRow.appendChild(_heartsEl);
+
+  _hungerEl = document.createElement("div");
+  _hungerEl.id = "mc-hunger";
+  statusRow.appendChild(_hungerEl);
 
   // Slot row.
   _hotbarWrapEl = document.createElement("div");
@@ -26,6 +37,7 @@ function buildHotbarDOM(hotbarEl) {
   _slotEls = [];
   _slotIconEls = [];
   _slotBadgeEls = [];
+  _slotDurabilityBarEls = [];
 
   for (let i = 0; i < HOTBAR_SIZE; i += 1) {
     const cell = document.createElement("div");
@@ -39,13 +51,22 @@ function buildHotbarDOM(hotbarEl) {
     const badge = document.createElement("span");
     badge.className = "mc-slot-badge hidden";
 
+    // Durability bar — a thin colored bar that spans the bottom of the slot.
+    const durBar = document.createElement("div");
+    durBar.className = "mc-durability-bar hidden";
+    const durFill = document.createElement("div");
+    durFill.className = "mc-durability-fill";
+    durBar.appendChild(durFill);
+
     cell.appendChild(iconCanvas);
     cell.appendChild(badge);
+    cell.appendChild(durBar);
     _hotbarWrapEl.appendChild(cell);
 
     _slotEls.push(cell);
     _slotIconEls.push(iconCanvas);
     _slotBadgeEls.push(badge);
+    _slotDurabilityBarEls.push(durBar);
   }
 
   _slotsBuilt = true;
@@ -55,6 +76,7 @@ function buildHotbarDOM(hotbarEl) {
 let lastStats = "";
 let lastHotbar = "";
 let lastHearts = "";
+let lastHunger = "";
 
 // ----- Heart drawing -----
 const HEART_SIZE = 9; // Minecraft heart icon size in pixels (rendered at 2x = 18px CSS)
@@ -132,6 +154,104 @@ function paintHeartPixels(ctx, s) {
   }
 }
 
+// ----- Hunger shank drawing -----
+const SHANK_SIZE = 9; // same pixel size as hearts
+
+/**
+ * Paint a hunger shank icon on a small canvas context.
+ * fill: "full" | "half" | "empty"
+ */
+function drawShank(ctx, fill) {
+  const s = SHANK_SIZE;
+  ctx.clearRect(0, 0, s, s);
+
+  // Dark brown background.
+  ctx.fillStyle = "#2a1a00";
+  ctx.fillRect(0, 0, s, s);
+
+  // Shank is a simple drumstick-like shape using a pixel map.
+  // We approximate a drumstick silhouette: round head top-right, handle bottom-left.
+  const ROWS = [
+    0b000111100, // row 0  — top of drumstick head
+    0b001111110, // row 1
+    0b011111111, // row 2
+    0b011111111, // row 3
+    0b001111110, // row 4
+    0b000111100, // row 5
+    0b000011000, // row 6  — start of handle
+    0b000011000, // row 7
+    0b000011000, // row 8
+  ];
+
+  if (fill === "empty") {
+    ctx.fillStyle = "#4a2e00";
+  } else if (fill === "half") {
+    ctx.fillStyle = "#c47c28";
+  } else {
+    ctx.fillStyle = "#e8a030";
+  }
+
+  for (let y = 0; y < s; y += 1) {
+    for (let x = 0; x < s; x += 1) {
+      if (((ROWS[y] >> (s - 1 - x)) & 1) === 1) {
+        // For half fill: right side of head uses dimmed color.
+        if (fill === "half" && x >= Math.ceil(s / 2) && y <= 5) {
+          ctx.fillStyle = "#4a2e00";
+          ctx.fillRect(x, y, 1, 1);
+          ctx.fillStyle = "#c47c28";
+        } else {
+          ctx.fillRect(x, y, 1, 1);
+        }
+      }
+    }
+  }
+
+  // Highlight on full shank.
+  if (fill === "full") {
+    ctx.fillStyle = "rgba(255,220,120,0.5)";
+    ctx.fillRect(3, 1, 1, 1);
+  }
+}
+
+function hungerSignature(hunger, maxHunger) {
+  return `${hunger}/${maxHunger}`;
+}
+
+function rebuildHunger(hunger, maxHunger) {
+  if (!_hungerEl) return;
+  _hungerEl.innerHTML = "";
+
+  const shankCount = Math.ceil(maxHunger / 2);
+  for (let i = 0; i < shankCount; i += 1) {
+    const canvas = document.createElement("canvas");
+    canvas.width = SHANK_SIZE;
+    canvas.height = SHANK_SIZE;
+    canvas.className = "mc-shank";
+    const ctx = canvas.getContext("2d");
+
+    const shankValue = (i + 1) * 2;
+    let fill;
+    if (hunger >= shankValue) {
+      fill = "full";
+    } else if (hunger >= shankValue - 1) {
+      fill = "half";
+    } else {
+      fill = "empty";
+    }
+
+    drawShank(ctx, fill);
+    _hungerEl.appendChild(canvas);
+  }
+}
+
+// ----- Durability bar color -----
+function durabilityColor(fraction) {
+  // Green → yellow → red as durability falls (mirrors Minecraft's item damage bar).
+  const r = Math.round(255 * (1 - fraction));
+  const g = Math.round(255 * fraction);
+  return `rgb(${r},${g},0)`;
+}
+
 // Build a hearts-row signature from health values.
 function heartsSignature(health, maxHealth) {
   return `${health}/${maxHealth}`;
@@ -169,7 +289,13 @@ function hotbarSignature(inventory, selectedSlot) {
   let s = `sel:${selectedSlot}`;
   for (let i = 0; i < HOTBAR_SIZE; i += 1) {
     const slot = inventory[i];
-    s += slot ? `|${slot.itemId}x${slot.count}` : "|_";
+    if (!slot) {
+      s += "|_";
+    } else if (hasDurability(slot.itemId)) {
+      s += `|${slot.itemId}d${slot.durability ?? TOOL_MAX_DURABILITY[slot.itemId]}`;
+    } else {
+      s += `|${slot.itemId}x${slot.count}`;
+    }
   }
   return s;
 }
@@ -180,6 +306,7 @@ function rebuildHotbar(inventory, selectedSlot) {
     const cellEl = _slotEls[i];
     const iconCanvas = _slotIconEls[i];
     const badge = _slotBadgeEls[i];
+    const durBar = _slotDurabilityBarEls[i];
 
     // Selection highlight.
     if (i === selectedSlot) {
@@ -199,18 +326,38 @@ function rebuildHotbar(inventory, selectedSlot) {
       ctx.clearRect(0, 0, 32, 32);
       ctx.drawImage(srcCanvas, 0, 0);
 
-      // Count badge: only show when count > 1.
-      if (slot.count > 1) {
+      // Count badge: only show when count > 1 and item is not a tool.
+      if (!hasDurability(slot.itemId) && slot.count > 1) {
         badge.textContent = slot.count;
         badge.classList.remove("hidden");
       } else {
         badge.classList.add("hidden");
+      }
+
+      // Durability bar: show when tool is damaged (below max).
+      if (durBar && hasDurability(slot.itemId)) {
+        const maxDur = TOOL_MAX_DURABILITY[slot.itemId] ?? 1;
+        const curDur = Number.isFinite(slot.durability) ? slot.durability : maxDur;
+        if (curDur < maxDur) {
+          const fraction = curDur / maxDur;
+          durBar.classList.remove("hidden");
+          const fill = durBar.firstElementChild;
+          if (fill) {
+            fill.style.width = `${Math.round(fraction * 100)}%`;
+            fill.style.backgroundColor = durabilityColor(fraction);
+          }
+        } else {
+          durBar.classList.add("hidden");
+        }
+      } else if (durBar) {
+        durBar.classList.add("hidden");
       }
     } else {
       // Empty slot.
       const ctx = iconCanvas.getContext("2d");
       ctx.clearRect(0, 0, 32, 32);
       badge.classList.add("hidden");
+      if (durBar) durBar.classList.add("hidden");
     }
   }
 }
@@ -250,6 +397,15 @@ export function updateHud({ state, world, statsEl, hotbarEl }) {
         state.maxHealth > 0 && state.health / state.maxHealth <= 0.25;
       hudEl.classList.toggle("low-health", lowHealth);
     }
+  }
+
+  // Hunger shank bar.
+  const hunger = Number.isFinite(state.hunger) ? state.hunger : MAX_HUNGER;
+  const maxHunger = Number.isFinite(state.maxHunger) ? state.maxHunger : MAX_HUNGER;
+  const huSig = hungerSignature(hunger, maxHunger);
+  if (huSig !== lastHunger) {
+    rebuildHunger(hunger, maxHunger);
+    lastHunger = huSig;
   }
 
   // Hotbar icons + selection.

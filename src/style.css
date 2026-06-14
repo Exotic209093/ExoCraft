@@ -237,6 +237,50 @@ canvas {
   line-height: 1;
 }
 
+/* ---- Wave 7: status row (hearts + hunger side-by-side) ---- */
+#mc-status-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  gap: 8px;
+}
+
+/* Hunger shank row — mirrors hearts on the right side */
+#mc-hunger {
+  display: flex;
+  gap: 1px;
+  align-items: center;
+  flex-direction: row-reverse; /* fill from right so shanks drain from the right */
+}
+
+.mc-shank {
+  display: block;
+  width: 18px;
+  height: 18px;
+  image-rendering: pixelated;
+}
+
+/* Durability bar — thin strip across bottom of a slot */
+.mc-durability-bar {
+  position: absolute;
+  bottom: 1px;
+  left: 2px;
+  right: 2px;
+  height: 2px;
+  background: #1a1a1a;
+  pointer-events: none;
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.mc-durability-fill {
+  height: 100%;
+  transition: width 0.1s linear;
+  border-radius: 1px;
+}
+
 /* ---- Damage flash overlay ---- */
 #damage-flash {
   position: absolute;

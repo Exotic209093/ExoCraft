@@ -2,6 +2,31 @@ export const HOTBAR_SIZE = 9;
 export const INVENTORY_SIZE = 24;
 export const MAX_STACK = 64;
 
+// ----- Tool durability -----
+// Max durability for each tool/weapon item. Tools with durability don't stack
+// (count is always 1) and carry a per-slot `durability` field that counts DOWN
+// from the max value. When it reaches 0 the slot is cleared.
+export const TOOL_MAX_DURABILITY = {
+  wood_pickaxe: 60,
+  wood_axe: 60,
+  wood_shovel: 60,
+  wood_sword: 60,
+  stone_pickaxe: 132,
+  stone_axe: 132,
+  stone_shovel: 132,
+  reinforced_pickaxe: 200,
+  copper_pickaxe: 250,
+  copper_blade: 200,
+  bone_blade: 220,
+  vanguard_blade: 350,
+  deep_delver_pickaxe: 400,
+};
+
+/** Returns true when this item has durability (i.e. is a tool/weapon). */
+export function hasDurability(itemId) {
+  return Object.prototype.hasOwnProperty.call(TOOL_MAX_DURABILITY, itemId);
+}
+
 export const ITEM_DEFS = {
   grass: { id: "grass", name: "Grass", placeBlockType: 1 },
   dirt: { id: "dirt", name: "Dirt", placeBlockType: 2 },
@@ -33,6 +58,11 @@ export const ITEM_DEFS = {
   warden_totem: { id: "warden_totem", name: "Warden Totem" },
   deep_delver_pickaxe: { id: "deep_delver_pickaxe", name: "Deep Delver Pickaxe", toolKind: "pickaxe", toolPower: 7.2 },
   spelunker_compass: { id: "spelunker_compass", name: "Spelunker Compass" },
+  // Wave 7 — food items
+  // apple: drops occasionally from leaf blocks; restores 4 hunger + 2.4 saturation
+  apple: { id: "apple", name: "Apple", food: { hunger: 4, saturation: 2.4 } },
+  // cooked_apple: smelt an apple for a better food value
+  cooked_apple: { id: "cooked_apple", name: "Cooked Apple", food: { hunger: 6, saturation: 7.2 } },
   wood_pickaxe: { id: "wood_pickaxe", name: "Wood Pickaxe", toolKind: "pickaxe", toolPower: 2.1 },
   wood_axe: { id: "wood_axe", name: "Wood Axe", toolKind: "axe", toolPower: 2.1 },
   wood_shovel: { id: "wood_shovel", name: "Wood Shovel", toolKind: "shovel", toolPower: 2.1 },
@@ -61,6 +91,36 @@ export const BLOCK_DROPS = {
   14: "glass",
   // 15 = water: no drop (bucket mechanic deferred to wave 8)
 };
+
+/**
+ * Extra probabilistic drops per block type.
+ * Each entry: { itemId, chance }  — chance in [0, 1].
+ * These are additional drops (beyond the main BLOCK_DROPS entry).
+ */
+export const BLOCK_EXTRA_DROPS = {
+  // Leaf blocks: 1-in-8 chance of an apple (Minecraft uses ~1/200 but this is
+  // a small world so we're more generous at 12.5% to make foraging viable).
+  5: [{ itemId: "apple", chance: 0.125 }],
+};
+
+/**
+ * Roll extra drops for a block type. Returns an array of itemIds that dropped.
+ * @param {number} blockType
+ * @param {() => number} [rng] - function returning [0,1); defaults to Math.random
+ */
+export function rollExtraDrops(blockType, rng = Math.random) {
+  const extras = BLOCK_EXTRA_DROPS[blockType];
+  if (!extras) {
+    return [];
+  }
+  const dropped = [];
+  for (const extra of extras) {
+    if (rng() < extra.chance) {
+      dropped.push(extra.itemId);
+    }
+  }
+  return dropped;
+}
 
 const BLOCK_HARDNESS = {
   1: 1.0,
@@ -348,6 +408,13 @@ export const SMELTING_RECIPES = [
     outputItemId: "glass",
     cookTimeMs: 1600,
   },
+  // Wave 7 — cook apples in the furnace for a better food item
+  {
+    id: "cooked_apple",
+    inputItemId: "apple",
+    outputItemId: "cooked_apple",
+    cookTimeMs: 1200,
+  },
 ];
 
 const SMELTING_RECIPE_BY_INPUT = new Map(SMELTING_RECIPES.map((recipe) => [recipe.inputItemId, recipe]));
@@ -363,6 +430,19 @@ export function cloneInventory(inventory) {
 export function addItemToInventory(inventory, itemId, count) {
   let remaining = count;
   if (!ITEM_DEFS[itemId]) {
+    return remaining;
+  }
+
+  // Tools with durability are never stacked — each goes into its own slot at
+  // count:1 with durability initialised to the item's max.
+  if (hasDurability(itemId)) {
+    for (let i = 0; i < inventory.length && remaining > 0; i += 1) {
+      if (inventory[i]) {
+        continue;
+      }
+      inventory[i] = { itemId, count: 1, durability: TOOL_MAX_DURABILITY[itemId] };
+      remaining -= 1;
+    }
     return remaining;
   }
 
@@ -465,7 +545,8 @@ export function transferInventoryStack(inventory, fromIndex, toIndex) {
     return true;
   }
 
-  if (toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
+  // Tools with durability never merge — only swap.
+  if (!hasDurability(fromSlot.itemId) && toSlot.itemId === fromSlot.itemId && toSlot.count < MAX_STACK) {
     const moved = Math.min(MAX_STACK - toSlot.count, fromSlot.count);
     if (moved <= 0) {
       return false;
@@ -584,4 +665,37 @@ export function applyRecipe(inventory, recipe, isWorkbenchNearby) {
     inventory[i] = snapshot[i] ? { ...snapshot[i] } : null;
   }
   return { ok: true };
+}
+
+/**
+ * Returns the food definition {hunger, saturation} for an item, or null.
+ */
+export function getFoodDef(itemId) {
+  return ITEM_DEFS[itemId]?.food || null;
+}
+
+/**
+ * Decrement durability on the slot at slotIndex by `amount`.
+ * If durability reaches 0 the slot is cleared (tool breaks).
+ * Returns true when the tool broke, false otherwise.
+ * No-ops when the slot isn't a durability item.
+ * @param {Array} inventory
+ * @param {number} slotIndex
+ * @param {number} [amount=1]
+ */
+export function decrementDurability(inventory, slotIndex, amount = 1) {
+  const slot = inventory[slotIndex];
+  if (!slot || !hasDurability(slot.itemId)) {
+    return false;
+  }
+  // Initialise durability lazily for items that pre-date Wave 7.
+  if (!Number.isFinite(slot.durability)) {
+    slot.durability = TOOL_MAX_DURABILITY[slot.itemId] ?? 1;
+  }
+  slot.durability = Math.max(0, slot.durability - amount);
+  if (slot.durability <= 0) {
+    inventory[slotIndex] = null;
+    return true; // broke
+  }
+  return false;
 }
