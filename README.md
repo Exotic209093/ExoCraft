@@ -1,6 +1,6 @@
 # ExoCraft
 
-A browser voxel sandbox inspired by Minecraft, built with Three.js and Vite.
+A browser voxel sandbox inspired by Minecraft, built with Three.js and Vite. Procedurally generated biome world, smooth voxel lighting, survival mechanics, mobs, crafting, and a modern post-processing render pipeline.
 
 ## Run
 
@@ -9,68 +9,50 @@ npm install
 npm run dev
 ```
 
-Open: `http://localhost:5173`
+Open `http://localhost:5173`, click **Start**, then click the canvas to lock the mouse.
 
 ## Controls
 
-- `WASD` or `ArrowUp/ArrowDown`: move
-- `ArrowLeft/ArrowRight`: turn
-- `Space`: jump
-- `Left click`: break block
-  - If a hostile mob is under the crosshair and in reach, left click attacks it instead.
-- `Right click`: place selected hotbar item (if placeable)
-- `1-9`: select hotbar slot
-- `E`: toggle inventory panel
-- `C`: toggle crafting panel
-- `V`: toggle furnace panel (requires nearby furnace block)
-- `Esc`: close open inventory/crafting/furnace panel
-- `L`: toggle mouse lock
-- `F`: toggle fullscreen
-- `R`: regenerate terrain
-- `Save` / `Load` / `New World` buttons (top-right) for persistence controls
+- `WASD` / arrows: move
+- Mouse: look (click canvas to lock; `Esc` releases)
+- `Shift`: sprint
+- `Space`: jump / swim up (in water)
+- Left click: break block — or attack a mob under the crosshair
+- Right click: place the selected item — or eat it if it's food
+- `1`–`9`: select hotbar slot
+- `E`: inventory (with crafting grid + armor equip slots)
+- `C`: crafting panel (2×2 in hand, 3×3 near a crafting table)
+- `V`: furnace (when near a furnace); right-click a chest to open it
+- `F3`: debug overlay (position, facing, biome, light, FPS, looked-at block)
+- `F`: fullscreen · `L`: toggle mouse lock · `R`: regenerate world
+- `Save` / `Load` / `New World` (top-right)
 
-## Survival Notes
+## What's in it
 
-- High falls cause damage.
-- Reaching `0` health respawns you at spawn with full health.
-- Inventory panel supports moving/swapping stacks between hotbar and backpack by clicking one slot, then another.
-- Furnace panel supports loading smeltable input + fuel and collecting output.
-- Time of day now cycles automatically and is persisted in saves.
-- Player movement now auto-steps over 1-block ledges for smoother traversal.
-- Hostile mobs now wander/chase with stronger nighttime spawning and can damage the player on contact.
-- Defeated hostile mobs now drop `Bone Shard` progression loot.
-- Crafting now includes combat upgrades (`Wood Sword`, `Bone Blade`) and placeable `Torch` blocks.
-- Torches provide local dynamic light to improve nighttime visibility.
-- World generation now includes cave pockets and copper ore nodes (surface/deep variants).
-- Furnace progression now supports `Copper Ore -> Copper Ingot` smelting.
-- Exploration crafting now includes `Copper Pickaxe` and `Copper Blade` (combat path ties ore + mob drops).
-- Guided progression now includes an objective HUD + world waypoint beacon:
-  - collect copper ore
-  - smelt copper ingot
-  - craft copper blade
-  - place a torch in a cave
-  - defeat a hostile mob with the copper blade
-- After the core objective chain, progression now branches into specialization paths:
-  - Combat path: hostile-kill trial rewards bonus damage + max health.
-  - Explorer path: cave torch + deep copper trial rewards move-speed + torch-scan range boosts.
-- Specialization trials now unlock branch-exclusive craftables:
-  - Combat branch: `Vanguard Blade` and `Warden Totem` (totem grants `+3` passive max health while carried).
-  - Explorer branch: `Deep Delver Pickaxe` and `Spelunker Compass` (compass grants `+0.55` move speed and `+3` torch scan radius while carried).
-  - Branch-exclusive recipes stay locked if the wrong specialization is selected.
-- After specialization completion, each branch now gets a repeatable midgame loop:
-  - Combat: forge the `Vanguard Blade`, then clear `Vanguard Hunt` runs by defeating `4` hostile mobs with it for bonus `Bone Shard` and `Copper Ingot` rewards.
-  - Explorer: craft the `Deep Delver Pickaxe` plus `Spelunker Compass`, then clear `Survey Run` routes by placing `2` cave torches and mining `2` deep copper for bonus `Torch` and `Copper Ore` rewards.
-- Those repeatable loops now lead into branch-specific encounter locations:
-  - Combat branch marks an `Ambush Pocket`; reaching it triggers a local hostile wave before hunt progress counts.
-  - Explorer branch marks a `Survey Cache`; reaching it anchors the torch/deep-copper route to one cave site before survey progress counts.
+**World** — Seeded procedural terrain ~112 blocks tall with FBM + ridged-noise mountains, valleys and cliffs; 5 biomes (plains, forest, desert, snow, mountains) with per-biome surface blocks, grass tint, tree types (oak/birch/spruce) and snow cover. Deep connected caves, depth-banded ores (coal → iron → gold/redstone → diamond), oceans/lakes at sea level with sand beaches, lava pools deep underground, and chunk streaming with memory eviction.
 
-## Test hooks
+**Lighting** — Per-chunk merged geometry with baked ambient occlusion and a 0–15 skylight + blocklight flood-fill. Caves are dark until you place a torch; the surface dims at night. Day/night drives a gradient sky dome with stars and drifting clouds.
 
-- `window.advanceTime(ms)` for deterministic stepping
-- `window.render_game_to_text()` for concise state output
+**Survival** — Health + hearts, hunger + food (apples from leaves, cooked meats), passive health regen and starvation, fall/void/lava damage, tool durability, and wearable armor (leather/iron/diamond) with damage reduction. Mine the right tool tier to harvest higher ores.
 
-## Persistence
+**Building & crafting** — Full block palette (cobblestone, glass, sand/gravel with gravity, planks, ores, …), 3×3 shaped + shapeless crafting, smelting furnaces, and 27-slot chests.
 
-- Uses IndexedDB when available (fallback to localStorage).
-- Stores world seed, day/night clock, player transform/health, selected hotbar slot, inventory contents, furnace states, hostile mobs, and placed/broken block edits.
-- Autosaves periodically while playing.
+**Mobs** — Passive cows/pigs/sheep/chickens (meat, leather, wool, feathers) and hostile zombies (daylight burn), skeletons (arrows), creepers (explode + crater terrain) and spiders, with night spawning and drops.
+
+**Feel & graphics** — Mouse-look first-person with a held-item viewmodel that swings on use, weighty combat with knockback, procedural break/place/footstep/hurt/ambient audio, animated water, biome weather (rain/snow), wind-swaying grass and leaves, and a post-processing pipeline (ACES tone mapping, bloom on emissives, FXAA).
+
+There's also a guided objective/specialization progression system (collect copper → smelt → craft → explore/combat branches) layered on top.
+
+## Test hooks (automation / debugging)
+
+Exposed on `window` for deterministic testing:
+
+- `window.render_game_to_text()` — full game state as JSON
+- `window.advanceTime(ms)` — step the deterministic simulation (the RAF loop pauses under automation)
+- `window.__exoCraftDebug` — `teleportPlayer`, `setBlock`, `grantInventoryItem`, `setTimeOfDayMs`, `spawnMob(type,dist)`, `spawnPassive(type,dist)`, `explodeNearestCreeper`, `setWeather(type)`, `findBiome(name)`, `setHunger`, `eatSelected`, `equipArmor`, `hurtPlayer`, `getArmorStats`, and more.
+
+## Architecture
+
+Modular `src/game/` — `world.js` (gen + mesher + lighting), `physics.js`, `controls.js`, `survival.js`, `mobs.js`, `passiveMobs.js`, `weather.js`, `sky.js`, `viewmodel.js`, `audio.js`, `hud.js`, `textures.js` (procedural atlas), `config.js`, `save.js` — orchestrated by `src/main.js`. Rendering uses a custom per-vertex lighting shader patch plus an EffectComposer post chain.
+
+See `progress.md` for the full build log (12 gameplay waves + 3 graphics passes).

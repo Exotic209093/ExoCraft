@@ -688,3 +688,19 @@ Goal: get ExoCraft as close to Minecraft as possible. Recon produced a 12-wave d
 
 # === 12-WAVE MINECRAFT-FIDELITY ROADMAP COMPLETE ===
 Commits 6022661..(wave12) on feat/minecraft-fidelity. Next: graphics-enhancement phase (post-processing/shadows/water/weather/viewmodel) + performance.
+
+# === GRAPHICS-ENHANCEMENT PHASE (better-than-vanilla visuals) ===
+
+## Graphics A — post-processing pipeline (7313a21)
+EffectComposer: RenderPass -> UnrealBloomPass (half-res, threshold 0.92 so only torches/lava/sun glow) -> OutputPass (ACES filmic tonemap + sRGB) -> FXAA (keeps pixel-art crisp). Pixel ratio capped at 2; resize-aware. Fixed: outputColorSpace was forced Linear (killed gamma -> too dark). Verified ~3.5ms/frame.
+
+## Graphics B — living world (8905f63)
+worldTimeUniform (deterministic). Animated water (dual-sine vertex wave + fresnel). Wind sway via per-vertex swayWeight attribute (leaves + grass/flowers, anchored at base). weather.js: biome-driven rain/snow/none camera-following Points + fog darkening + ambience; setWeather debug + text-state. Fixed 6 (incl. orchestrator-caught mesher crash: lava branch left swayArr undefined, `!== null` guard missed undefined -> blank world; fixed to truthy guard + swayArr=null).
+
+## Graphics C — held-item viewmodel (6da3cc1)
+viewmodel.js: overlay scene+camera rendered after the composer (autoClear=false + clearDepth) -> on top, no clip, no input intercept. Selected item as tilted atlas cube / tool quad / empty hand; swing-on-use (break/place/attack) + walk bob + idle sway, deterministic. Distinct ITEM_CHIP_COLORS for all wave-8/9 items via single getChipColor. Fixed 4 (disposal leak, item too low + swung up, iron-armor colors, dup chip map).
+
+## Final integration sweep (verified)
+Full-load stress (4 hostiles + 4 animals + rain + night + post chain + viewmodel): 3.7ms/frame, ZERO JS errors (only favicon 404s), all systems coexist. 5 biomes reachable, save v5, build green. Game runs smoothly and reads as Minecraft with richer-than-vanilla post-processing.
+
+NOTE: night surface is quite dark (wave-4 ambient floor 0.08, no moonlight term) — deliberate (use torches); a future moonlight term in the chunk shader combine would lift night surface while keeping caves dark, but that shader is the project's blank-world risk zone — change with review + runtime verification.
