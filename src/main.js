@@ -109,6 +109,7 @@ const inventoryPanel = document.querySelector("#inventory-panel");
 const inventoryHint = document.querySelector("#inventory-hint");
 const inventoryHotbarGrid = document.querySelector("#inventory-hotbar-grid");
 const inventoryBackpackGrid = document.querySelector("#inventory-backpack-grid");
+const damageFlashEl = document.querySelector("#damage-flash");
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, renderConfig.maxPixelRatio));
@@ -3960,9 +3961,22 @@ function takeDamage(amount, reason) {
     respawnPlayer({ healToMax: true });
     state.recentAction = `Died (${reason}), respawned`;
     markCraftPanelDirty();
+    triggerDamageFlash();
     return;
   }
   state.recentAction = `Took ${damage} damage (${reason})`;
+  triggerDamageFlash();
+}
+
+function triggerDamageFlash() {
+  if (!damageFlashEl) return;
+  // Cancel any in-progress animation by resetting, then re-triggering.
+  damageFlashEl.style.transition = "none";
+  damageFlashEl.style.opacity = "1";
+  // Force a reflow so the browser registers the opacity=1 before we start fading.
+  void damageFlashEl.offsetWidth;
+  damageFlashEl.style.transition = "opacity 0.65s ease-out";
+  damageFlashEl.style.opacity = "0";
 }
 
 function regenerateWorld() {

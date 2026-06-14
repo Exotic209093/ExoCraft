@@ -401,6 +401,102 @@ export function tileUvRect(tileName) {
 
 export const ATLAS_TILE_PX = TILE_PX;
 
+// ----- Item icon canvases -----
+// Returns a lazily-painted atlas canvas (shared, painted once).
+let _atlasCanvas = null;
+function getAtlasCanvas() {
+  if (_atlasCanvas) return _atlasCanvas;
+  _atlasCanvas = document.createElement("canvas");
+  _atlasCanvas.width = ATLAS_PX;
+  _atlasCanvas.height = ATLAS_PX;
+  const ctx = _atlasCanvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+  paintAtlas(ctx);
+  return _atlasCanvas;
+}
+
+// Palette of distinct colors for non-block items (tools/resources).
+const ITEM_CHIP_COLORS = {
+  plank:              "#c8a060",
+  stick:              "#a07040",
+  bone_shard:         "#e0dcc8",
+  copper_ingot:       "#d4804a",
+  charcoal:           "#3a3a3a",
+  refined_stone:      "#8890a0",
+  wood_sword:         "#c8a060",
+  bone_blade:         "#d8d4b8",
+  copper_blade:       "#c87040",
+  vanguard_blade:     "#6080c0",
+  warden_totem:       "#506840",
+  deep_delver_pickaxe:"#4070b0",
+  spelunker_compass:  "#50c0c0",
+  wood_pickaxe:       "#c8a060",
+  wood_axe:           "#c8a060",
+  wood_shovel:        "#c8a060",
+  stone_pickaxe:      "#8890a0",
+  stone_axe:          "#8890a0",
+  stone_shovel:       "#8890a0",
+  reinforced_pickaxe: "#7090b0",
+  copper_pickaxe:     "#c87040",
+};
+
+const ICON_SIZE = 32;
+const _iconCache = new Map();
+
+/**
+ * Returns a 32x32 canvas showing the item's icon.
+ * @param {string} itemId
+ * @param {number|null} placeBlockType - the block type this item places (from ITEM_DEFS[id].placeBlockType), or null.
+ *
+ * For placeable blocks: crops the block's top-face ('py') tile from the shared atlas canvas, scaled 2x pixel-perfect.
+ * For tools/resources: a flat colored chip with a pixel highlight/shadow border.
+ * Memoized per itemId; safe to call every frame.
+ */
+export function getItemIconCanvas(itemId, placeBlockType) {
+  if (_iconCache.has(itemId)) return _iconCache.get(itemId);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = ICON_SIZE;
+  canvas.height = ICON_SIZE;
+  const ctx = canvas.getContext("2d");
+  ctx.imageSmoothingEnabled = false;
+
+  let drawnFromAtlas = false;
+
+  if (placeBlockType != null && BLOCK_FACE_TILES[placeBlockType]) {
+    const faces = BLOCK_FACE_TILES[placeBlockType];
+    // Use top face for icon; torches/uniform blocks use any available face.
+    const tileName = faces.py || faces.pz || faces.px;
+    const slot = TILE[tileName];
+    if (slot) {
+      const [col, row] = slot;
+      const srcX = col * TILE_PX;
+      const srcY = row * TILE_PX;
+      ctx.drawImage(getAtlasCanvas(), srcX, srcY, TILE_PX, TILE_PX, 0, 0, ICON_SIZE, ICON_SIZE);
+      drawnFromAtlas = true;
+    }
+  }
+
+  if (!drawnFromAtlas) {
+    const color = ITEM_CHIP_COLORS[itemId] || "#607080";
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(0, 0, ICON_SIZE, ICON_SIZE);
+    ctx.fillStyle = color;
+    ctx.fillRect(2, 2, ICON_SIZE - 4, ICON_SIZE - 4);
+    // Top-left highlight.
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fillRect(2, 2, ICON_SIZE - 4, 2);
+    ctx.fillRect(2, 2, 2, ICON_SIZE - 4);
+    // Bottom-right shadow.
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(2, ICON_SIZE - 4, ICON_SIZE - 4, 2);
+    ctx.fillRect(ICON_SIZE - 4, 2, 2, ICON_SIZE - 4);
+  }
+
+  _iconCache.set(itemId, canvas);
+  return canvas;
+}
+
 // ----- Mining crack overlay textures -----
 // 10 stages of progressively heavier cracks on a transparent background. Drawn at
 // 16x16 to match the atlas; sampled with NearestFilter to keep the pixel-art look.

@@ -606,3 +606,16 @@ Original prompt: I want too build a minecraft clone but in the browser fully
 
 ## Next milestone target
 - Milestone 17: add tangible encounter props/rewards in the world (combat relic drops and explorer cache pickups) so these branch encounters feel less abstract than pure waypoint/state transitions.
+
+---
+
+# Minecraft Fidelity Push (2026-06-14, branch feat/minecraft-fidelity)
+
+Goal: get ExoCraft as close to Minecraft as possible. Recon produced a 12-wave dependency-ordered roadmap (w1 HUD -> w2 palette -> w3 terrain -> w4 smooth lighting -> w5 water -> w6 sky -> w7 hunger/durability -> w8 ores/lava -> w9 mobs -> w10 crafting/chests/armor -> w11 combat/audio/flora -> w12 biomes). Each wave: one implementer + adversarial review + fix, then hook-driven verification (render_game_to_text / advanceTime / __exoCraftDebug + screenshots). NOTE: scripts/bug_sweep.mjs is flaky in headless (pointer-lock canvas clicks fail on baseline too); verification uses the JS hooks instead.
+
+## Wave 1 complete — Minecraft HUD
+- `src/game/textures.js`: `getItemIconCanvas(itemId, placeBlockType)` — memoized per-item icon canvases cropped from the real block atlas (top face), colored chips for non-block items.
+- `src/game/hud.js`: rewrote the text HUD into a Minecraft hotbar — 9 icon slots with count badges + white selection box, and a 10-heart row (full/half/empty) above it. Per-section cached signatures (lastStats/lastHotbar/lastHearts) so repaints still fire.
+- `index.html` + `src/style.css`: bottom-centre beveled hotbar, hearts row, full-screen `#damage-flash` red overlay (pointer-events:none), low-health vignette.
+- `src/main.js`: `triggerDamageFlash()` hooked into `takeDamage`.
+- Verified: build green; both reviewers pass; hooks confirm 10 hearts / 9 slots / icons / selection / damage-flash; screenshot reads as Minecraft.
