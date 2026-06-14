@@ -22,6 +22,7 @@ export function setupControls({
   placeBlockAt,
   toNdc,
   toggleF3Overlay,
+  onThrowItem,
 }) {
   // Shift used for sprint (web-safe; Ctrl+W would close the tab in most browsers).
   const movementKeyCodes = new Set([
@@ -94,6 +95,10 @@ export function setupControls({
     }
     if (code === "KeyC" && !isRepeat && typeof toggleCraftPanel === "function") {
       toggleCraftPanel();
+    }
+    // Wave F1 — throw selected hotbar item (one-shot, no repeat, no panel-open gate)
+    if (code === "KeyQ" && !isRepeat && !panelOpen && typeof onThrowItem === "function") {
+      onThrowItem();
     }
     if (code.startsWith("Digit") && !isRepeat) {
       const slot = Number(code.replace("Digit", ""));

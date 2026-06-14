@@ -82,9 +82,11 @@ import {
   playStepSoundForBlock,
   playJumpSound,
   playHurtSound,
+  playPickupSound,
   updateAudio,
   setMusicEnabled,
 } from "./game/audio";
+import { ItemEntityManager } from "./game/itemEntities";
 import { Viewmodel } from "./game/viewmodel";
 
 const configOverrides = typeof window.EXOCRAFT_CONFIG === "object" ? window.EXOCRAFT_CONFIG : {};
@@ -364,6 +366,11 @@ scene.add(hostileMobGroup);
 // Wave 9 — passive animal group
 const passiveMobGroup = new THREE.Group();
 scene.add(passiveMobGroup);
+
+// Wave F1 — dropped item entities
+const itemEntities = new ItemEntityManager();
+itemEntities.setAtlasTexture(atlasTexture);
+scene.add(itemEntities.group);
 
 const targetOutline = new THREE.LineSegments(
   new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02)),
@@ -3248,20 +3255,18 @@ function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
   decrementDurability(state.inventory, state.selectedSlot, 1);
   if (mob.health <= 0) {
     const mobTypeId = mob.mobType;
+    const dropX = mob.pos.x;
+    const dropY = mob.pos.y + 0.5;
+    const dropZ = mob.pos.z;
     removePassiveMobAt(index);
-    // Award drops
+    // Wave F1: spawn item entities at mob death position instead of direct grant
     const drops = rollPassiveMobDrops(mobTypeId);
-    const granted = [];
     for (const drop of drops) {
-      const leftover = addItemToInventory(state.inventory, drop.itemId, drop.count);
-      const got = drop.count - leftover;
-      if (got > 0) granted.push(`${got} ${getItemName(drop.itemId)}`);
+      itemEntities.spawnItemEntity(drop.itemId, drop.count, dropX, dropY, dropZ);
     }
-    state.recentAction = granted.length > 0
-      ? `Defeated ${mobTypeId} +${granted.join(", ")}`
+    state.recentAction = drops.length > 0
+      ? `Defeated ${mobTypeId} (items dropped)`
       : `Defeated ${mobTypeId}`;
-    markCraftPanelDirty();
-    markInventoryPanelDirty();
   } else {
     state.recentAction = `Hit ${mob.mobType} (${mob.health} hp)`;
     markInventoryPanelDirty();
@@ -3329,8 +3334,9 @@ function updateHostileMobs(deltaMs) {
         mob.health -= (1.5 * dtSeconds);
         if (mob.health <= 0) {
           const killWeapon = "zombie_burn";
+          const burnPos = { x: mob.pos.x, y: mob.pos.y, z: mob.pos.z };
           removeHostileMobAt(i);
-          rewardHostileMobDefeat(killWeapon, "zombie");
+          rewardHostileMobDefeat(killWeapon, "zombie", burnPos);
           markCraftPanelDirty();
           markInventoryPanelDirty();
           continue;
@@ -3567,20 +3573,20 @@ function registerHostileMobDefeat(weaponItemId = getSelectedItemId()) {
   }
 }
 
-function rewardHostileMobDefeat(weaponItemId = getSelectedItemId(), mobTypeId = "zombie") {
+function rewardHostileMobDefeat(weaponItemId = getSelectedItemId(), mobTypeId = "zombie", spawnPos = null) {
   registerHostileMobDefeat(weaponItemId);
-  // Wave 9: per-type drops from mobs.js registry
+  // Wave F1: spawn drops as item entities at mob death position
   const drops = rollMobDrops(mobTypeId);
-  const granted = [];
+  const dropX = spawnPos ? spawnPos.x : state.playerPos.x;
+  const dropY = spawnPos ? spawnPos.y + 0.5 : state.playerPos.y;
+  const dropZ = spawnPos ? spawnPos.z : state.playerPos.z;
   for (const drop of drops) {
-    const leftover = addItemToInventory(state.inventory, drop.itemId, drop.count);
-    const got = drop.count - leftover;
-    if (got > 0) granted.push(`${got} ${getItemName(drop.itemId)}`);
+    itemEntities.spawnItemEntity(drop.itemId, drop.count, dropX, dropY, dropZ);
   }
-  if (granted.length === 0) {
+  if (drops.length === 0) {
     state.recentAction = `Defeated ${mobTypeId}`;
   } else {
-    state.recentAction = `Defeated ${mobTypeId} +${granted.join(", ")}`;
+    state.recentAction = `Defeated ${mobTypeId} (items dropped)`;
   }
 }
 
@@ -3644,8 +3650,9 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   if (mob.health <= 0) {
     const killWeaponItemId = getSelectedItemId();
     const mobTypeId = mob.mobType || "zombie";
+    const mobPos = { x: mob.pos.x, y: mob.pos.y, z: mob.pos.z };
     removeHostileMobAt(index);
-    rewardHostileMobDefeat(killWeaponItemId, mobTypeId);
+    rewardHostileMobDefeat(killWeaponItemId, mobTypeId, mobPos);
     markCraftPanelDirty();
     markInventoryPanelDirty();
   } else {
@@ -5109,7 +5116,7 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 5, // Wave 10: chests + armor
+    version: 6, // Wave F1: item entities
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -5132,6 +5139,7 @@ function collectSaveSnapshot() {
     passiveMobs: serializePassiveMobs(),
     objectives: serializeObjectives(),
     edits: world.exportEdits(),
+    itemEntities: itemEntities.serialize(),
   };
 }
 
@@ -5214,6 +5222,8 @@ async function loadGame() {
     loadChests(snapshot.chests);
     loadHostileMobs(snapshot.mobs);
     loadPassiveMobs(snapshot.passiveMobs);
+    // Wave F1: restore item entities; v<=5 saves have no itemEntities field → clear
+    itemEntities.restore(snapshot.itemEntities ?? null);
     loadObjectives(snapshot.objectives);
     state.activeFurnaceKey = null;
     if (Number.isFinite(snapshot.worldTimeMs)) {
@@ -5406,16 +5416,15 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   const heldTier = getToolTier(heldItemId);
   const dropSuppressed = requiredTier !== undefined && heldTier < requiredTier;
 
+  // Wave F1: spawn item entities instead of direct inventory grant.
   const dropItemId = dropSuppressed ? null : getBlockDropItem(type);
   if (dropItemId) {
-    const leftover = addItemToInventory(state.inventory, dropItemId, 1);
-    if (leftover > 0) {
-      state.recentAction = toolBroke ? `Tool broke, ${blockName(type)} dropped (inv full)` : `Broke ${blockName(type)}, inventory full`;
+    itemEntities.spawnItemEntity(dropItemId, 1, coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
+    if (toolBroke) {
+      state.recentAction = `Tool broke! Dropped ${blockName(type)}`;
     } else {
-      state.recentAction = toolBroke ? `Tool broke! Got ${blockName(type)}` : `Broke ${blockName(type)}`;
+      state.recentAction = `Broke ${blockName(type)}`;
     }
-    markCraftPanelDirty();
-    markInventoryPanelDirty();
   } else if (dropSuppressed) {
     state.recentAction = `Need better tool for ${blockName(type)}`;
   } else if (!toolBroke) {
@@ -5425,9 +5434,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   // Roll extra probabilistic drops (e.g. apple from leaves).
   const extraDrops = rollExtraDrops(type);
   for (const extraItemId of extraDrops) {
-    addItemToInventory(state.inventory, extraItemId, 1);
-    markCraftPanelDirty();
-    markInventoryPanelDirty();
+    itemEntities.spawnItemEntity(extraItemId, 1, coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
   }
 
   state.breakProgress.targetKey = null;
@@ -5781,6 +5788,7 @@ function regenerateWorld() {
   chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
+  itemEntities.clear();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.activeChestKey = null;
@@ -5809,6 +5817,7 @@ async function createNewWorld() {
   chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
+  itemEntities.clear();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.activeChestKey = null;
@@ -6187,6 +6196,33 @@ function updateSimulation(dtSeconds) {
   updatePassiveMobs(deltaMs);
   updateTorchLights(deltaMs);
   updateParticles(deltaMs);
+  // Wave F1 — item entity physics + pickup
+  {
+    const pickups = itemEntities.update(dtSeconds, state.playerPos, world, state.timeOfDayMs);
+    if (pickups.length > 0) {
+      let anyGranted = false;
+      for (const pickup of pickups) {
+        const leftover = addItemToInventory(state.inventory, pickup.itemId, pickup.count);
+        if (leftover > 0) {
+          // Inventory full — drop the remainder back as an entity near the player
+          itemEntities.spawnItemEntity(
+            pickup.itemId, leftover,
+            state.playerPos.x, state.playerPos.y + 0.5, state.playerPos.z,
+          );
+        }
+        if (leftover < pickup.count) {
+          anyGranted = true;
+          playPickupSound();
+        }
+      }
+      if (anyGranted) {
+        markCraftPanelDirty();
+        markInventoryPanelDirty();
+        updateObjectives(0, true);
+        refreshHud();
+      }
+    }
+  }
   updateFallingBlocks();
   updateBranchEncounterState();
   updateObjectives(deltaMs);
@@ -6315,6 +6351,24 @@ setupControls({
   toNdc,
   toggleF3Overlay: () => {
     state.f3Visible = !state.f3Visible;
+  },
+  onThrowItem: () => {
+    const heldSlot = state.inventory[state.selectedSlot];
+    if (!heldSlot || !heldSlot.itemId) return;
+    // Consume 1 from the hotbar slot
+    const removed = consumeFromSlot(state.inventory, state.selectedSlot, 1);
+    if (removed <= 0) return;
+    // Face direction from camera quaternion
+    const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+    const fromPos = {
+      x: state.playerPos.x,
+      y: state.playerPos.y + 1.4, // eye height
+      z: state.playerPos.z,
+    };
+    itemEntities.tossItemEntity(heldSlot.itemId, 1, fromPos, dir);
+    markInventoryPanelDirty();
+    markCraftPanelDirty();
+    refreshHud();
   },
 });
 
@@ -6600,6 +6654,7 @@ window.render_game_to_text = () => {
       })(),
     },
     targetBlock: state.targetBlock,
+    itemEntities: itemEntities.getState(),
     world: {
       seed: world.getSeed(),
       chunkSize: world.chunkSize,
@@ -7021,6 +7076,16 @@ window.__exoCraftDebug = {
       distance: Number(Math.sqrt(bestDist).toFixed(1)),
     };
   },
+  // Wave F1 — item entity debug hooks
+  spawnItemEntity: (itemId, count = 1, dx = 0, dy = 1, dz = 0) => {
+    const x = state.playerPos.x + (Number.isFinite(dx) ? dx : 0);
+    const y = state.playerPos.y + (Number.isFinite(dy) ? dy : 1);
+    const z = state.playerPos.z + (Number.isFinite(dz) ? dz : 0);
+    const e = itemEntities.spawnItemEntity(itemId, Math.max(1, Math.floor(count)), x, y, z);
+    return e ? { id: e.id, itemId: e.itemId, count: e.count, x, y, z } : null;
+  },
+  getItemEntities: () => itemEntities.getState(),
+  clearItemEntities: () => { itemEntities.clear(); return true; },
 };
 
 function frame(now) {

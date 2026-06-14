@@ -241,6 +241,16 @@ export function playStepSound() {
 }
 
 // ---------------------------------------------------------------------------
+// Item pickup pop (Wave F1)
+// Short bright ding — two quick ascending tones.
+// ---------------------------------------------------------------------------
+export function playPickupSound() {
+  if (!isReady()) return;
+  playTone({ frequency: 880, durationMs: 55, type: "sine", gain: 0.18 });
+  playTone({ frequency: 1320, durationMs: 45, type: "sine", gain: 0.12 });
+}
+
+// ---------------------------------------------------------------------------
 // Player hurt sound (Wave 11)
 // ---------------------------------------------------------------------------
 export function playHurtSound() {
