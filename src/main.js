@@ -30,7 +30,7 @@ import {
   getSmeltingRecipeByInput,
   transferInventoryStack,
 } from "./game/survival";
-import { createBlockMaterials, VoxelWorld } from "./game/world";
+import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
 import {
   createAtlasTexture,
   createCrackTextures,
@@ -617,6 +617,8 @@ function updateDayNight(deltaMs) {
 
   const dayFactor = getDayFactorFromTime(state.timeOfDayMs);
   state.dayFactor = dayFactor;
+  // Drive the baked-lighting shader uniform — no remesh, just one float update per tick.
+  dayFactorUniform.value = dayFactor;
 
   scene.background.copy(nightSkyColor).lerp(daySkyColor, dayFactor);
   scene.fog.color.copy(scene.background);
