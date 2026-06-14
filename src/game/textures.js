@@ -1011,7 +1011,46 @@ const ITEM_CHIP_COLORS = {
   diamond_axe:        "#60f0e0",
   diamond_shovel:     "#60f0e0",
   diamond_sword:      "#60f0e0",
+  // Wave 9 — passive mob drops (raw/cooked meats, animal products)
+  raw_beef:           "#c84040",
+  steak:              "#a03020",
+  raw_porkchop:       "#d46060",
+  cooked_porkchop:    "#8b3a1a",
+  raw_chicken:        "#e0b080",
+  cooked_chicken:     "#c07040",
+  wool:               "#e8e8e8",
+  leather:            "#8b5a2b",
+  feather:            "#f0f0f0",
+  // Wave 9 / 11 — flora drops
+  seeds:              "#a8b840",
+  flower:             "#f070c0",
+  sapling:            "#68a840",
+  // Wave 9 / food extras
+  apple:              "#d03020",
+  cooked_apple:       "#a82418",
+  // Wave 10 — armor (leather tier)
+  leather_helmet:     "#8b5a2b",
+  leather_chestplate: "#7a4e26",
+  leather_leggings:   "#6e4520",
+  leather_boots:      "#8b5a2b",
+  // Wave 10 — armor (iron tier)
+  iron_helmet:        "#d4c0a8",
+  iron_chestplate:    "#c4b098",
+  iron_leggings:      "#b8a48e",
+  iron_boots:         "#d4c0a8",
+  // Wave 10 — armor (diamond tier)
+  diamond_helmet:     "#60f0e0",
+  diamond_chestplate: "#50d8cc",
+  diamond_leggings:   "#48c4b8",
+  diamond_boots:      "#60f0e0",
+  // Wave 11 — flora/plant blocks
+  tall_grass:         "#6ab040",
 };
+
+/** Returns the chip color hex string for any item id, falling back to the shared default. */
+export function getChipColor(itemId) {
+  return ITEM_CHIP_COLORS[itemId] || "#607080";
+}
 
 const ICON_SIZE = 32;
 const _iconCache = new Map();

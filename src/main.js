@@ -85,6 +85,7 @@ import {
   updateAudio,
   setMusicEnabled,
 } from "./game/audio";
+import { Viewmodel } from "./game/viewmodel";
 
 const configOverrides = typeof window.EXOCRAFT_CONFIG === "object" ? window.EXOCRAFT_CONFIG : {};
 const gameConfig = createGameConfig(configOverrides);
@@ -340,6 +341,10 @@ if (torchLightsEnabled && torchLightPoolSize > 0) {
 
 const atlasTexture = createAtlasTexture();
 const blockMaterials = createBlockMaterials(BLOCK_TYPES, atlasTexture);
+
+// Graphics-C: first-person held-item overlay.
+const viewmodel = new Viewmodel(renderer, atlasTexture);
+
 const world = new VoxelWorld({
   height: worldConfig.height,
   chunk: worldConfig.chunk,
@@ -3236,6 +3241,7 @@ function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
   if (!Number.isFinite(passiveMobId)) return false;
   const index = passiveMobs.findIndex((m) => m.id === passiveMobId);
   if (index < 0) return false;
+  viewmodel.triggerSwing();
   const playerDamage = getSelectedMobDamage();
   const mob = passiveMobs[index];
   mob.health -= Math.max(1, Math.floor(playerDamage));
@@ -3613,6 +3619,7 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
     ? hostileMobConfig.playerSwingCooldownSec
     : 0.4;
   state.playerSwingCooldownRemaining = swingCooldownSec;
+  viewmodel.triggerSwing();
 
   const playerDamage = getSelectedMobDamage();
   const mob = hostileMobs[index];
@@ -5428,6 +5435,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   hideCrackOverlay();
   spawnBlockBreakParticles(coords.x, coords.y, coords.z, type);
   playBreakSound(type);
+  viewmodel.triggerSwing();
   updateTargetBlockFromCenter();
   return true;
 }
@@ -5555,6 +5563,7 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   markCraftPanelDirty();
   markInventoryPanelDirty();
   playPlaceSound(placeType);
+  viewmodel.triggerSwing();
   updateTargetBlockFromCenter();
   return true;
 }
@@ -6191,6 +6200,16 @@ function updateSimulation(dtSeconds) {
     weatherSystem.update(dtSeconds, worldTimeUniform.value, state.playerPos, _wxBiome);
   }
 
+  // Graphics-C: held-item viewmodel — update animation state each sim tick.
+  {
+    const heldSlot = state.inventory[state.selectedSlot] || null;
+    const heldItemId = heldSlot ? heldSlot.itemId : null;
+    const heldPlaceBlockType = heldItemId
+      ? (typeof getPlaceableBlockType === "function" ? getPlaceableBlockType(heldItemId) : null)
+      : null;
+    viewmodel.update(dtSeconds, state.bobPhase, state.bobAmplitude, heldItemId, heldPlaceBlockType);
+  }
+
   // Wave 11 — audio tick (ambience, mob proximity growl, music).
   updateAudio(state, world, hostileMobs, worldConfig.generation.seaLevel || 38);
   refreshHud();
@@ -6210,6 +6229,10 @@ function updateSimulation(dtSeconds) {
 
 function render() {
   composer.render();
+  // Graphics-C: render held-item overlay ON TOP of the composed world frame.
+  // autoClear=false + clearDepth() inside viewmodel.render() ensures the overlay
+  // draws over the world without clipping through geometry.
+  viewmodel.render();
 }
 
 function startGame() {
@@ -6394,6 +6417,7 @@ window.addEventListener("resize", () => {
     1 / (width * renderer.getPixelRatio()),
     1 / (height * renderer.getPixelRatio()),
   );
+  viewmodel.resize(width, height);
 });
 
 let lastFrame = Number.NaN;
@@ -6601,6 +6625,8 @@ window.render_game_to_text = () => {
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Graphics-C viewmodel debug
+  triggerViewmodelSwing: () => viewmodel.triggerSwing(),
   // Graphics-B weather debug
   // setWeather("rain"|"snow"|"none") — override biome-driven weather
   // setWeather(null) — return to biome-driven
