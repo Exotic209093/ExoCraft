@@ -555,7 +555,7 @@ function yawToCardinal(yaw) {
  *   chunkSize?: number,
  * }} opts
  */
-export function updateF3Overlay({ state, world, fps, chunkSize = 16 }) {
+export function updateF3Overlay({ state, world, fps, chunkSize = 16, biome = null }) {
   // Create the element on first call.
   if (!_f3El) {
     _f3El = document.createElement("pre");
@@ -630,9 +630,14 @@ export function updateF3Overlay({ state, world, fps, chunkSize = 16 }) {
   if (sig === _f3LastSig) return;
   _f3LastSig = sig;
 
+  const biomeStr = biome ? biome.name : (typeof world.biomeAt === "function"
+    ? (world.biomeAt(Math.floor(px), Math.floor(pz))?.name ?? "?")
+    : "?");
+
   _f3El.textContent = [
     `XYZ:    ${px.toFixed(3)} / ${py.toFixed(3)} / ${pz.toFixed(3)}`,
     `Chunk:  ${cx}, ${cz}  (local ${Math.floor(((px % chunkSize) + chunkSize) % chunkSize)}, ${Math.floor(((pz % chunkSize) + chunkSize) % chunkSize)})`,
+    `Biome:  ${biomeStr}`,
     `Facing: ${facing}  (yaw ${yawDeg.toFixed(1)}°)`,
     `Target: ${tbStr}`,
     `Eye:    ${eyeX}, ${eyeY}, ${eyeZ}  (${inFluid})`,

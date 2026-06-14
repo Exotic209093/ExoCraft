@@ -679,3 +679,12 @@ Goal: get ExoCraft as close to Minecraft as possible. Recon produced a 12-wave d
 - Cross-quad flora ids 23 tall-grass / 24 flower / 25 sapling: own buffer + X-quad branch in the wave-4 mesher (DoubleSide alpha-cutout, neutral AO, sky-sampled light), PASSABLE, instant-break drops, sparse seeded placement on grass above the beach line.
 - F3 overlay (F3 toggle, default off): XYZ/chunk/facing/target/eye+fluid/light/FPS/chunks/time from text-state; own cached signature.
 - 2 reviewers found+fixed 5 must-fixes (player knockback dead on ground; mob knockback teleported through world; F3 light readout + dedup). Verified: flowers/grass/saplings render as cross-quads; F3 shows full readout; build green. (FPS ~27 under paused-RAF automation — real-play perf to check in graphics phase.)
+
+## Wave 12 complete — biomes + wood/tree/snow variants (ROADMAP COMPLETE)
+- biomeAt(x,z) from seeded temperature/humidity/mountain noise -> 5 biomes: PLAINS (grass, sparse oak), FOREST (grass, dense oak/birch), DESERT (sand, no trees), SNOW (snow cover + spruce), MOUNTAINS (high amplitude, stone/snow peaks). Branches surface block, tree type/density, terrain amplitude. Cached, cleared on setSeed.
+- Grass tint via a SEPARATE `tint` vec3 vertex attribute + shader multiply (NOT the wave-4 light channels) so lighting/AO stay intact (lighting reviewer passed clean — no blank world). Grass top + leaves + flora tinted per biome.
+- Variants ids 26 birch-log / 27 birch-leaf / 28 spruce-log / 29 spruce-leaf / 30 snow; per-biome trees; snow cap at topY+1 above snow line. birch/spruce log -> 4 plank recipes + fuel (must-fix: removed orphaned plank items).
+- render_game_to_text + F3 show biome; debug findBiome(name) teleports safely. Verified: 5 biomes reachable, desert=sand(11), snow=snow(30)+spruce, world renders lit; build green.
+
+# === 12-WAVE MINECRAFT-FIDELITY ROADMAP COMPLETE ===
+Commits 6022661..(wave12) on feat/minecraft-fidelity. Next: graphics-enhancement phase (post-processing/shadows/water/weather/viewmodel) + performance.

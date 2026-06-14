@@ -195,7 +195,9 @@ function applyLightingShaderPatch(material) {
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
       `#include <common>
-varying vec3 vLightColor;`,
+attribute vec3 tint;
+varying vec3 vLightColor;
+varying vec3 vTint;`,
     );
     shader.vertexShader = shader.vertexShader.replace(
       "#include <color_vertex>",
@@ -203,19 +205,22 @@ varying vec3 vLightColor;`,
 // vColor.r = skylight (0-1), vColor.g = blocklight (0-1), vColor.b = AO factor
 // NOTE: in three r183 vColor is a vec4 even for 3-component color attributes,
 // so take .rgb (assigning vec4 -> vec3 fails shader compilation = blank world).
-vLightColor = vColor.rgb;`,
+vLightColor = vColor.rgb;
+vTint = tint;`,
     );
 
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <common>",
       `#include <common>
 uniform float uDayFactor;
-varying vec3 vLightColor;`,
+varying vec3 vLightColor;
+varying vec3 vTint;`,
     );
     // Replace the built-in color_fragment entirely so it doesn't double-multiply
     // diffuseColor by vColor (which carries packed light data, not a tint color).
     // Without this replacement, Three's built-in does: diffuseColor *= vColor (wrong hue cast),
     // and then the block below multiplies again — double-application produces magenta/green tints.
+    // Wave 12: also multiply by vTint (biome grass tint; [1,1,1] for non-tinted faces).
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <color_fragment>",
       `{
@@ -226,7 +231,7 @@ varying vec3 vLightColor;`,
   // Ambient floor: ensures surface is never pitch black at night.
   float ambientFloor = 0.08;
   float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
-  diffuseColor.rgb *= lightFactor;
+  diffuseColor.rgb *= lightFactor * vTint;
 }`,
     );
   };
@@ -387,6 +392,7 @@ export class VoxelWorld {
     this.surfaceHeightCache = new Map();
     this.treeInfoCache = new Map();
     this.surfaceOreNodeCache = new Map();
+    this.biomeCache = new Map();
   }
 
   normalizeBlockType(type) {
@@ -533,6 +539,129 @@ export class VoxelWorld {
     return 1 - Math.abs(2 * n - 1);
   }
 
+  // ---------------------------------------------------------------------------
+  // Wave 12: Biome system
+  // Two low-frequency seeded noise2 calls sample temperature and humidity.
+  // Their combination (thresholded into 4 quadrants + a mountain override)
+  // selects one of 5 biomes, each a plain data record.
+  //
+  // Biome record shape:
+  //   name          : string
+  //   surfaceTop    : block id for the top surface voxel
+  //   surfaceFiller : block id for 1-2 voxels below the top
+  //   grassTint     : [r, g, b] multiplier (0..1) applied to grass top faces
+  //   treeType      : "oak" | "birch" | "spruce" | "none"
+  //   treeDensity   : noise threshold above which a tree column is placed (higher = rarer)
+  //   heightAmplitude: multiplier on fbmAmplitude for terrain shape (1 = normal)
+  //   snow          : bool — place a snow cap layer on top of stone/grass above snowLine
+  //   snowLine      : Y above which snow appears (only used when snow=true)
+  // ---------------------------------------------------------------------------
+  static BIOMES = {
+    PLAINS: {
+      name: "plains",
+      surfaceTop: 1,       // grass
+      surfaceFiller: 2,    // dirt
+      grassTint: [0.85, 1.0, 0.55], // vibrant green
+      treeType: "oak",
+      treeDensity: 0.9920, // sparse — only a few oaks
+      heightAmplitude: 0.85,
+      snow: false,
+      snowLine: 999,
+    },
+    FOREST: {
+      name: "forest",
+      surfaceTop: 1,       // grass
+      surfaceFiller: 2,    // dirt
+      grassTint: [0.72, 1.0, 0.45], // rich green
+      treeType: "oak_birch", // mix of oak and birch
+      treeDensity: 0.970,  // dense — lots of trees
+      heightAmplitude: 0.9,
+      snow: false,
+      snowLine: 999,
+    },
+    DESERT: {
+      name: "desert",
+      surfaceTop: 11,      // sand on top
+      surfaceFiller: 11,   // sand below too (sandstone effect)
+      grassTint: [1.0, 0.95, 0.60], // sandy olive (no grass blocks placed, so tint unused)
+      treeType: "none",
+      treeDensity: 1.1,    // threshold > 1 → never
+      heightAmplitude: 0.65,
+      snow: false,
+      snowLine: 999,
+    },
+    SNOW: {
+      name: "snow",
+      surfaceTop: 1,       // grass under snow
+      surfaceFiller: 2,    // dirt
+      grassTint: [0.80, 0.92, 0.78], // pale icy tint
+      treeType: "spruce",
+      treeDensity: 0.984,
+      heightAmplitude: 0.9,
+      snow: true,
+      snowLine: 0,         // snow everywhere in this biome
+    },
+    MOUNTAINS: {
+      name: "mountains",
+      surfaceTop: 3,       // stone surface
+      surfaceFiller: 3,    // stone below
+      grassTint: [0.78, 0.88, 0.70], // grey-green
+      treeType: "spruce",
+      treeDensity: 0.990,  // sparse spruce
+      heightAmplitude: 1.9, // much taller
+      snow: true,
+      snowLine: 62,        // snow only above Y 62
+    },
+  };
+
+  // Returns the biome record for a world column (x, z).
+  // Uses two independent noise2 samples (different frequency + offset) as
+  // temperature and humidity axes.  Seeded deterministically.
+  biomeAt(worldX, worldZ) {
+    const key = `${worldX},${worldZ}`;
+    if (this.biomeCache.has(key)) {
+      return this.biomeCache.get(key);
+    }
+
+    // Biome noise: very low frequency so transitions span hundreds of blocks.
+    // Two noise2 calls with distinct seeds/offsets → independent axes.
+    const TEMP_FREQ = 0.0018;
+    const HUMID_FREQ = 0.0022;
+    const s = this.generation.seed | 0;
+    const tempX  = worldX * TEMP_FREQ + s * 0.0071 + 300.5;
+    const tempZ  = worldZ * TEMP_FREQ - s * 0.0053 + 100.3;
+    const humidX = worldX * HUMID_FREQ - s * 0.0043 + 500.7;
+    const humidZ = worldZ * HUMID_FREQ + s * 0.0067 - 200.1;
+
+    const temp  = this.noise2(tempX,  tempZ);   // 0..1
+    const humid = this.noise2(humidX, humidZ);  // 0..1
+
+    // Mountain override: a third very-low-freq noise determines mountain zones
+    const MOUN_FREQ = 0.0012;
+    const mounN = this.noise2(
+      worldX * MOUN_FREQ + s * 0.0031 + 700.9,
+      worldZ * MOUN_FREQ - s * 0.0029 - 400.5,
+    );
+    let biome;
+    if (mounN > 0.72) {
+      biome = VoxelWorld.BIOMES.MOUNTAINS;
+    } else if (temp < 0.38) {
+      // Cold
+      biome = VoxelWorld.BIOMES.SNOW;
+    } else if (temp > 0.65 && humid < 0.42) {
+      // Hot + dry
+      biome = VoxelWorld.BIOMES.DESERT;
+    } else if (humid > 0.58) {
+      // Wet
+      biome = VoxelWorld.BIOMES.FOREST;
+    } else {
+      biome = VoxelWorld.BIOMES.PLAINS;
+    }
+
+    setBoundedCache(this.biomeCache, key, biome);
+    return biome;
+  }
+
   getSeed() {
     return this.generation.seed;
   }
@@ -543,6 +672,7 @@ export class VoxelWorld {
     this.surfaceHeightCache.clear();
     this.treeInfoCache.clear();
     this.surfaceOreNodeCache.clear();
+    this.biomeCache.clear();
   }
 
   surfaceHeight(worldX, worldZ) {
@@ -552,11 +682,15 @@ export class VoxelWorld {
     }
     const g = this.generation;
 
+    // Wave 12: biome height amplitude modulates the FBM layer.
+    const biome = this.biomeAt(worldX, worldZ);
+    const ampScale = biome.heightAmplitude;
+
     const hills = this.fbm2(
       worldX, worldZ,
       g.fbmOctaves,
       g.fbmBaseFrequency,
-      g.fbmAmplitude,
+      g.fbmAmplitude * ampScale,
     );
 
     const mountainMask = this.noise2(
@@ -568,7 +702,9 @@ export class VoxelWorld {
       (mountainMask - g.mountainMaskThreshold) / (1 - g.mountainMaskThreshold),
       0, 1,
     );
-    const mountains = ridgeRaw * maskBlend * g.ridgeAmplitude;
+    // Mountains biome also amplifies the ridge layer for dramatic peaks.
+    const ridgeAmp = g.ridgeAmplitude * (biome === VoxelWorld.BIOMES.MOUNTAINS ? 2.0 : 1.0);
+    const mountains = ridgeRaw * maskBlend * ridgeAmp;
 
     const value = Math.floor(g.baseHeight + hills + mountains);
     const clamped = THREE.MathUtils.clamp(value, g.minSurfaceY, this.height - g.topClearance);
@@ -583,16 +719,54 @@ export class VoxelWorld {
     }
     const g = this.generation;
     const topY = this.surfaceHeight(worldX, worldZ);
-    const treeNoise = this.noise2(worldX * 3 + 11, worldZ * 3 + 17);
-    if (treeNoise <= g.treeThreshold || topY + g.treeTopClearance >= this.height) {
+    const biome = this.biomeAt(worldX, worldZ);
+
+    // No trees in desert or no-tree biomes.
+    if (biome.treeType === "none") {
       setBoundedCache(this.treeInfoCache, cacheKey, null);
       return null;
     }
+
+    const treeNoise = this.noise2(worldX * 3 + 11, worldZ * 3 + 17);
+    // Use biome-specific density threshold instead of the global one.
+    if (treeNoise <= biome.treeDensity || topY + g.treeTopClearance >= this.height) {
+      setBoundedCache(this.treeInfoCache, cacheKey, null);
+      return null;
+    }
+
     const trunkHeight = g.trunkMinHeight + Math.floor(this.noise2(worldX + 91, worldZ + 47) * g.trunkHeightVariance);
+
+    // Resolve log + leaf block ids from biome treeType.
+    // For oak_birch mix, use a hash to deterministically pick one type per column.
+    let logType;
+    let leafType;
+    if (biome.treeType === "spruce") {
+      logType  = 28; // spruce log
+      leafType = 29; // spruce leaf
+    } else if (biome.treeType === "birch") {
+      logType  = 26; // birch log
+      leafType = 27; // birch leaf
+    } else if (biome.treeType === "oak_birch") {
+      // 40% birch, 60% oak — seeded per column
+      const mixN = this.hashLattice2(worldX * 7 + 3, worldZ * 7 - 5);
+      if (mixN < 0.40) {
+        logType  = 26; // birch log
+        leafType = 27; // birch leaf
+      } else {
+        logType  = 4;  // oak log
+        leafType = 5;  // oak leaf
+      }
+    } else {
+      logType  = 4;  // oak log
+      leafType = 5;  // oak leaf
+    }
+
     const info = {
       topY,
       trunkHeight,
       leafBase: topY + trunkHeight,
+      logType,
+      leafType,
     };
     setBoundedCache(this.treeInfoCache, cacheKey, info);
     return info;
@@ -734,16 +908,25 @@ export class VoxelWorld {
     const seaLevel = Number.isFinite(g.seaLevel) ? g.seaLevel : 38;
     const beachWidth = Number.isFinite(g.beachWidth) ? g.beachWidth : 4;
     const topY = this.surfaceHeight(worldX, worldZ);
+    // Wave 12: biome determines surface/filler block choices and snow.
+    const biome = this.biomeAt(worldX, worldZ);
 
     if (y <= topY) {
       let baseType = 3;
       if (y === topY) {
-        // Near-shore: replace grass/dirt top with sand for beaches.
-        // A column is a beach if its surface is within beachWidth blocks above seaLevel.
-        baseType = (topY <= seaLevel + beachWidth) ? 11 : 1;
+        // Near-shore: replace top with sand for beaches regardless of biome.
+        if (topY <= seaLevel + beachWidth) {
+          baseType = 11; // beach sand
+        } else {
+          baseType = biome.surfaceTop;
+        }
       } else if (y >= topY - 2) {
-        // Sub-surface layer: also sand near shoreline, otherwise dirt.
-        baseType = (topY <= seaLevel + beachWidth) ? 11 : 2;
+        // Sub-surface filler layer.
+        if (topY <= seaLevel + beachWidth) {
+          baseType = 11;
+        } else {
+          baseType = biome.surfaceFiller;
+        }
       }
 
       if (baseType === 3) {
@@ -785,9 +968,20 @@ export class VoxelWorld {
       return 15; // WATER
     }
 
+    // Wave 12: snow cap — place a snow block one voxel above the surface in snow biomes.
+    // For SNOW biome: everywhere above the surface top; for MOUNTAINS: only above snowLine.
+    if (y === topY + 1 && biome.snow && topY >= biome.snowLine && topY > seaLevel + beachWidth) {
+      // Don't place snow where a tree trunk would stand — check if a tree is at this column.
+      const treeCheck = this.getTreeInfo(worldX, worldZ);
+      if (!treeCheck) {
+        return 30; // snow block
+      }
+    }
+
+    // Trees — use per-tree log/leaf types from getTreeInfo (Wave 12).
     const treeAtColumn = this.getTreeInfo(worldX, worldZ);
     if (treeAtColumn && y > treeAtColumn.topY && y <= treeAtColumn.topY + treeAtColumn.trunkHeight) {
-      return 4;
+      return treeAtColumn.logType;
     }
 
     for (let tz = worldZ - g.leafRadius; tz <= worldZ + g.leafRadius; tz += 1) {
@@ -803,15 +997,13 @@ export class VoxelWorld {
         if (worldX === tx && worldZ === tz && y > tree.topY && y <= tree.topY + tree.trunkHeight) {
           continue;
         }
-        return 5;
+        return tree.leafType;
       }
     }
 
     // --- Wave 11: cross-quad flora above grass surface ---
-    // Place tall grass, flowers, or saplings in the air cell immediately above a grass block,
-    // only when the surface is above sea level (no underwater flora).
-    // Check topY is the true grass surface: above seaLevel+beachWidth (not sand/beach).
-    if (y === topY + 1 && topY > seaLevel + beachWidth) {
+    // Only in non-desert, non-snow biomes with a true grass surface.
+    if (y === topY + 1 && topY > seaLevel + beachWidth && biome.surfaceTop === 1 && !biome.snow) {
       const fn = this.hashLattice2(worldX * 3 + 7, worldZ * 3 + 13);
       if (fn > 0.93) {
         return 23; // tall grass (most common)
@@ -1362,33 +1554,39 @@ export class VoxelWorld {
     const opaqueNorm = [];
     const opaqueUv   = [];
     const opaqueCol  = [];
+    const opaqueTint = []; // Wave 12: biome grass tint per vertex (vec3)
     const opaqueIdx  = [];
     const leafPos    = [];
     const leafNorm   = [];
     const leafUv     = [];
     const leafCol    = [];
+    const leafTint   = []; // Wave 12
     const leafIdx    = [];
     const glassPos   = [];
     const glassNorm  = [];
     const glassUv    = [];
     const glassCol   = [];
+    const glassTint  = []; // Wave 12
     const glassIdx   = [];
     const waterPos   = [];
     const waterNorm  = [];
     const waterUv    = [];
     const waterCol   = [];
+    const waterTint  = []; // Wave 12
     const waterIdx   = [];
     // Wave 8: lava — own buffer (tclass=3), rendered after water.
     const lavaPos    = [];
     const lavaNorm   = [];
     const lavaUv     = [];
     const lavaCol    = [];
+    const lavaTint   = []; // Wave 12
     const lavaIdx    = [];
     // Wave 11: flora cross-quad buffer (tclass=4).
     const floraPos   = [];
     const floraNorm  = [];
     const floraUv    = [];
     const floraCol   = [];
+    const floraTint  = []; // Wave 12
     const floraIdx   = [];
 
     for (let lz = 0; lz < S; lz += 1) {
@@ -1406,7 +1604,7 @@ export class VoxelWorld {
           // so it renders on top of glass with its own material.
           // Lava (id 21, tclass=3) gets its own buffer after water.
           // Flora (tclass=4) gets a cross-quad buffer and skips the cube-face loop.
-          let posArr, normArr, uvArr, colArr, idxArr;
+          let posArr, normArr, uvArr, colArr, tintArr, idxArr;
           if (FLORA_BLOCK_IDS.has(blockType)) {
             // --- Cross-quad emitter for flora (two perpendicular quads = X shape) ---
             // Sample skylight / blocklight from the voxel above (open sky side).
@@ -1436,6 +1634,9 @@ export class VoxelWorld {
             const AO_NEUTRAL = 1.0; // no AO for flora
             const lightR = floraSky / 15.0;
             const lightG = floraBlk / 15.0;
+            // Wave 12: tint flora with biome grass tint
+            const floraBiome = this.biomeAt(worldX, worldZ);
+            const [ftr, ftg, ftb] = floraBiome.grassTint;
             const quadDefs = [
               // Quad A verts: [bl, br, tl, tr] along SW–NE diagonal
               [
@@ -1460,6 +1661,7 @@ export class VoxelWorld {
                 const [ut, vt] = FACE_UV_INDICES[v];
                 floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
                 floraCol.push(lightR, lightG, AO_NEUTRAL);
+                floraTint.push(ftr, ftg, ftb);
               }
               // Two CCW triangles
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
@@ -1467,20 +1669,29 @@ export class VoxelWorld {
             continue; // skip the cube-face loop for flora
           } else if (blockType === 21) {
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
-            colArr  = lavaCol;   idxArr  = lavaIdx;
+            colArr  = lavaCol;   tintArr = lavaTint;  idxArr  = lavaIdx;
           } else if (blockType === 15) {
             posArr  = waterPos;  normArr = waterNorm; uvArr = waterUv;
-            colArr  = waterCol;  idxArr  = waterIdx;
+            colArr  = waterCol;  tintArr = waterTint; idxArr  = waterIdx;
           } else if (tclass === 2) {
             posArr  = glassPos;  normArr = glassNorm; uvArr = glassUv;
-            colArr  = glassCol;  idxArr  = glassIdx;
+            colArr  = glassCol;  tintArr = glassTint; idxArr  = glassIdx;
           } else if (tclass === 1) {
             posArr  = leafPos;   normArr = leafNorm;  uvArr = leafUv;
-            colArr  = leafCol;   idxArr  = leafIdx;
+            colArr  = leafCol;   tintArr = leafTint;  idxArr  = leafIdx;
           } else {
             posArr  = opaquePos; normArr = opaqueNorm; uvArr = opaqueUv;
-            colArr  = opaqueCol; idxArr  = opaqueIdx;
+            colArr  = opaqueCol; tintArr = opaqueTint; idxArr  = opaqueIdx;
           }
+
+          // Wave 12: determine biome grass tint for this column (computed once per block).
+          // Grass top face (blockType=1 or surfaceTop==1) on the PY face gets tinted.
+          // Leaf blocks (5, 27, 29) also get a subtle tint. Everything else gets [1,1,1].
+          const blockBiome = this.biomeAt(worldX, worldZ);
+          const [biomeTintR, biomeTintG, biomeTintB] = blockBiome.grassTint;
+          // Determine which faces should be tinted for this block type.
+          const tintGrassTop = (blockType === 1); // grass block top face
+          const tintLeaves   = (blockType === 5 || blockType === 27 || blockType === 29); // all leaf types
 
           for (let f = 0; f < 6; f += 1) {
             if (!this.isFaceExposed(worldX, y, worldZ, f)) continue;
@@ -1545,6 +1756,14 @@ export class VoxelWorld {
 
             const baseVertex = posArr.length / 3;
 
+            // Wave 12: compute tint for this face.
+            // Grass top (+Y) face of grass blocks and all leaf faces get biome grassTint.
+            // All other faces get neutral [1,1,1] so the texture colour is unmodified.
+            const applyTint = (tintGrassTop && f === FACE_PY) || tintLeaves;
+            const fTR = applyTint ? biomeTintR : 1.0;
+            const fTG = applyTint ? biomeTintG : 1.0;
+            const fTB = applyTint ? biomeTintB : 1.0;
+
             for (let v = 0; v < 4; v += 1) {
               const [bx, by, bz] = fverts[v];
               posArr.push(worldX + bx, y + by, worldZ + bz);
@@ -1563,6 +1782,8 @@ export class VoxelWorld {
                 faceBlocklight / 15.0,
                 aoF,
               );
+              // Wave 12: biome grass tint (separate attribute — does NOT touch vColor).
+              tintArr.push(fTR, fTG, fTB);
             }
 
             // Two triangles forming the quad.
@@ -1603,28 +1824,31 @@ export class VoxelWorld {
       }
     }
 
-    // Build Three.js meshes from the accumulated buffers
-    const makeGeometry = (pos, norm, uv, col, idx) => {
+    // Build Three.js meshes from the accumulated buffers.
+    // Wave 12: tint is a separate per-vertex vec3 attribute carrying biome grass tint.
+    // It does NOT touch vColor (which carries packed skylight/blocklight/AO).
+    const makeGeometry = (pos, norm, uv, col, tint, idx) => {
       if (idx.length === 0) return null;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
       geo.setAttribute("normal",   new THREE.Float32BufferAttribute(norm, 3));
       geo.setAttribute("uv",       new THREE.Float32BufferAttribute(uv, 2));
       geo.setAttribute("color",    new THREE.Float32BufferAttribute(col, 3));
+      geo.setAttribute("tint",     new THREE.Float32BufferAttribute(tint, 3));
       geo.setIndex(idx);
       return geo;
     };
 
     const mats = this.materials;
 
-    const opaqueGeo = makeGeometry(opaquePos, opaqueNorm, opaqueUv, opaqueCol, opaqueIdx);
+    const opaqueGeo = makeGeometry(opaquePos, opaqueNorm, opaqueUv, opaqueCol, opaqueTint, opaqueIdx);
     if (opaqueGeo) {
       const mesh = new THREE.Mesh(opaqueGeo, mats.opaque);
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }
 
-    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafIdx);
+    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafTint, leafIdx);
     if (leafGeo) {
       const mesh = new THREE.Mesh(leafGeo, mats.leaf);
       mesh.renderOrder = 1;
@@ -1632,7 +1856,7 @@ export class VoxelWorld {
       this.meshGroup.add(mesh);
     }
 
-    const glassGeo = makeGeometry(glassPos, glassNorm, glassUv, glassCol, glassIdx);
+    const glassGeo = makeGeometry(glassPos, glassNorm, glassUv, glassCol, glassTint, glassIdx);
     if (glassGeo) {
       const mesh = new THREE.Mesh(glassGeo, mats.glass);
       mesh.renderOrder = 2;
@@ -1641,7 +1865,7 @@ export class VoxelWorld {
     }
 
     // Water rendered after glass (renderOrder 3).
-    const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterIdx);
+    const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterTint, waterIdx);
     if (waterGeo) {
       const mesh = new THREE.Mesh(waterGeo, mats.water);
       mesh.renderOrder = 3;
@@ -1651,7 +1875,7 @@ export class VoxelWorld {
     }
 
     // Wave 8: lava rendered after water (renderOrder 4) with its own emissive material.
-    const lavaGeo = makeGeometry(lavaPos, lavaNorm, lavaUv, lavaCol, lavaIdx);
+    const lavaGeo = makeGeometry(lavaPos, lavaNorm, lavaUv, lavaCol, lavaTint, lavaIdx);
     if (lavaGeo) {
       const mesh = new THREE.Mesh(lavaGeo, mats.lava);
       mesh.renderOrder = 4;
@@ -1661,7 +1885,7 @@ export class VoxelWorld {
     }
 
     // Wave 11: flora cross-quads rendered after lava (renderOrder 5).
-    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraIdx);
+    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraTint, floraIdx);
     if (floraGeo) {
       const mesh = new THREE.Mesh(floraGeo, mats.flora);
       mesh.renderOrder = 5;
@@ -1782,6 +2006,7 @@ export class VoxelWorld {
     this.surfaceHeightCache.clear();
     this.treeInfoCache.clear();
     this.surfaceOreNodeCache.clear();
+    this.biomeCache.clear();
   }
 
   clear() {

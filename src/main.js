@@ -624,7 +624,11 @@ function blockName(type) {
 function refreshHud() {
   updateHud({ state, world, statsEl, hotbarEl });
   // Wave 11 — F3 debug overlay (no-op when f3Visible=false, cheap signature guard inside).
-  updateF3Overlay({ state, world, fps: _fpsEma, chunkSize: worldConfig.chunk.size });
+  // Wave 12 — pass current biome so F3 displays it without a redundant biomeAt call inside hud.
+  const _f3Biome = typeof world.biomeAt === "function"
+    ? world.biomeAt(Math.floor(state.playerPos.x), Math.floor(state.playerPos.z))
+    : null;
+  updateF3Overlay({ state, world, fps: _fpsEma, chunkSize: worldConfig.chunk.size, biome: _f3Biome });
 }
 
 function toFurnaceKey(x, y, z) {
@@ -5529,7 +5533,14 @@ function pickSpawnPoint() {
       const z = centerZ + dz;
       const y = world.findSurfaceY(x, z);
       const surfaceType = world.get(x, y, z);
-      if (surfaceType === 0 || surfaceType === WATER_BLOCK_TYPE || surfaceType === WOOD_BLOCK_TYPE || surfaceType === LEAF_BLOCK_TYPE) {
+      // Wave 12: also reject birch/spruce log tops and leaf blocks as spawn surfaces.
+      const BIRCH_LOG_TYPE = 26;
+      const SPRUCE_LOG_TYPE = 28;
+      const BIRCH_LEAF_TYPE = 27;
+      const SPRUCE_LEAF_TYPE = 29;
+      if (surfaceType === 0 || surfaceType === WATER_BLOCK_TYPE || surfaceType === WOOD_BLOCK_TYPE || surfaceType === LEAF_BLOCK_TYPE
+          || surfaceType === BIRCH_LOG_TYPE || surfaceType === SPRUCE_LOG_TYPE
+          || surfaceType === BIRCH_LEAF_TYPE || surfaceType === SPRUCE_LEAF_TYPE) {
         continue;
       }
       if (!world.isWithinVerticalBounds(y + 2)) {
@@ -6498,6 +6509,10 @@ window.render_game_to_text = () => {
       generatedChunks: world.getGeneratedChunkCount(),
       solidBlocks: world.getLoadedSolidBlocks(),
       editCount: world.getEditCount(),
+      // Wave 12 — current biome at player position
+      biome: typeof world.biomeAt === "function"
+        ? world.biomeAt(Math.floor(state.playerPos.x), Math.floor(state.playerPos.z))?.name ?? "unknown"
+        : "unknown",
     },
     nearbyBlocks,
     recentAction: state.recentAction,
@@ -6834,6 +6849,65 @@ window.__exoCraftDebug = {
     totalDefense: getTotalDefense(state.wornArmor),
     maxPossible: 20,
   }),
+  // Wave 12 — biome debug: find a column in the biome and teleport just above its surface.
+  // Usage: __exoCraftDebug.findBiome("forest") — returns {x,z,y,biome} and teleports player.
+  // Searches in a spiral out from the player's current position.
+  findBiome: (biomeName) => {
+    if (typeof world.biomeAt !== "function") {
+      return { error: "biomeAt not available" };
+    }
+    const targetName = typeof biomeName === "string" ? biomeName.toLowerCase() : "";
+    const searchRadius = 512; // world units
+    const step = 8;           // sample every 8 blocks for speed
+    const px = Math.floor(state.playerPos.x);
+    const pz = Math.floor(state.playerPos.z);
+
+    let bestX = null;
+    let bestZ = null;
+    let bestDist = Infinity;
+
+    for (let dz = -searchRadius; dz <= searchRadius; dz += step) {
+      for (let dx = -searchRadius; dx <= searchRadius; dx += step) {
+        const wx = px + dx;
+        const wz = pz + dz;
+        const b = world.biomeAt(wx, wz);
+        if (b && b.name === targetName) {
+          const d = dx * dx + dz * dz;
+          if (d < bestDist) {
+            bestDist = d;
+            bestX = wx;
+            bestZ = wz;
+          }
+        }
+      }
+    }
+
+    if (bestX === null) {
+      return { found: false, searched: `${searchRadius * 2}x${searchRadius * 2}` };
+    }
+
+    // Teleport player just above the surface.
+    const surfY = world.surfaceHeight(bestX, bestZ);
+    const teleportY = surfY + 2.5;
+    state.playerPos.set(bestX + 0.5, teleportY, bestZ + 0.5);
+    state.playerVel.set(0, 0, 0);
+    state.onGround = false;
+    world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+    updateCameraTransform();
+    updateTargetBlockFromCenter();
+    markTorchLightsDirty();
+    updateTorchLights();
+    updateObjectives(0, true);
+
+    return {
+      found: true,
+      biome: targetName,
+      x: bestX,
+      z: bestZ,
+      y: teleportY,
+      distance: Number(Math.sqrt(bestDist).toFixed(1)),
+    };
+  },
 };
 
 function frame(now) {

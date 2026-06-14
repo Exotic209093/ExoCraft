@@ -125,6 +125,12 @@ export const ITEM_DEFS = {
   flower:      { id: "flower",      name: "Flower",      placeBlockType: 24 },
   sapling:     { id: "sapling",     name: "Sapling",     placeBlockType: 25 },
   seeds:       { id: "seeds",       name: "Seeds" },
+  // Wave 12 — wood/snow blocks
+  birch_log:   { id: "birch_log",   name: "Birch Log",   placeBlockType: 26 },
+  birch_leaf:  { id: "birch_leaf",  name: "Birch Leaf",  placeBlockType: 27 },
+  spruce_log:  { id: "spruce_log",  name: "Spruce Log",  placeBlockType: 28 },
+  spruce_leaf: { id: "spruce_leaf", name: "Spruce Leaf", placeBlockType: 29 },
+  snow_block:  { id: "snow_block",  name: "Snow",        placeBlockType: 30 },
   grass: { id: "grass", name: "Grass", placeBlockType: 1 },
   dirt: { id: "dirt", name: "Dirt", placeBlockType: 2 },
   stone: { id: "stone", name: "Stone", placeBlockType: 3 },
@@ -241,9 +247,15 @@ export const BLOCK_DROPS = {
   // Wave 10 — chest drops itself (contents handled in breakBlock)
   22: "chest",
   // Wave 11 — flora drops (tall grass → seeds, flower → flower, sapling → sapling)
-  23: "seeds",     // tall grass → seeds
-  24: "flower",    // flower → flower
-  25: "sapling",   // sapling → sapling
+  23: "seeds",       // tall grass → seeds
+  24: "flower",      // flower → flower
+  25: "sapling",     // sapling → sapling
+  // Wave 12 — wood/snow variants
+  26: "birch_log",   // birch log → birch log item
+  27: "birch_leaf",  // birch leaf → birch leaf item
+  28: "spruce_log",  // spruce log → spruce log item
+  29: "spruce_leaf", // spruce leaf
+  30: "snow_block",  // snow block → snow block item
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -261,7 +273,9 @@ export const BLOCK_DROPS = {
 export const BLOCK_EXTRA_DROPS = {
   // Leaf blocks: 1-in-8 chance of an apple (Minecraft uses ~1/200 but this is
   // a small world so we're more generous at 12.5% to make foraging viable).
-  5: [{ itemId: "apple", chance: 0.125 }],
+  5:  [{ itemId: "apple", chance: 0.125 }],
+  27: [{ itemId: "apple", chance: 0.125 }], // birch leaf — same apple chance
+  29: [{ itemId: "apple", chance: 0.10  }], // spruce leaf — slightly lower
 };
 
 /**
@@ -313,6 +327,12 @@ const BLOCK_HARDNESS = {
   23: 0.05,
   24: 0.05,
   25: 0.05,
+  // Wave 12 — wood/snow variants
+  26: 1.6,   // birch log — same as oak
+  27: 0.8,   // birch leaf — same as oak leaf
+  28: 1.6,   // spruce log — same as oak
+  29: 0.8,   // spruce leaf — same as oak leaf
+  30: 0.5,   // snow — soft, shovel preferred
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -322,6 +342,10 @@ const BLOCK_PREFERRED_TOOL = {
   4: "axe",
   6: "axe",
   7: "pickaxe",
+  // Wave 12 — wood/snow variants
+  26: "axe",    // birch log
+  28: "axe",    // spruce log
+  30: "shovel", // snow
   9: "pickaxe",
   // Wave 2
   10: "pickaxe", // cobblestone
@@ -459,6 +483,20 @@ export const RECIPES = [
     id: "planks",
     name: "Planks x4",
     inputs: [{ itemId: "wood", count: 1 }],
+    output: { itemId: "plank", count: 4 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "birch_planks",
+    name: "Planks x4 (Birch)",
+    inputs: [{ itemId: "birch_log", count: 1 }],
+    output: { itemId: "plank", count: 4 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "spruce_planks",
+    name: "Planks x4 (Spruce)",
+    inputs: [{ itemId: "spruce_log", count: 1 }],
     output: { itemId: "plank", count: 4 },
     requiresWorkbench: false,
   },
@@ -920,6 +958,8 @@ export const FUEL_ITEM_MS = {
   stick: 1200,
   plank: 2500,
   wood: 3000,
+  birch_log: 3000,
+  spruce_log: 3000,
   charcoal: 6000,
   coal: 6000, // Wave 8 — coal burns as long as charcoal
 };

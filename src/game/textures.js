@@ -44,6 +44,14 @@ const TILE = {
   tall_grass:      [0, 4],
   flower:          [1, 4],
   sapling:         [2, 4],
+  // Wave 12 — birch/spruce/snow tiles (row 4, cols 3-7; row 5)
+  birch_top:       [3, 4],
+  birch_side:      [4, 4],
+  birch_leaf:      [5, 4],
+  spruce_top:      [6, 4],
+  spruce_side:     [7, 4],
+  spruce_leaf:     [0, 5],
+  snow:            [1, 5],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -91,6 +99,16 @@ export const BLOCK_FACE_TILES = {
   23: { px: "tall_grass",   nx: "tall_grass",   py: "tall_grass",   ny: "tall_grass",   pz: "tall_grass",   nz: "tall_grass"   },
   24: { px: "flower",       nx: "flower",       py: "flower",       ny: "flower",       pz: "flower",       nz: "flower"       },
   25: { px: "sapling",      nx: "sapling",      py: "sapling",      ny: "sapling",      pz: "sapling",      nz: "sapling"      },
+  // Wave 12 — birch log: pale end-grain top/bottom, white-striped bark sides.
+  26: { px: "birch_side",   nx: "birch_side",   py: "birch_top",    ny: "birch_top",    pz: "birch_side",   nz: "birch_side"   },
+  // Wave 12 — birch leaf: bright lime-tinted cutout.
+  27: { px: "birch_leaf",   nx: "birch_leaf",   py: "birch_leaf",   ny: "birch_leaf",   pz: "birch_leaf",   nz: "birch_leaf"   },
+  // Wave 12 — spruce log: dark reddish bark, dark rings on ends.
+  28: { px: "spruce_side",  nx: "spruce_side",  py: "spruce_top",   ny: "spruce_top",   pz: "spruce_side",  nz: "spruce_side"  },
+  // Wave 12 — spruce leaf: dark green cutout.
+  29: { px: "spruce_leaf",  nx: "spruce_leaf",  py: "spruce_leaf",  ny: "spruce_leaf",  pz: "spruce_leaf",  nz: "spruce_leaf"  },
+  // Wave 12 — snow: uniform white-blue top/sides.
+  30: { px: "snow",         nx: "snow",         py: "snow",         ny: "snow",         pz: "snow",         nz: "snow"         },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -660,6 +678,142 @@ function paintFlower(ctx, col, row) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Wave 12 — birch/spruce/snow tile paint functions
+// ---------------------------------------------------------------------------
+
+function paintBirchTop(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  const cx = (TILE_PX - 1) / 2;
+  const cy = (TILE_PX - 1) / 2;
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const radius = Math.sqrt(dx * dx + dy * dy);
+      const ring = Math.floor(radius * 0.95) % 2;
+      const speck = pixelNoise(x, y, 96);
+      // Pale birch rings — much lighter/yellower than oak
+      let r = ring === 0 ? 216 : 180;
+      let g = ring === 0 ? 200 : 168;
+      let b = ring === 0 ? 148 : 120;
+      if (speck < 0.12) { r -= 18; g -= 16; b -= 12; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintBirchSide(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 97);
+      // Birch bark: white/pale cream with characteristic dark horizontal flecks.
+      let r = 224;
+      let g = 220;
+      let b = 196;
+      // Horizontal dark band marks (birch characteristic)
+      const band = pixelNoise(x * 0.3, y * 2.1, 98);
+      if (band < 0.18) { r = 60; g = 54; b = 46; }         // dark stripe
+      else if (band < 0.28) { r -= 20; g -= 18; b -= 14; } // near-stripe
+      else if (n < 0.12) { r -= 12; g -= 10; b -= 8; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintBirchLeaf(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 99);
+      const hole = pixelNoise(x, y, 100);
+      if (hole < 0.18) continue; // alpha cutout
+      // Birch leaves: bright lime-green, lighter than oak
+      let r = 120;
+      let g = 188;
+      let b = 80;
+      if (n < 0.18) { r -= 24; g -= 32; b -= 18; }
+      else if (n > 0.82) { r += 20; g += 24; b += 12; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintSpruceTop(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  const cx = (TILE_PX - 1) / 2;
+  const cy = (TILE_PX - 1) / 2;
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const radius = Math.sqrt(dx * dx + dy * dy);
+      const ring = Math.floor(radius * 0.95) % 2;
+      const speck = pixelNoise(x, y, 101);
+      // Spruce rings: dark reddish-brown
+      let r = ring === 0 ? 140 : 100;
+      let g = ring === 0 ?  92 :  64;
+      let b = ring === 0 ?  48 :  30;
+      if (speck < 0.12) { r -= 22; g -= 14; b -= 8; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintSpruceSide(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const stripe = (x % 4 === 0 || x % 4 === 3) ? -22 : 0;
+      const knot = pixelNoise(x, y, 102);
+      // Spruce bark: dark brownish-red
+      let r = 110 + stripe;
+      let g =  70 + stripe;
+      let b =  38 + stripe;
+      if (knot < 0.08) { r -= 28; g -= 18; b -= 10; }
+      else if (knot > 0.9) { r += 10; g += 6; b += 3; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintSpruceLeaf(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 103);
+      const hole = pixelNoise(x, y, 104);
+      if (hole < 0.18) continue; // alpha cutout
+      // Spruce leaves: dark forest green
+      let r = 46;
+      let g = 100;
+      let b = 46;
+      if (n < 0.18) { r -= 10; g -= 20; b -= 10; }
+      else if (n > 0.82) { r += 14; g += 24; b += 14; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintSnow(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 105);
+      const n2 = pixelNoise(x + 3, y + 5, 106);
+      // Clean white-blue snow with subtle sparkle variation
+      let r = 234;
+      let g = 240;
+      let b = 248;
+      if (n < 0.15) { r -= 12; g -= 12; b -= 8; }
+      else if (n > 0.88) { r = 255; g = 255; b = 255; } // sparkle
+      if (n2 < 0.08) { r -= 8; g -= 8; b -= 4; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
 function paintSapling(ctx, col, row) {
   const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
@@ -720,6 +874,14 @@ function paintAtlas(ctx) {
   paintTallGrass(ctx,   ...TILE.tall_grass);
   paintFlower(ctx,      ...TILE.flower);
   paintSapling(ctx,     ...TILE.sapling);
+  // Wave 12 — wood/snow variants
+  paintBirchTop(ctx,    ...TILE.birch_top);
+  paintBirchSide(ctx,   ...TILE.birch_side);
+  paintBirchLeaf(ctx,   ...TILE.birch_leaf);
+  paintSpruceTop(ctx,   ...TILE.spruce_top);
+  paintSpruceSide(ctx,  ...TILE.spruce_side);
+  paintSpruceLeaf(ctx,  ...TILE.spruce_leaf);
+  paintSnow(ctx,        ...TILE.snow);
 }
 
 export function createAtlasTexture() {
@@ -776,9 +938,13 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   23: 4, // tall grass
   24: 4, // flower
   25: 4, // sapling
+  // Wave 12 — birch/spruce leaves use the same alpha-cutout class as oak leaves (1).
+  27: 1, // birch leaf
+  29: 1, // spruce leaf
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
+// Only cross-quad (class 4) blocks are in this set; leaf blocks (class 1) are NOT.
 export const FLORA_BLOCK_IDS = new Set([23, 24, 25]);
 
 // ----- Item icon canvases -----

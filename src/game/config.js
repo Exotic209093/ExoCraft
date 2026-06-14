@@ -49,6 +49,12 @@ const DEFAULT_GAME_CONFIG = {
       { id: 23, name: "Tall Grass", color: 0x5aa036 },
       { id: 24, name: "Flower",     color: 0xf060a0 },
       { id: 25, name: "Sapling",    color: 0x4a9040 },
+      // Wave 12 — wood/tree/snow variants
+      { id: 26, name: "Birch Log",    color: 0xd4c89a },
+      { id: 27, name: "Birch Leaf",   color: 0x8dc86a },
+      { id: 28, name: "Spruce Log",   color: 0x5a3d1a },
+      { id: 29, name: "Spruce Leaf",  color: 0x2d5a2d },
+      { id: 30, name: "Snow",         color: 0xe8eef0 },
     ],
     generation: {
       seed: 1337,
