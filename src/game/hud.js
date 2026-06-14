@@ -13,6 +13,10 @@ let _hungerEl = null;
 let _hotbarWrapEl = null;
 // Wave 10 — armor bar
 let _armorEl = null;
+// Wave F2 — XP bar
+let _xpBarRowEl = null;
+let _xpBarFillEl = null;
+let _xpLevelEl = null;
 
 function buildHotbarDOM(hotbarEl) {
   // Replace hotbar inner content with a wrapper containing hearts + hunger + slot cells.
@@ -76,6 +80,28 @@ function buildHotbarDOM(hotbarEl) {
     _slotDurabilityBarEls.push(durBar);
   }
 
+  // Wave F2 — XP bar + level number, directly above the slot row.
+  // Structure (bottom-to-top within #hotbar column):
+  //   xp-bar-row (contains: xp-level label above, xp-bar track below)
+  // Inserted before _hotbarWrapEl so it sits between status-row and slots.
+  _xpBarRowEl = document.createElement("div");
+  _xpBarRowEl.id = "mc-xp-row";
+
+  _xpLevelEl = document.createElement("div");
+  _xpLevelEl.id = "mc-xp-level";
+  _xpLevelEl.textContent = "";
+  _xpBarRowEl.appendChild(_xpLevelEl);
+
+  const xpTrack = document.createElement("div");
+  xpTrack.id = "mc-xp-bar";
+  _xpBarFillEl = document.createElement("div");
+  _xpBarFillEl.id = "mc-xp-fill";
+  xpTrack.appendChild(_xpBarFillEl);
+  _xpBarRowEl.appendChild(xpTrack);
+
+  // Insert before the slot row so ordering is: armor → status → xp → slots
+  hotbarEl.insertBefore(_xpBarRowEl, _hotbarWrapEl);
+
   _slotsBuilt = true;
 }
 
@@ -85,6 +111,7 @@ let lastHotbar = "";
 let lastHearts = "";
 let lastHunger = "";
 let lastArmor = "";
+let lastXp = "";
 
 // ----- Heart drawing -----
 const HEART_SIZE = 9; // Minecraft heart icon size in pixels (rendered at 2x = 18px CSS)
@@ -467,6 +494,18 @@ function rebuildHotbar(inventory, selectedSlot) {
   }
 }
 
+// ----- Wave F2: XP bar -----
+function xpSignature(level, xpWithinLevel, xpToNext) {
+  return `${level}|${xpWithinLevel}|${xpToNext}`;
+}
+
+function rebuildXpBar(level, xpWithinLevel, xpToNext) {
+  if (!_xpBarFillEl || !_xpLevelEl) return;
+  const progress = xpToNext > 0 ? Math.min(1, Math.max(0, xpWithinLevel / xpToNext)) : 0;
+  _xpBarFillEl.style.width = `${Math.round(progress * 100)}%`;
+  _xpLevelEl.textContent = level > 0 ? String(level) : "";
+}
+
 // ----- Main export -----
 export function updateHud({ state, world, statsEl, hotbarEl }) {
   // Build DOM once.
@@ -518,6 +557,16 @@ export function updateHud({ state, world, statsEl, hotbarEl }) {
   if (huSig !== lastHunger) {
     rebuildHunger(hunger, maxHunger);
     lastHunger = huSig;
+  }
+
+  // XP bar (Wave F2).
+  const xpLevel    = Number.isFinite(state.xpLevel) ? state.xpLevel : 0;
+  const xpWithin   = Number.isFinite(state.xpWithinLevel) ? state.xpWithinLevel : 0;
+  const xpToNext   = Number.isFinite(state.xpToNext) ? state.xpToNext : 7;
+  const xpSig = xpSignature(xpLevel, xpWithin, xpToNext);
+  if (xpSig !== lastXp) {
+    rebuildXpBar(xpLevel, xpWithin, xpToNext);
+    lastXp = xpSig;
   }
 
   // Hotbar icons + selection.

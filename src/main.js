@@ -83,10 +83,12 @@ import {
   playJumpSound,
   playHurtSound,
   playPickupSound,
+  playLevelUpSound,
   updateAudio,
   setMusicEnabled,
 } from "./game/audio";
 import { ItemEntityManager } from "./game/itemEntities";
+import { XpOrbManager } from "./game/xpOrbs";
 import { Viewmodel } from "./game/viewmodel";
 
 const configOverrides = typeof window.EXOCRAFT_CONFIG === "object" ? window.EXOCRAFT_CONFIG : {};
@@ -372,6 +374,10 @@ const itemEntities = new ItemEntityManager();
 itemEntities.setAtlasTexture(atlasTexture);
 scene.add(itemEntities.group);
 
+// Wave F2 — XP orbs
+const xpOrbs = new XpOrbManager();
+scene.add(xpOrbs.group);
+
 const targetOutline = new THREE.LineSegments(
   new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02)),
   new THREE.LineBasicMaterial({ color: 0xffffff }),
@@ -634,6 +640,93 @@ const state = {
   playerKnockbackRemaining: 0,
   // Wave 11 — F3 debug overlay
   f3Visible: false,
+  // Wave F2 — XP system
+  xpLevel:        0,   // current level
+  xpWithinLevel:  0,   // XP accumulated toward next level
+  xpToNext:       7,   // cost to reach level+1 (7 = cost for level 0→1)
+  // Furnace fractional XP accumulator: smelting yields fractional XP; whole
+  // orbs spawn when the accumulator reaches 1.0.
+  _furnaceXpAccum: 0,
+};
+
+// ---------------------------------------------------------------------------
+// Wave F2 — XP level curve (real Minecraft formula)
+//   xp to go from level L to L+1:
+//     L ≤ 15: 2L + 7
+//     L ≤ 30: 5L − 38
+//     L  > 30: 9L − 158
+// ---------------------------------------------------------------------------
+function xpCostForLevel(level) {
+  if (level <= 15) return 2 * level + 7;
+  if (level <= 30) return 5 * level - 38;
+  return 9 * level - 158;
+}
+
+function initXpToNext() {
+  state.xpToNext = xpCostForLevel(state.xpLevel);
+}
+
+/**
+ * Add `amount` XP to the player's total. Levels up as needed, plays level-up
+ * sound, and keeps state.xpToNext in sync.
+ */
+function addXp(amount) {
+  if (amount <= 0) return;
+  state.xpWithinLevel += amount;
+  while (state.xpWithinLevel >= state.xpToNext) {
+    state.xpWithinLevel -= state.xpToNext;
+    state.xpLevel += 1;
+    state.xpToNext = xpCostForLevel(state.xpLevel);
+    playLevelUpSound();
+  }
+  refreshHud();
+}
+
+// ---------------------------------------------------------------------------
+// Wave F2 — deterministic per-break XP amounts for ore blocks.
+// Seeded off a shared counter so results are consistent under automation.
+// ---------------------------------------------------------------------------
+let _xpBreakCounter = 0;
+
+function seededXpFloat(seed) {
+  const v = Math.sin(seed * 97.13 + 179.3) * 31791.5453;
+  return v - Math.floor(v);
+}
+
+/**
+ * Return a deterministic XP amount for breaking `blockType`.
+ * Returns 0 for non-xp-granting blocks.
+ * Matches Minecraft XP ranges per ore type.
+ */
+function xpForBlockBreak(blockType) {
+  const seed = ++_xpBreakCounter;
+  const r = seededXpFloat(seed);
+  switch (blockType) {
+    case COAL_ORE_BLOCK_TYPE:      return Math.floor(r * 3);            // 0–2
+    case REDSTONE_ORE_BLOCK_TYPE:  return 1 + Math.floor(r * 5);       // 1–5
+    case DIAMOND_ORE_BLOCK_TYPE:   return 3 + Math.floor(r * 5);       // 3–7
+    case COPPER_ORE_BLOCK_TYPE:    return Math.floor(r * 3);            // 0–2
+    // Iron and gold give XP when smelted, not mined — return 0 here.
+    default: return 0;
+  }
+}
+
+/**
+ * XP per item smelted in a furnace, matching Minecraft's recipe xp values.
+ * Returns fractional values (e.g. iron_ingot = 0.7).
+ */
+const SMELT_XP = {
+  copper_ingot:   0.7,
+  iron_ingot:     0.7,
+  gold_ingot:     1.0,
+  refined_stone:  0.1,
+  stone:          0.1,
+  glass:          0.1,
+  charcoal:       0.15,
+  cooked_apple:   0.35,
+  steak:          0.35,
+  cooked_porkchop: 0.35,
+  cooked_chicken: 0.35,
 };
 
 // Automation runs should advance only through window.advanceTime().
@@ -3264,6 +3357,8 @@ function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
     for (const drop of drops) {
       itemEntities.spawnItemEntity(drop.itemId, drop.count, dropX, dropY, dropZ);
     }
+    // Wave F2: passive mobs drop 1–3 XP
+    xpOrbs.spawnXp(1 + Math.floor(seededXpFloat(++_xpBreakCounter) * 3), dropX, dropY, dropZ);
     state.recentAction = drops.length > 0
       ? `Defeated ${mobTypeId} (items dropped)`
       : `Defeated ${mobTypeId}`;
@@ -3583,6 +3678,8 @@ function rewardHostileMobDefeat(weaponItemId = getSelectedItemId(), mobTypeId = 
   for (const drop of drops) {
     itemEntities.spawnItemEntity(drop.itemId, drop.count, dropX, dropY, dropZ);
   }
+  // Wave F2: hostile mobs drop ~5 XP
+  xpOrbs.spawnXp(5, dropX, dropY, dropZ);
   if (drops.length === 0) {
     state.recentAction = `Defeated ${mobTypeId}`;
   } else {
@@ -3831,6 +3928,7 @@ function takeFurnaceOutput() {
   }
 
   const outputItemName = getItemName(furnace.outputItemId);
+  const takenOutputId = furnace.outputItemId;
   const leftover = addItemToInventory(state.inventory, furnace.outputItemId, furnace.outputCount);
   const taken = furnace.outputCount - leftover;
   if (taken <= 0) {
@@ -3843,6 +3941,18 @@ function takeFurnaceOutput() {
     furnace.outputCount = 0;
     furnace.outputItemId = null;
   }
+
+  // Wave F2: award XP for collected smelted items (fractional, accumulate into whole orbs).
+  const smeltXpPer = SMELT_XP[takenOutputId] ?? 0;
+  if (smeltXpPer > 0 && taken > 0) {
+    state._furnaceXpAccum += smeltXpPer * taken;
+    const wholeXp = Math.floor(state._furnaceXpAccum);
+    if (wholeXp > 0) {
+      state._furnaceXpAccum -= wholeXp;
+      xpOrbs.spawnXp(wholeXp, state.playerPos.x, state.playerPos.y + 0.5, state.playerPos.z);
+    }
+  }
+
   state.recentAction = `Took ${taken} ${outputItemName}`;
   markCraftPanelDirty();
   markFurnacePanelDirty();
@@ -5116,7 +5226,7 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 6, // Wave F1: item entities
+    version: 7, // Wave F2: XP system
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -5140,6 +5250,13 @@ function collectSaveSnapshot() {
     objectives: serializeObjectives(),
     edits: world.exportEdits(),
     itemEntities: itemEntities.serialize(),
+    xpOrbs: xpOrbs.serialize(),
+    xp: {
+      level:        state.xpLevel,
+      withinLevel:  state.xpWithinLevel,
+      toNext:       state.xpToNext,
+      furnaceAccum: state._furnaceXpAccum,
+    },
   };
 }
 
@@ -5224,6 +5341,17 @@ async function loadGame() {
     loadPassiveMobs(snapshot.passiveMobs);
     // Wave F1: restore item entities; v<=5 saves have no itemEntities field → clear
     itemEntities.restore(snapshot.itemEntities ?? null);
+    // Wave F2: restore XP state; v<=6 saves have no xp field → default to 0
+    {
+      const xpSnap = snapshot.xp ?? null;
+      state.xpLevel       = (xpSnap && Number.isFinite(xpSnap.level))       ? Math.max(0, Math.floor(xpSnap.level))       : 0;
+      state.xpWithinLevel = (xpSnap && Number.isFinite(xpSnap.withinLevel)) ? Math.max(0, xpSnap.withinLevel)             : 0;
+      state._furnaceXpAccum = (xpSnap && Number.isFinite(xpSnap.furnaceAccum)) ? Math.max(0, xpSnap.furnaceAccum)         : 0;
+      state.xpToNext      = xpCostForLevel(state.xpLevel);
+      // withinLevel must not exceed xpToNext
+      state.xpWithinLevel = Math.min(state.xpWithinLevel, state.xpToNext - 1);
+      xpOrbs.restore(snapshot.xpOrbs ?? null);
+    }
     loadObjectives(snapshot.objectives);
     state.activeFurnaceKey = null;
     if (Number.isFinite(snapshot.worldTimeMs)) {
@@ -5429,6 +5557,14 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     state.recentAction = `Need better tool for ${blockName(type)}`;
   } else if (!toolBroke) {
     state.recentAction = `Broke ${blockName(type)}`;
+  }
+
+  // Wave F2: spawn XP orbs for ore blocks (only when drop not suppressed).
+  if (!dropSuppressed) {
+    const oreXp = xpForBlockBreak(type);
+    if (oreXp > 0) {
+      xpOrbs.spawnXp(oreXp, coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
+    }
   }
 
   // Roll extra probabilistic drops (e.g. apple from leaves).
@@ -5789,6 +5925,8 @@ function regenerateWorld() {
   clearHostileMobs();
   clearPassiveMobs();
   itemEntities.clear();
+  xpOrbs.clear();
+  state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.activeChestKey = null;
@@ -5818,6 +5956,8 @@ async function createNewWorld() {
   clearHostileMobs();
   clearPassiveMobs();
   itemEntities.clear();
+  xpOrbs.clear();
+  state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.activeChestKey = null;
@@ -6221,6 +6361,13 @@ function updateSimulation(dtSeconds) {
         updateObjectives(0, true);
         refreshHud();
       }
+    }
+  }
+  // Wave F2 — XP orb physics + pickup
+  {
+    const xpCollected = xpOrbs.update(dtSeconds, state.playerPos, world, state.timeOfDayMs);
+    if (xpCollected > 0) {
+      addXp(xpCollected);
     }
   }
   updateFallingBlocks();
@@ -6655,6 +6802,13 @@ window.render_game_to_text = () => {
     },
     targetBlock: state.targetBlock,
     itemEntities: itemEntities.getState(),
+    xp: {
+      level:     state.xpLevel,
+      xp:        state.xpWithinLevel,
+      xpToNext:  state.xpToNext,
+      progress:  state.xpToNext > 0 ? Number((state.xpWithinLevel / state.xpToNext).toFixed(4)) : 0,
+      totalOrbs: xpOrbs.getState().count,
+    },
     world: {
       seed: world.getSeed(),
       chunkSize: world.chunkSize,
@@ -7086,6 +7240,28 @@ window.__exoCraftDebug = {
   },
   getItemEntities: () => itemEntities.getState(),
   clearItemEntities: () => { itemEntities.clear(); return true; },
+  // Wave F2 — XP debug hooks
+  spawnXpOrb: (value = 1, dx = 0, dy = 1, dz = 0) => {
+    const v = Math.max(1, Math.floor(Number.isFinite(value) ? value : 1));
+    const x = state.playerPos.x + (Number.isFinite(dx) ? dx : 0);
+    const y = state.playerPos.y + (Number.isFinite(dy) ? dy : 1);
+    const z = state.playerPos.z + (Number.isFinite(dz) ? dz : 0);
+    xpOrbs.spawnXp(v, x, y, z);
+    return xpOrbs.getState();
+  },
+  addXp: (amount = 10) => {
+    const n = Math.max(0, Math.floor(Number.isFinite(amount) ? amount : 10));
+    addXp(n);
+    return { level: state.xpLevel, xpWithinLevel: state.xpWithinLevel, xpToNext: state.xpToNext };
+  },
+  getXp: () => ({
+    level:        state.xpLevel,
+    xpWithinLevel: state.xpWithinLevel,
+    xpToNext:     state.xpToNext,
+    progress:     state.xpToNext > 0 ? state.xpWithinLevel / state.xpToNext : 0,
+    totalOrbs:    xpOrbs.getState().count,
+  }),
+  clearXpOrbs: () => { xpOrbs.clear(); return true; },
 };
 
 function frame(now) {

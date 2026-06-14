@@ -251,6 +251,31 @@ export function playPickupSound() {
 }
 
 // ---------------------------------------------------------------------------
+// XP level-up sound (Wave F2)
+// A short ascending arpeggio — celebratory but brief so it doesn't intrude.
+// ---------------------------------------------------------------------------
+export function playLevelUpSound() {
+  if (!isReady()) return;
+  // Three quick ascending tones: C5 → E5 → G5
+  const notes = [523.25, 659.25, 783.99];
+  const ctx = audioContext;
+  const t = ctx.currentTime;
+  notes.forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    const env = ctx.createGain();
+    const start = t + i * 0.09;
+    env.gain.setValueAtTime(0, start);
+    env.gain.linearRampToValueAtTime(0.22, start + 0.03);
+    env.gain.exponentialRampToValueAtTime(0.0001, start + 0.18);
+    osc.connect(env).connect(audioMaster);
+    osc.start(start);
+    osc.stop(start + 0.20);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Player hurt sound (Wave 11)
 // ---------------------------------------------------------------------------
 export function playHurtSound() {

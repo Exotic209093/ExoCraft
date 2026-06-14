@@ -724,6 +724,41 @@ canvas {
   image-rendering: pixelated;
 }
 
+/* ---- Wave F2: XP bar ---- */
+#mc-xp-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  gap: 1px;
+}
+
+#mc-xp-level {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  color: #7df542;
+  text-shadow: 1px 1px 0 #1a4200, -1px 1px 0 #1a4200, 1px -1px 0 #1a4200, -1px -1px 0 #1a4200;
+  line-height: 1;
+  min-height: 13px;
+}
+
+#mc-xp-bar {
+  width: 100%;
+  height: 4px;
+  background: #1a2e00;
+  border-radius: 2px;
+  overflow: hidden;
+  border: 1px solid #0c1800;
+}
+
+#mc-xp-fill {
+  height: 100%;
+  background: #7df542;
+  border-radius: 2px;
+  transition: width 0.1s linear;
+}
+
 .hidden {
   display: none;
 }
