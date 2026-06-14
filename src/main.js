@@ -1,5 +1,11 @@
 import "./style.css";
 import * as THREE from "three";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
 import { createGameConfig } from "./game/config";
 import { Sky } from "./game/sky";
 import { setupControls } from "./game/controls";
@@ -187,9 +193,19 @@ const chestContext = document.querySelector("#chest-context");
 const chestStorageEl = document.querySelector("#chest-storage");
 const chestInvGridEl = document.querySelector("#chest-inv-grid");
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: false }); // MSAA off — FXAA post handles AA
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, renderConfig.maxPixelRatio));
 renderer.setSize(window.innerWidth, window.innerHeight);
+// Tone mapping: ACES Filmic at exposure 1.0 gives a natural film response without
+// blowing out the bright daytime sky or crushing night/caves. OutputPass in the
+// composer chain applies this alongside the sRGB conversion.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+// Leave outputColorSpace at Three's default (SRGBColorSpace). OutputPass keys its
+// sRGB gamma-encoding transfer (SRGB_TRANSFER define) off this property, so setting
+// it to LinearSRGBColorSpace would skip the encoding and write linear light to the
+// display — causing a dark, washed-out image. Render targets stay linear via
+// ColorManagement.workingColorSpace + the composer's HalfFloat targets regardless.
 renderer.domElement.tabIndex = 1;
 renderer.domElement.setAttribute("aria-label", "ExoCraft canvas");
 app.append(renderer.domElement);
@@ -220,6 +236,46 @@ const nightHemiSkyColor = new THREE.Color(0x304464);
 
 const camera = new THREE.PerspectiveCamera(renderConfig.fov, window.innerWidth / window.innerHeight, renderConfig.near, renderConfig.far);
 camera.rotation.order = "YXZ";
+
+// ── Post-processing chain ────────────────────────────────────────────────────
+// RenderPass → UnrealBloomPass (runs at half screen res internally) → OutputPass (ACES+sRGB) → ShaderPass(FXAA)
+//
+// Order rationale:
+//   • UnrealBloomPass runs in linear HDR space (before tone mapping) so its
+//     luminance threshold correctly isolates only emissive/very-bright pixels.
+//     At threshold=0.92 only the sun disc, lava, and torch halos exceed the
+//     cutoff; lit daytime terrain (~0.3–0.6 luma) is untouched.
+//   • OutputPass converts linear HDR → ACES Filmic → sRGB in one pass.
+//   • FXAAShader runs last on the sRGB image (it needs perceptual luma).
+//     It's tuned conservatively (resolution uniform set to 1/size) so block
+//     edges smooth slightly without blurring pixel-art textures into mush.
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+
+// Bloom: UnrealBloomPass internally halves the supplied resolution, so pass the full
+// screen size here. This matches what composer.setSize feeds on resize, giving a
+// consistent half-screen bloom resolution from first load onwards.
+// threshold=0.92 means only things above ~92% of max luminance bloom.
+// strength=0.28 and radius=0.45 give a soft halo without washing out the scene.
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.28, 0.45, 0.92,
+);
+composer.addPass(bloomPass);
+
+// OutputPass: applies renderer.toneMapping (ACES Filmic) + sRGB color space conversion.
+// Must come before FXAA because FXAA expects sRGB input for correct luma detection.
+composer.addPass(new OutputPass());
+
+// FXAA: mild antialiasing on the final sRGB frame. Resolution uniforms tell the
+// shader the reciprocal pixel size so it samples neighbours correctly.
+const fxaaPass = new ShaderPass(FXAAShader);
+fxaaPass.material.uniforms["resolution"].value.set(
+  1 / (window.innerWidth * renderer.getPixelRatio()),
+  1 / (window.innerHeight * renderer.getPixelRatio()),
+);
+composer.addPass(fxaaPass);
+// ────────────────────────────────────────────────────────────────────────────
 
 const hemiLight = new THREE.HemisphereLight(
   lightingConfig.hemisphere.skyColor,
@@ -6137,7 +6193,7 @@ function updateSimulation(dtSeconds) {
 }
 
 function render() {
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 function startGame() {
@@ -6317,6 +6373,11 @@ window.addEventListener("resize", () => {
   camera.aspect = width / height;
   camera.updateProjectionMatrix();
   renderer.setSize(width, height);
+  composer.setSize(width, height); // also calls bloomPass.setSize internally
+  fxaaPass.material.uniforms["resolution"].value.set(
+    1 / (width * renderer.getPixelRatio()),
+    1 / (height * renderer.getPixelRatio()),
+  );
 });
 
 let lastFrame = Number.NaN;
