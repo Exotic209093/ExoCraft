@@ -1,13 +1,21 @@
 const DEFAULT_GAME_CONFIG = {
   world: {
     maxReach: 6,
-    height: 24,
+    // Wave 3: raised from 24 to 112 for mountains, deep caves, and future ocean/biome space.
+    // Per-chunk Uint8Array grows from 16*16*24=6 144 bytes to 16*16*112=28 672 bytes;
+    // acceptable with data eviction added this wave.
+    height: 112,
     chunk: {
       size: 16,
       activeRadius: 2,
       spawnSearchRadius: 14,
       initialCenterX: 0,
       initialCenterZ: 0,
+      // Evict voxel data for chunks this many chunk-radii beyond activeRadius.
+      // activeRadius=2, evictRadius=5 means chunks >5 chunk-lengths away drop their
+      // Uint8Array; they regenerate identically when re-entered (deterministic generation
+      // + chunkEdits re-apply on createChunk).
+      evictRadius: 5,
     },
     blockTypes: [
       { id: 1, name: "Grass", color: 0x76cc58 },
@@ -28,16 +36,26 @@ const DEFAULT_GAME_CONFIG = {
     ],
     generation: {
       seed: 1337,
-      baseHeight: 7,
-      waveXFrequency: 0.17,
-      waveXAmplitude: 1.7,
-      waveZFrequency: 0.13,
-      waveZAmplitude: 1.4,
-      waveDiagonalFrequency: 0.11,
-      waveDiagonalAmplitude: 1.2,
-      noiseAmplitude: 2.2,
-      minSurfaceY: 2,
-      topClearance: 6,
+
+      // --- Surface shape (Wave 3 FBM terrain) ---
+      // Average surface at Y≈48 (world mid). Mountains peak ~Y 70-90, valleys ~Y 28.
+      baseHeight: 48,
+      // FBM rolling-hills layer: 4 octaves, base frequency ~0.008 (large features)
+      fbmOctaves: 4,
+      fbmBaseFrequency: 0.008,
+      fbmAmplitude: 18,        // half-range of rolling terrain variation
+      // Ridged-noise mountain layer: modulated by a low-freq mountainousness mask
+      ridgeFrequency: 0.006,
+      ridgeAmplitude: 28,      // max additional height for mountain peaks
+      mountainMaskFrequency: 0.003,
+      mountainMaskThreshold: 0.45, // mask value below which mountains are suppressed
+      // Hard clamps for the final surface Y
+      minSurfaceY: 4,
+      topClearance: 8,         // keep at least 8 blocks of sky above tallest surface
+
+      // Legacy sine-wave params removed — replaced by FBM above.
+
+      // --- Trees ---
       treeThreshold: 0.985,
       treeTopClearance: 4,
       trunkMinHeight: 3,
@@ -45,15 +63,25 @@ const DEFAULT_GAME_CONFIG = {
       leafRadius: 1,
       leafVerticalRadius: 1,
       leafDistanceLimit: 2,
-      caveCeilingY: 13,
-      caveFrequency: 0.11,
-      caveThreshold: 0.78,
-      caveDetailFrequency: 0.24,
-      caveDetailStrength: 0.22,
-      caveMinRoofDepth: 3,
+
+      // --- Caves (Wave 3: deeper, more connected tunnels) ---
+      // caveCeilingY raised from 13→50: caves now thread through the bulk of the
+      // underground. caveMinRoofDepth ensures caves don't breach the surface.
+      caveCeilingY: 50,
+      caveFrequency: 0.07,     // lower freq = larger, more connected cave systems
+      caveThreshold: 0.74,     // lower threshold = more cave volume
+      caveDetailFrequency: 0.18,
+      caveDetailStrength: 0.20,
+      caveMinRoofDepth: 5,
+
+      // --- Copper ore (objective system must stay reachable) ---
+      // Surface nodes: just below the surface, same relative depth as before
       surfaceOreDepth: 3,
-      surfaceOreThreshold: 0.968,
-      caveOreCeilingY: 11,
+      surfaceOreThreshold: 0.90,
+      // Cave-embedded copper: ceiling raised to 70 so cave ore lands inside the
+      // surface-relative scan band (topY-14 → topY-1) for the taller Wave-3 terrain
+      // (surface Y ~40-80). wave-8 ore ladder will fill Y<20 with deeper ores later.
+      caveOreCeilingY: 70,
       caveOreThreshold: 0.942,
       caveOreFrequency: 0.19,
     },

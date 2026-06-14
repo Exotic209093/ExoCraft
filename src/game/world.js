@@ -117,6 +117,10 @@ export class VoxelWorld {
     this.height = height;
     this.chunkSize = chunk.size;
     this.activeRadius = chunk.activeRadius;
+    // evictRadius: chunks whose Chebyshev distance from the player's chunk exceeds
+    // this value have their voxel data (Uint8Array) freed. They regenerate identically
+    // on re-entry because generation is deterministic and chunkEdits survive.
+    this.evictRadius = Number.isFinite(chunk.evictRadius) ? chunk.evictRadius : this.activeRadius + 3;
     this.spawnSearchRadius = chunk.spawnSearchRadius;
     this.initialCenterX = chunk.initialCenterX;
     this.initialCenterZ = chunk.initialCenterZ;
@@ -207,21 +211,103 @@ export class VoxelWorld {
     return { x, z, cx, cz, localX, localZ, key: toChunkKey(cx, cz) };
   }
 
-  noise2(x, z) {
-    const seed = this.generation.seed || 0;
-    const nx = x + seed * 0.00137;
-    const nz = z - seed * 0.00191;
-    const raw = Math.sin(nx * 127.1 + nz * 311.7 + seed * 0.013) * 43758.5453123;
-    return raw - Math.floor(raw);
+  // ---------------------------------------------------------------------------
+  // Noise primitives (Wave 3)
+  // ---------------------------------------------------------------------------
+  // Pure seeded hash for a 2-D lattice point. Returns [0,1).
+  // Uses two orthogonal sin-hash passes to break up the strong grid artefacts
+  // that a single-sin hash produces at low frequencies.
+  hashLattice2(ix, iz) {
+    const s = this.generation.seed | 0;
+    // First pass: fold ix, iz and seed into a scalar
+    const p = Math.sin(ix * 127.1 + iz * 311.7 + s * 5.731) * 43758.5453123;
+    const q = Math.sin(ix * 269.5 + iz * 183.3 + s * 3.197 + p) * 43758.5453123;
+    return q - Math.floor(q);
   }
 
+  // Pure seeded hash for a 3-D lattice point. Returns [0,1).
+  hashLattice3(ix, iy, iz) {
+    const s = this.generation.seed | 0;
+    const p = Math.sin(ix * 127.1 + iy * 311.7 + iz * 74.7 + s * 5.731) * 43758.5453123;
+    const q = Math.sin(ix * 269.5 + iy * 183.3 + iz * 417.1 + s * 3.197 + p) * 43758.5453123;
+    return q - Math.floor(q);
+  }
+
+  // Smoothstep (Ken Perlin's fade): 6t^5 - 15t^4 + 10t^3
+  static _fade(t) {
+    return t * t * t * (t * (t * 6 - 15) + 10);
+  }
+
+  // Bilinear interpolated value noise, returns [0,1).
+  noise2(x, z) {
+    const ix = Math.floor(x);
+    const iz = Math.floor(z);
+    const fx = x - ix;
+    const fz = z - iz;
+    const ux = VoxelWorld._fade(fx);
+    const uz = VoxelWorld._fade(fz);
+
+    const v00 = this.hashLattice2(ix,     iz);
+    const v10 = this.hashLattice2(ix + 1, iz);
+    const v01 = this.hashLattice2(ix,     iz + 1);
+    const v11 = this.hashLattice2(ix + 1, iz + 1);
+
+    return v00 + ux * (v10 - v00) + uz * (v01 - v00) + ux * uz * (v11 - v01 - v10 + v00);
+  }
+
+  // Trilinear interpolated value noise, returns [0,1).
   noise3(x, y, z) {
-    const seed = this.generation.seed || 0;
-    const nx = x + seed * 0.00111;
-    const ny = y - seed * 0.00079;
-    const nz = z + seed * 0.00157;
-    const raw = Math.sin(nx * 127.1 + ny * 311.7 + nz * 74.7 + seed * 0.017) * 43758.5453123;
-    return raw - Math.floor(raw);
+    const ix = Math.floor(x);
+    const iy = Math.floor(y);
+    const iz = Math.floor(z);
+    const fx = x - ix;
+    const fy = y - iy;
+    const fz = z - iz;
+    const ux = VoxelWorld._fade(fx);
+    const uy = VoxelWorld._fade(fy);
+    const uz = VoxelWorld._fade(fz);
+
+    const v000 = this.hashLattice3(ix,     iy,     iz);
+    const v100 = this.hashLattice3(ix + 1, iy,     iz);
+    const v010 = this.hashLattice3(ix,     iy + 1, iz);
+    const v110 = this.hashLattice3(ix + 1, iy + 1, iz);
+    const v001 = this.hashLattice3(ix,     iy,     iz + 1);
+    const v101 = this.hashLattice3(ix + 1, iy,     iz + 1);
+    const v011 = this.hashLattice3(ix,     iy + 1, iz + 1);
+    const v111 = this.hashLattice3(ix + 1, iy + 1, iz + 1);
+
+    // Trilinear interpolation
+    const x00 = v000 + ux * (v100 - v000);
+    const x10 = v010 + ux * (v110 - v010);
+    const x01 = v001 + ux * (v101 - v001);
+    const x11 = v011 + ux * (v111 - v011);
+    const y0  = x00  + uy * (x10  - x00);
+    const y1  = x01  + uy * (x11  - x01);
+    return y0 + uz * (y1 - y0);
+  }
+
+  // Fractal Brownian Motion (2D): sum of octaves with halving amplitude / doubling freq.
+  // Returns roughly [-amplitude, +amplitude] centred on 0.
+  fbm2(x, z, octaves, baseFreq, amplitude) {
+    let value = 0;
+    let freq = baseFreq;
+    let amp = amplitude;
+    let maxAmp = 0;
+    for (let i = 0; i < octaves; i += 1) {
+      value  += (this.noise2(x * freq, z * freq) - 0.5) * 2 * amp;
+      maxAmp += amp;
+      freq   *= 2;
+      amp    *= 0.5;
+    }
+    // Normalise so the return range stays proportional to amplitude regardless of octaves
+    return value;
+  }
+
+  // Ridged noise (2D): 1 - |2*noise - 1|, gives sharp ridge lines.
+  // Returns [0,1] where 1 is the ridge peak.
+  ridgedNoise2(x, z, freq) {
+    const n = this.noise2(x * freq, z * freq);
+    return 1 - Math.abs(2 * n - 1);
   }
 
   getSeed() {
@@ -242,11 +328,32 @@ export class VoxelWorld {
       return this.surfaceHeightCache.get(cacheKey);
     }
     const g = this.generation;
-    const h1 = Math.sin(worldX * g.waveXFrequency) * g.waveXAmplitude;
-    const h2 = Math.cos(worldZ * g.waveZFrequency) * g.waveZAmplitude;
-    const h3 = Math.sin((worldX + worldZ) * g.waveDiagonalFrequency) * g.waveDiagonalAmplitude;
-    const h4 = (this.noise2(worldX, worldZ) - 0.5) * g.noiseAmplitude;
-    const value = Math.floor(g.baseHeight + h1 + h2 + h3 + h4);
+
+    // Layer 1: rolling hills via FBM (returns roughly ±fbmAmplitude)
+    const hills = this.fbm2(
+      worldX, worldZ,
+      g.fbmOctaves,
+      g.fbmBaseFrequency,
+      g.fbmAmplitude,
+    );
+
+    // Layer 2: mountain ridges, activated only where a low-frequency mask is high.
+    // The mask itself is a smooth noise sample — patches of land become mountainous,
+    // while surrounding areas stay as rolling hills.
+    const mountainMask = this.noise2(
+      worldX * g.mountainMaskFrequency,
+      worldZ * g.mountainMaskFrequency,
+    );
+    const ridgeRaw = this.ridgedNoise2(worldX, worldZ, g.ridgeFrequency);
+    // Smoothly blend the ridged term in above the mask threshold so there's no
+    // hard seam at the mountain border.
+    const maskBlend = THREE.MathUtils.clamp(
+      (mountainMask - g.mountainMaskThreshold) / (1 - g.mountainMaskThreshold),
+      0, 1,
+    );
+    const mountains = ridgeRaw * maskBlend * g.ridgeAmplitude;
+
+    const value = Math.floor(g.baseHeight + hills + mountains);
     const clamped = THREE.MathUtils.clamp(value, g.minSurfaceY, this.height - g.topClearance);
     setBoundedCache(this.surfaceHeightCache, cacheKey, clamped);
     return clamped;
@@ -443,6 +550,13 @@ export class VoxelWorld {
     if (!chunk) {
       chunk = this.createChunk(cx, cz);
       this.chunks.set(key, chunk);
+    } else if (!chunk.blocks) {
+      // Voxel data was evicted — regenerate it in-place. Meshes were already
+      // disposed when the chunk left the active set; chunkEdits are intact.
+      const regenerated = this.createChunk(cx, cz);
+      chunk.blocks = regenerated.blocks;
+      chunk.solidCount = regenerated.solidCount;
+      chunk.dirtyMesh = true;
     }
     return chunk;
   }
@@ -704,6 +818,24 @@ export class VoxelWorld {
         }
         this.activeChunkKeys.delete(key);
         this.dirtyActiveChunkKeys.delete(key);
+      }
+
+      // Voxel-data eviction: free Uint8Array for chunks beyond evictRadius.
+      // The chunk entry itself stays in this.chunks (no blocks, no mesh) so
+      // ensureChunk knows to regenerate it; chunkEdits survive untouched.
+      // Chebyshev distance (max of |dx|, |dz|) mirrors the square active window.
+      for (const [key, chunk] of this.chunks.entries()) {
+        if (!chunk.blocks) {
+          // Already evicted — skip.
+          continue;
+        }
+        const { cx, cz } = fromChunkKey(key);
+        const dist = Math.max(Math.abs(cx - pos.cx), Math.abs(cz - pos.cz));
+        if (dist > this.evictRadius) {
+          chunk.blocks = null;
+          chunk.solidCount = 0;
+          chunk.dirtyMesh = true;
+        }
       }
 
       this.lastCenterChunk = centerKey;
