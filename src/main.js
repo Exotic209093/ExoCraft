@@ -52,7 +52,7 @@ import {
   ARMOR_DEFENSE,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
-import { createBlockMaterials, VoxelWorld, dayFactorUniform, worldTimeUniform } from "./game/world";
+import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
 import { WeatherSystem } from "./game/weather";
 import {
   MOB_TYPES,
@@ -85,6 +85,7 @@ import {
   CRACK_STAGE_COUNT,
   createSunTexture,
   createMoonTexture,
+  updateMoonTexture,
   FLORA_BLOCK_IDS,
   SLAB_BLOCK_IDS,
   STAIR_BLOCK_IDS,
@@ -255,6 +256,15 @@ const daySunColor = new THREE.Color(lightingConfig.sun.color);
 const nightSunColor = new THREE.Color(0x516a91);
 const dayHemiSkyColor = new THREE.Color(lightingConfig.hemisphere.skyColor);
 const nightHemiSkyColor = new THREE.Color(0x304464);
+
+// ---------------------------------------------------------------------------
+// F8: Moon phase brightness table (8 Minecraft phases, 0=full → 4=new → 7=waxing gibbous)
+// Full moon: max ~0.26 surface brightness at night; new moon: near-zero.
+// ---------------------------------------------------------------------------
+const MOON_PHASE_BRIGHTNESS = [1.0, 0.75, 0.50, 0.25, 0.08, 0.25, 0.50, 0.75];
+const MOON_FULL_FACTOR = 0.26; // max moonFactor at full moon (scales MOON_PHASE_BRIGHTNESS)
+// Track the last rendered moon phase so we only repaint the sprite texture on change.
+let _lastMoonPhase = -1;
 
 const camera = new THREE.PerspectiveCamera(renderConfig.fov, window.innerWidth / window.innerHeight, renderConfig.near, renderConfig.far);
 camera.rotation.order = "YXZ";
@@ -626,6 +636,9 @@ const state = {
   maxHealth: playerConfig.maxHealth,
   health: playerConfig.maxHealth,
   timeOfDayMs: Number.isFinite(simConfig.initialTimeOfDayMs) ? simConfig.initialTimeOfDayMs : 0,
+  // F8: total accumulated world time for deterministic moon phase (dayCounter = floor(this / cycleMs)).
+  // Initialised to 0; grows with each tick. Not persisted — resets on load (phase 0 = full moon).
+  _totalWorldTimeMs: 0,
   dayFactor: 1,
   hostileMobCount: 0,
   objectiveIndex: 0,
@@ -868,10 +881,30 @@ function getDayFactorFromTime(timeOfDayMs) {
   return (Math.sin(phase - Math.PI / 2) + 1) / 2;
 }
 
+// F8: Derive moon phase deterministically from total elapsed day count.
+// dayCounter = floor(totalTimeMs / cycleMs). moonPhase = dayCounter % 8.
+// No save persistence needed — recomputed each tick from worldTimeMs.
+function getMoonPhase() {
+  const cycleMs = simConfig.dayNightCycleMs;
+  if (!Number.isFinite(cycleMs) || cycleMs <= 0) return 0;
+  // Use the total accumulated worldTimeMs (not the normalized per-cycle value).
+  // state._totalWorldTimeMs tracks this; fall back to timeOfDayMs if not set.
+  const totalMs = Number.isFinite(state._totalWorldTimeMs) ? state._totalWorldTimeMs : state.timeOfDayMs;
+  const dayCounter = Math.floor(totalMs / cycleMs);
+  return ((dayCounter % 8) + 8) % 8;
+}
+
+function getMoonBrightness(moonPhase) {
+  return MOON_PHASE_BRIGHTNESS[moonPhase] ?? 1.0;
+}
+
 function updateDayNight(deltaMs) {
   const cycleMs = simConfig.dayNightCycleMs;
   if (Number.isFinite(cycleMs) && cycleMs > 0 && Number.isFinite(deltaMs) && deltaMs > 0) {
     state.timeOfDayMs = normalizeTimeOfDayMs(state.timeOfDayMs + deltaMs);
+    // Accumulate total world time for deterministic day counter / moon phase.
+    if (!Number.isFinite(state._totalWorldTimeMs)) state._totalWorldTimeMs = 0;
+    state._totalWorldTimeMs += deltaMs;
   } else {
     state.timeOfDayMs = normalizeTimeOfDayMs(state.timeOfDayMs);
   }
@@ -880,6 +913,19 @@ function updateDayNight(deltaMs) {
   state.dayFactor = dayFactor;
   // Drive the baked-lighting shader uniform — no remesh, just one float update per tick.
   dayFactorUniform.value = dayFactor;
+
+  // F8: moonFactor — active only during night (dayFactor=0 → moonFactor peaks, dayFactor=1 → 0).
+  // Keyed off skylight in the shader so caves always remain dark.
+  const moonPhase = getMoonPhase();
+  const moonBrightness = getMoonBrightness(moonPhase);
+  const moonFactor = (1 - dayFactor) * moonBrightness * MOON_FULL_FACTOR;
+  moonFactorUniform.value = moonFactor;
+
+  // Repaint moon sprite texture only when phase changes (canvas op, not cheap).
+  if (moonPhase !== _lastMoonPhase) {
+    updateMoonTexture(moonSprite.material.map, moonPhase);
+    _lastMoonPhase = moonPhase;
+  }
 
   scene.background.copy(nightSkyColor).lerp(daySkyColor, dayFactor);
   scene.fog.color.copy(scene.background);
@@ -5449,10 +5495,11 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 7, // Wave F2: XP system
+    version: 8, // Wave F8: persist dayCount for deterministic moon phase
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
+    dayCount: Math.floor(state._totalWorldTimeMs / (simConfig.dayNightCycleMs || 1200000)),
     player: {
       x: state.playerPos.x,
       y: state.playerPos.y,
@@ -5579,6 +5626,13 @@ async function loadGame() {
     state.activeFurnaceKey = null;
     if (Number.isFinite(snapshot.worldTimeMs)) {
       state.timeOfDayMs = normalizeTimeOfDayMs(snapshot.worldTimeMs);
+    }
+    // Restore total world time so moon phase is deterministic on reload.
+    // v8+ saves carry dayCount; v7 and older default to 0 (full moon).
+    {
+      const cycleMs = simConfig.dayNightCycleMs || 1200000;
+      const savedDayCount = Number.isFinite(snapshot.dayCount) ? Math.max(0, Math.floor(snapshot.dayCount)) : 0;
+      state._totalWorldTimeMs = savedDayCount * cycleMs + state.timeOfDayMs;
     }
     markCraftPanelDirty();
     markInventoryPanelDirty();
@@ -6194,6 +6248,7 @@ function regenerateWorld() {
   state.wornArmor = { head: null, chest: null, legs: null, feet: null };
   if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
+  state._totalWorldTimeMs = 0;
   respawnPlayer({ healToMax: true });
   state.recentAction = "Regenerated terrain";
   markCraftPanelDirty();
@@ -6226,6 +6281,7 @@ async function createNewWorld() {
   state.craftingGrid = new Array(9).fill(null);
   if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
+  state._totalWorldTimeMs = 0;
   state.inventory = createStartingInventory();
   state.selectedSlot = 0;
   respawnPlayer({ healToMax: true });
@@ -7016,6 +7072,11 @@ window.render_game_to_text = () => {
       timeOfDayMs: Math.floor(state.timeOfDayMs),
       dayFactor: Number(state.dayFactor.toFixed(3)),
     },
+    sky: {
+      moonPhase: getMoonPhase(),
+      moonFactor: Number(moonFactorUniform.value.toFixed(4)),
+      moonBrightness: Number(getMoonBrightness(getMoonPhase()).toFixed(3)),
+    },
     selectedBlock: getSelectedItemName(),
     selectedSlot: state.selectedSlot,
     hotbar: state.inventory.slice(0, HOTBAR_SIZE).map((slot) => {
@@ -7265,6 +7326,20 @@ window.__exoCraftDebug = {
     updateDayNight(0);
     updateObjectives(0, true);
     return state.timeOfDayMs;
+  },
+  // F8: Force a specific moon phase (0=full, 4=new, 0-7) for deterministic verification.
+  // Adjusts _totalWorldTimeMs so getMoonPhase() returns the requested value, then redraws.
+  setMoonPhase: (phase) => {
+    const p = ((Math.floor(Number(phase)) % 8) + 8) % 8;
+    const cycleMs = simConfig.dayNightCycleMs;
+    if (Number.isFinite(cycleMs) && cycleMs > 0) {
+      // Set _totalWorldTimeMs to a value that maps to this phase.
+      state._totalWorldTimeMs = p * cycleMs;
+    }
+    // Force repaint immediately (bypass _lastMoonPhase cache).
+    _lastMoonPhase = -1;
+    updateDayNight(0);
+    return { moonPhase: getMoonPhase(), moonBrightness: getMoonBrightness(p), moonFactor: Number(moonFactorUniform.value.toFixed(4)) };
   },
   // Wave F3 — mob animation debug snapshot (scalar-only, safe to log)
   getMobDebug: () => getMobDebugSnapshot(hostileMobs, passiveMobs),

@@ -180,6 +180,13 @@ function setBoundedCache(cache, key, value) {
 export const dayFactorUniform = { value: 1.0 };
 
 // ---------------------------------------------------------------------------
+// Shared moonFactor uniform — updated each tick from main.js.
+// Value = (1 - dayFactor) * moonBrightness; 0 during full day.
+// Keyed off skylight in the shader so caves (skylight==0) stay dark.
+// ---------------------------------------------------------------------------
+export const moonFactorUniform = { value: 0.0 };
+
+// ---------------------------------------------------------------------------
 // Shared worldTime uniform — accumulated seconds from deterministic tick deltas.
 // Updated once per tick in main.js. Used by water/wind/weather shaders.
 // ---------------------------------------------------------------------------
@@ -195,7 +202,8 @@ export const worldTimeUniform = { value: 0.0 };
 // The Lambert diffuse color from the texture is multiplied by this factor.
 function applyLightingShaderPatch(material) {
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uDayFactor = dayFactorUniform;
+    shader.uniforms.uDayFactor  = dayFactorUniform;
+    shader.uniforms.uMoonFactor = moonFactorUniform;
 
     // Inject uniform declaration before main
     shader.vertexShader = shader.vertexShader.replace(
@@ -219,6 +227,7 @@ vTint = tint;`,
       "#include <common>",
       `#include <common>
 uniform float uDayFactor;
+uniform float uMoonFactor;
 varying vec3 vLightColor;
 varying vec3 vTint;`,
     );
@@ -227,16 +236,18 @@ varying vec3 vTint;`,
     // Without this replacement, Three's built-in does: diffuseColor *= vColor (wrong hue cast),
     // and then the block below multiplies again — double-application produces magenta/green tints.
     // Wave 12: also multiply by vTint (biome grass tint; [1,1,1] for non-tinted faces).
+    // F8: moonLight keyed off skylight so caves (vLightColor.r==0) stay dark automatically.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <color_fragment>",
       `{
   // vLightColor.r = skylight (0-1), .g = blocklight (0-1), .b = AO factor
   float skyLight = vLightColor.r * uDayFactor;
+  float moonLight = vLightColor.r * uMoonFactor;
   float blockLight = vLightColor.g;
   float ao = vLightColor.b;
   // Ambient floor: ensures surface is never pitch black at night.
   float ambientFloor = 0.08;
-  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  float lightFactor = max(max(max(skyLight, moonLight), blockLight), ambientFloor) * ao;
   diffuseColor.rgb *= lightFactor * vTint;
 }`,
     );
@@ -257,6 +268,7 @@ varying vec3 vTint;`,
 function applyWaterShaderPatch(material) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDayFactor  = dayFactorUniform;
+    shader.uniforms.uMoonFactor = moonFactorUniform;
     shader.uniforms.uWorldTime  = worldTimeUniform;
 
     // ---- Vertex shader additions ----
@@ -300,19 +312,22 @@ vFresnel = 1.0 - clamp(dot(toEye, normal), 0.0, 1.0);`,
       "#include <common>",
       `#include <common>
 uniform float uDayFactor;
+uniform float uMoonFactor;
 varying vec3 vLightColor;
 varying vec3 vTint;
 varying float vFresnel;`,
     );
     // Replace color_fragment: apply lighting (same as base patch) plus fresnel brightening.
+    // F8: moonLight keyed off skylight so underwater/cave water stays dark.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <color_fragment>",
       `{
   float skyLight = vLightColor.r * uDayFactor;
+  float moonLight = vLightColor.r * uMoonFactor;
   float blockLight = vLightColor.g;
   float ao = vLightColor.b;
   float ambientFloor = 0.08;
-  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  float lightFactor = max(max(max(skyLight, moonLight), blockLight), ambientFloor) * ao;
   // Fresnel: slightly brighten at grazing angles to mimic water gloss.
   float fresnelBoost = vFresnel * vFresnel * 0.28;
   diffuseColor.rgb *= lightFactor * vTint;
@@ -333,8 +348,9 @@ varying float vFresnel;`,
 // ---------------------------------------------------------------------------
 function applyLeafWindShaderPatch(material) {
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uDayFactor = dayFactorUniform;
-    shader.uniforms.uWorldTime = worldTimeUniform;
+    shader.uniforms.uDayFactor  = dayFactorUniform;
+    shader.uniforms.uMoonFactor = moonFactorUniform;
+    shader.uniforms.uWorldTime  = worldTimeUniform;
 
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
@@ -370,17 +386,20 @@ transformed.z += windZ * swayWeight;`,
       "#include <common>",
       `#include <common>
 uniform float uDayFactor;
+uniform float uMoonFactor;
 varying vec3 vLightColor;
 varying vec3 vTint;`,
     );
+    // F8: moonLight keyed off skylight so cave leaves stay dark.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <color_fragment>",
       `{
   float skyLight = vLightColor.r * uDayFactor;
+  float moonLight = vLightColor.r * uMoonFactor;
   float blockLight = vLightColor.g;
   float ao = vLightColor.b;
   float ambientFloor = 0.08;
-  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  float lightFactor = max(max(max(skyLight, moonLight), blockLight), ambientFloor) * ao;
   diffuseColor.rgb *= lightFactor * vTint;
 }`,
     );
@@ -396,8 +415,9 @@ varying vec3 vTint;`,
 // ---------------------------------------------------------------------------
 function applyFloraWindShaderPatch(material) {
   material.onBeforeCompile = (shader) => {
-    shader.uniforms.uDayFactor = dayFactorUniform;
-    shader.uniforms.uWorldTime = worldTimeUniform;
+    shader.uniforms.uDayFactor  = dayFactorUniform;
+    shader.uniforms.uMoonFactor = moonFactorUniform;
+    shader.uniforms.uWorldTime  = worldTimeUniform;
 
     shader.vertexShader = shader.vertexShader.replace(
       "#include <common>",
@@ -430,17 +450,20 @@ transformed.z += windZ * swayWeight;`,
       "#include <common>",
       `#include <common>
 uniform float uDayFactor;
+uniform float uMoonFactor;
 varying vec3 vLightColor;
 varying vec3 vTint;`,
     );
+    // F8: moonLight keyed off skylight so cave flora stays dark.
     shader.fragmentShader = shader.fragmentShader.replace(
       "#include <color_fragment>",
       `{
   float skyLight = vLightColor.r * uDayFactor;
+  float moonLight = vLightColor.r * uMoonFactor;
   float blockLight = vLightColor.g;
   float ao = vLightColor.b;
   float ambientFloor = 0.08;
-  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  float lightFactor = max(max(max(skyLight, moonLight), blockLight), ambientFloor) * ao;
   diffuseColor.rgb *= lightFactor * vTint;
 }`,
     );

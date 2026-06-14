@@ -20,9 +20,12 @@ const DAY_HORIZON  = new THREE.Color(0xb6d8ff);
 // Night: deep-navy zenith, slightly lighter horizon
 const NIGHT_ZENITH  = new THREE.Color(0x060d1a);
 const NIGHT_HORIZON = new THREE.Color(0x10182a);
-// Dusk / dawn tint blended in as dayFactor passes through 0.25–0.45 and 0.55–0.75
-const DUSK_ZENITH  = new THREE.Color(0x0d1a40);
-const DUSK_HORIZON = new THREE.Color(0xe0773a);
+// F8: Golden hour (sunrise/sunset) — richer than the old dusk tint.
+// Zenith goes deep violet-indigo; horizon blazes with orange-pink.
+const GOLDEN_ZENITH  = new THREE.Color(0x1a1040); // deep violet
+const GOLDEN_HORIZON = new THREE.Color(0xff6a1a); // saturated orange
+// Secondary horizon band: rose-pink blended above the orange line.
+const GOLDEN_MID     = new THREE.Color(0xd43e6a); // warm rose
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const DOME_RADIUS      = 240;   // large enough to cover far=300 frustum
@@ -106,22 +109,27 @@ export class Sky {
   }
 
   _updateDomeColors(dayFactor) {
-    // Dusk factor: peaks at midpoint between night (0) and day (1), i.e. near 0.35 / 0.65
-    const dusk = Math.max(
-      _duskBell(dayFactor, 0.35), // dusk
-      _duskBell(dayFactor, 0.65), // dawn
+    // F8: Golden-hour bell — narrow peak at the day/night transitions.
+    // Centers at ~0.32 (sunset) and ~0.68 (sunrise), width ~0.09 so the warm
+    // color flares briefly rather than lingering across half the cycle.
+    const golden = Math.max(
+      _goldenBell(dayFactor, 0.32), // sunset
+      _goldenBell(dayFactor, 0.68), // sunrise
     );
 
     const u = this._dome.material.uniforms;
 
-    // Day/night base lerp, then overlay dusk tint
+    // Zenith: night→day base, with violet-indigo overlay during golden hour.
     u.uZenith.value
       .copy(NIGHT_ZENITH).lerp(DAY_ZENITH, dayFactor)
-      .lerp(DUSK_ZENITH,  dusk * 0.55);
+      .lerp(GOLDEN_ZENITH, golden * 0.60);
 
+    // Horizon: night→day base, then blazing orange-to-rose blend during golden hour.
+    // We first lerp to orange, then nudge toward rose to add a two-tone warmth.
     u.uHorizon.value
       .copy(NIGHT_HORIZON).lerp(DAY_HORIZON, dayFactor)
-      .lerp(DUSK_HORIZON, dusk * 0.80);
+      .lerp(GOLDEN_HORIZON, golden * 0.92)
+      .lerp(GOLDEN_MID,     golden * 0.28);
   }
 
   // ── Stars ─────────────────────────────────────────────────────────────────
@@ -164,9 +172,10 @@ export class Sky {
 
   _updateStarOpacity(dayFactor) {
     // Stars fully visible at night (dayFactor=0), invisible by day (dayFactor=1).
-    // Fade window: 0→0.3 appear, 0.7→1 disappear.
+    // F8: Tighten fade window to match golden-hour transition.
+    // Stars appear as dayFactor drops below ~0.55 and vanish as it rises above ~0.45.
     const nightness = 1 - dayFactor;
-    const t = _smoothstep(0.2, 0.5, nightness);
+    const t = _smoothstep(0.35, 0.55, nightness);
     this._stars.material.opacity = t;
   }
 
@@ -218,6 +227,13 @@ function _smoothstep(edge0, edge1, x) {
 /** Bell curve peaking at `center`, width ~0.15 either side. */
 function _duskBell(x, center) {
   const d = (x - center) / 0.12;
+  return Math.exp(-d * d * 0.5);
+}
+
+/** Narrower bell for golden-hour glow — peaks sharply at the horizon crossing.
+ *  Width ~0.09 either side so the warm color flares briefly, not lazily. */
+function _goldenBell(x, center) {
+  const d = (x - center) / 0.08;
   return Math.exp(-d * d * 0.5);
 }
 

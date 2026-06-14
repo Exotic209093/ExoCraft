@@ -1280,11 +1280,33 @@ function paintSunCanvas(ctx, size) {
   ctx.putImageData(data, 0, 0);
 }
 
-function paintMoonCanvas(ctx, size) {
+// Paint a moon disc for the given phase (0–7, Minecraft convention):
+//   0 = full moon, 1 = waning gibbous, 2 = last quarter, 3 = waning crescent,
+//   4 = new moon,  5 = waxing crescent, 6 = first quarter, 7 = waxing gibbous
+// The lit fraction of the disc is determined by phase; the shadow is painted
+// as a soft dark overlay on the right or left half, matching Minecraft's behavior
+// where phase 0 is full and phase 4 is new (disc barely visible).
+function paintMoonCanvas(ctx, size, phase = 0) {
   const data = ctx.createImageData(size, size);
   const cx = size / 2;
   const cy = size / 2;
   const radius = size * 0.4;
+
+  // litFraction: 1 = full, 0 = new.  Follows a cosine across 8 phases.
+  // phase 0 = full (1.0), phase 4 = new (0.0), phase 2/6 = half (0.5).
+  const litFraction = (1 + Math.cos((phase / 8) * Math.PI * 2)) / 2;
+  // shadowEdge: x offset (in disc radii) of the terminator boundary.
+  // +1 = shadow completely to the right of the disc (full moon lit),
+  // -1 = shadow covers whole disc (new moon).
+  // Waning (phases 1-4): shadow comes from the right.
+  // Waxing (phases 5-7): shadow comes from the left.
+  const waning = phase <= 4;
+  // Map litFraction to the x-center of the shadow ellipse.
+  // shadowX: 0 = center (half lit), -radius = all shadow right side, +radius = all lit.
+  const shadowCenterX = waning
+    ? cx + radius * (2 * litFraction - 1)
+    : cx - radius * (2 * litFraction - 1);
+
   for (let y = 0; y < size; y += 1) {
     for (let x = 0; x < size; x += 1) {
       const dx = x - cx;
@@ -1293,22 +1315,59 @@ function paintMoonCanvas(ctx, size) {
       const i = (y * size + x) * 4;
       if (dist <= radius) {
         const t = dist / radius;
-        // Pale cool white with crater-like noise variation.
+        // Pale cool white disc with subtle crater noise.
         const seed = Math.sin(x * 13.1 + y * 7.7) * 0.5 + 0.5;
         const crater = seed < 0.18 ? -22 : seed > 0.85 ? 8 : 0;
-        data.data[i] = Math.floor(232 - t * 30 + crater);
-        data.data[i + 1] = Math.floor(238 - t * 22 + crater);
-        data.data[i + 2] = Math.floor(244 - t * 12 + crater);
-        data.data[i + 3] = 255;
+        let r = Math.floor(232 - t * 30 + crater);
+        let g = Math.floor(238 - t * 22 + crater);
+        let b = Math.floor(244 - t * 12 + crater);
+        let a = 255;
+
+        // Shadow: elliptical mask — points within the shadow ellipse are darkened.
+        // The shadow ellipse has x-radius = radius*litFraction (scaled by lit fraction),
+        // y-radius = radius (full height). Its center drifts based on phase.
+        const sdx = x - shadowCenterX;
+        const sdy = y - cy;
+        // Terminator blend: soft edge over ~8px so the shadow isn't a hard line.
+        // We compute how deep into shadow the pixel is by projecting onto the ellipse normal.
+        const shadowR = Math.max(0.01, radius * Math.abs(2 * litFraction - 1));
+        const shadowDist = Math.sqrt((sdx / shadowR) ** 2 + (sdy / radius) ** 2);
+        const shadowAlpha = waning
+          ? Math.max(0, Math.min(1, (1 - (x - shadowCenterX) / radius) * 4))
+          : Math.max(0, Math.min(1, (1 + (x - shadowCenterX) / radius) * 4));
+        // Simple: darken pixels on the shadow side of the terminator.
+        // terminator is the vertical chord at shadowCenterX.
+        const onShadowSide = waning ? (x < shadowCenterX) : (x > shadowCenterX);
+        if (onShadowSide) {
+          // Soft blend near terminator: 0 at edge, full dark further in.
+          const blendDist = Math.abs(x - shadowCenterX) / (radius * 0.18 + 1);
+          const blend = Math.min(1, blendDist);
+          // New moon: nearly invisible; full shadow = very dim bluish-grey.
+          r = Math.floor(r * (1 - blend * 0.88) + 8 * blend);
+          g = Math.floor(g * (1 - blend * 0.88) + 10 * blend);
+          b = Math.floor(b * (1 - blend * 0.88) + 16 * blend);
+        }
+
+        // New moon: make entire disc very dim (nearly transparent).
+        if (phase === 4) {
+          a = 30;
+        }
+
+        data.data[i]     = Math.max(0, Math.min(255, r));
+        data.data[i + 1] = Math.max(0, Math.min(255, g));
+        data.data[i + 2] = Math.max(0, Math.min(255, b));
+        data.data[i + 3] = a;
       } else if (dist <= radius * 1.2) {
-        const t = (dist - radius) / (radius * 0.2);
-        data.data[i] = 220;
-        data.data[i + 1] = 230;
-        data.data[i + 2] = 240;
-        data.data[i + 3] = Math.floor((1 - t) * 60);
-      } else {
-        data.data[i + 3] = 0;
+        // Soft glow halo — only if not new moon.
+        if (phase !== 4) {
+          const t = (dist - radius) / (radius * 0.2);
+          data.data[i]     = 220;
+          data.data[i + 1] = 230;
+          data.data[i + 2] = 240;
+          data.data[i + 3] = Math.floor((1 - t) * 60 * litFraction);
+        }
       }
+      // else: transparent (data already zeroed by createImageData)
     }
   }
   ctx.putImageData(data, 0, 0);
@@ -1328,16 +1387,26 @@ export function createSunTexture() {
   return tex;
 }
 
-export function createMoonTexture() {
+export function createMoonTexture(phase = 0) {
   const canvas = document.createElement("canvas");
   canvas.width = 64;
   canvas.height = 64;
   const ctx = canvas.getContext("2d");
-  paintMoonCanvas(ctx, 64);
+  paintMoonCanvas(ctx, 64, phase);
   const tex = new THREE.CanvasTexture(canvas);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.minFilter = THREE.LinearFilter;
   tex.magFilter = THREE.LinearFilter;
   tex.needsUpdate = true;
   return tex;
+}
+
+// Update an existing moon CanvasTexture in-place for a new phase.
+// The texture's .image is the canvas from createMoonTexture.
+export function updateMoonTexture(tex, phase) {
+  const canvas = tex.image;
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  paintMoonCanvas(ctx, canvas.width, phase);
+  tex.needsUpdate = true;
 }
