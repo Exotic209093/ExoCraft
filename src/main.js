@@ -52,7 +52,8 @@ import {
   ARMOR_DEFENSE,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
-import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
+import { createBlockMaterials, VoxelWorld, dayFactorUniform, worldTimeUniform } from "./game/world";
+import { WeatherSystem } from "./game/weather";
 import {
   MOB_TYPES,
   pickRandomMobType,
@@ -348,6 +349,9 @@ const world = new VoxelWorld({
 });
 world.generateTerrain();
 scene.add(world.meshGroup);
+
+// Graphics-B: weather particle system — camera-following rain/snow driven by biome.
+const weatherSystem = new WeatherSystem(scene, camera, scene.fog);
 
 const hostileMobGroup = new THREE.Group();
 scene.add(hostileMobGroup);
@@ -5866,6 +5870,10 @@ function updateSimulation(dtSeconds) {
 
   updateDayNight(deltaMs);
 
+  // Graphics-B: accumulate world-time uniform from the deterministic tick delta.
+  // Never use wall-clock time here — automation sessions advance by tick, not by RAF.
+  worldTimeUniform.value += dtSeconds;
+
   if (state.mode !== "playing") {
     updateHostileMobs(deltaMs);
     updatePassiveMobs(deltaMs);
@@ -6175,6 +6183,14 @@ function updateSimulation(dtSeconds) {
   updateObjectives(deltaMs);
   updateCameraTransform();
   updateTargetBlockFromCenter();
+  // Graphics-B: weather system — biome-driven rain/snow particle system.
+  {
+    const _wxBiome = typeof world.biomeAt === "function"
+      ? world.biomeAt(Math.floor(state.playerPos.x), Math.floor(state.playerPos.z))
+      : null;
+    weatherSystem.update(dtSeconds, worldTimeUniform.value, state.playerPos, _wxBiome);
+  }
+
   // Wave 11 — audio tick (ambience, mob proximity growl, music).
   updateAudio(state, world, hostileMobs, worldConfig.generation.seaLevel || 38);
   refreshHud();
@@ -6577,12 +6593,22 @@ window.render_game_to_text = () => {
     },
     nearbyBlocks,
     recentAction: state.recentAction,
+    // Graphics-B — weather state (for automation verification)
+    weather: weatherSystem.getState(),
   };
   return JSON.stringify(payload);
 };
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Graphics-B weather debug
+  // setWeather("rain"|"snow"|"none") — override biome-driven weather
+  // setWeather(null) — return to biome-driven
+  setWeather: (type) => {
+    weatherSystem.setWeather(type === undefined ? null : type);
+    return weatherSystem.getState();
+  },
+  getWeather: () => weatherSystem.getState(),
   // Wave 7 debug hooks
   setHunger: (n) => {
     state.hunger = Math.max(0, Math.min(state.maxHunger, Number(n) || 0));

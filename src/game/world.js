@@ -180,6 +180,12 @@ function setBoundedCache(cache, key, value) {
 export const dayFactorUniform = { value: 1.0 };
 
 // ---------------------------------------------------------------------------
+// Shared worldTime uniform — accumulated seconds from deterministic tick deltas.
+// Updated once per tick in main.js. Used by water/wind/weather shaders.
+// ---------------------------------------------------------------------------
+export const worldTimeUniform = { value: 0.0 };
+
+// ---------------------------------------------------------------------------
 // Material factories
 // ---------------------------------------------------------------------------
 
@@ -238,6 +244,210 @@ varying vec3 vTint;`,
   material.needsUpdate = true;
 }
 
+// ---------------------------------------------------------------------------
+// Graphics-B: Water shader patch
+// Combines wave-4 lighting with animated vertex displacement (gentle sine wave)
+// and a subtle fresnel-ish edge brightening.
+// UV scroll is achieved by overwriting vMapUv (Three's built-in UV varying for
+// the map sampler) after the standard uv_vertex set — this lets Three's own
+// map_fragment sample the scrolled coordinate without us having to replace
+// the entire map_fragment chunk (which risks breaking sRGB decode paths).
+// Keeps wave-5 transparency, render order, and AO/sky/blocklight intact.
+// ---------------------------------------------------------------------------
+function applyWaterShaderPatch(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uDayFactor  = dayFactorUniform;
+    shader.uniforms.uWorldTime  = worldTimeUniform;
+
+    // ---- Vertex shader additions ----
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
+attribute vec3 tint;
+varying vec3 vLightColor;
+varying vec3 vTint;
+uniform float uWorldTime;
+varying float vFresnel;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <color_vertex>",
+      `#include <color_vertex>
+vLightColor = vColor.rgb;
+vTint = tint;`,
+    );
+    // Displace the water surface with a gentle sine wave.
+    // Phase is mixed from world XZ position + time so adjacent blocks are out of
+    // phase with each other (no flat-plane wave-train artifact).
+    // Amplitude: ~0.052 blocks peak — enough to shimmer without clipping the player.
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+// Water wave: small amplitude vertex Y displacement
+float wavePhase = position.x * 0.55 + position.z * 0.41 + uWorldTime * 1.3;
+float wavePhase2 = position.x * 0.29 - position.z * 0.63 + uWorldTime * 0.9;
+transformed.y += sin(wavePhase) * 0.030 + sin(wavePhase2) * 0.022;
+// Fresnel: view-angle weight for edge brightening (0 = looking straight down, 1 = grazing)
+vec3 toEye = normalize(cameraPosition - position);
+vFresnel = 1.0 - clamp(dot(toEye, normal), 0.0, 1.0);`,
+    );
+    // UV scroll removed: the atlas uses ClampToEdge wrapping and the water tile
+    // is a ~0.111-wide sub-rect.  An unbounded offset leaves the tile boundary
+    // after ~0.4 s and samples wrong texels indefinitely.  Motion already comes
+    // from vertex wave displacement + fresnel — no scroll needed.
+
+    // ---- Fragment shader additions ----
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+uniform float uDayFactor;
+varying vec3 vLightColor;
+varying vec3 vTint;
+varying float vFresnel;`,
+    );
+    // Replace color_fragment: apply lighting (same as base patch) plus fresnel brightening.
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      `{
+  float skyLight = vLightColor.r * uDayFactor;
+  float blockLight = vLightColor.g;
+  float ao = vLightColor.b;
+  float ambientFloor = 0.08;
+  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  // Fresnel: slightly brighten at grazing angles to mimic water gloss.
+  float fresnelBoost = vFresnel * vFresnel * 0.28;
+  diffuseColor.rgb *= lightFactor * vTint;
+  diffuseColor.rgb += fresnelBoost * vec3(0.55, 0.72, 0.88);
+  // Subtle alpha reduction at near-normal view (more transparent straight down).
+  diffuseColor.a *= max(0.55, 1.0 - vFresnel * 0.35);
+}`,
+    );
+  };
+  material.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
+// Graphics-B: Leaf wind-sway shader patch
+// Combines wave-4 lighting with a per-vertex wind offset anchored at the base
+// of each block. Top vertices (local y = 1.0) sway; bottom vertices are fixed.
+// Amplitude is small so leaves ripple, not earthquake.
+// ---------------------------------------------------------------------------
+function applyLeafWindShaderPatch(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uDayFactor = dayFactorUniform;
+    shader.uniforms.uWorldTime = worldTimeUniform;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
+attribute vec3 tint;
+attribute float swayWeight;
+varying vec3 vLightColor;
+varying vec3 vTint;
+uniform float uWorldTime;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <color_vertex>",
+      `#include <color_vertex>
+vLightColor = vColor.rgb;
+vTint = tint;`,
+    );
+    // Wind sway: top vertices (swayWeight=1) move; bottom vertices (swayWeight=0) stay fixed.
+    // swayWeight is a per-vertex attribute emitted by the mesher (by value 0 or 1) so that
+    // the anchor behaviour is correct regardless of world-space Y being an integer.
+    // Hash of world-integer position gives per-block phase offset so clusters look organic.
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+float phaseX = floor(position.x) * 1.371 + floor(position.z) * 2.179;
+float phaseZ = floor(position.x) * 2.713 + floor(position.z) * 1.543;
+float windX = sin(uWorldTime * 1.1 + phaseX) * 0.025 + sin(uWorldTime * 1.7 + phaseX * 1.3) * 0.012;
+float windZ = sin(uWorldTime * 0.9 + phaseZ) * 0.020 + sin(uWorldTime * 1.5 + phaseZ * 1.1) * 0.010;
+transformed.x += windX * swayWeight;
+transformed.z += windZ * swayWeight;`,
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+uniform float uDayFactor;
+varying vec3 vLightColor;
+varying vec3 vTint;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      `{
+  float skyLight = vLightColor.r * uDayFactor;
+  float blockLight = vLightColor.g;
+  float ao = vLightColor.b;
+  float ambientFloor = 0.08;
+  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  diffuseColor.rgb *= lightFactor * vTint;
+}`,
+    );
+  };
+  material.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------------------
+// Graphics-B: Flora wind-sway shader patch
+// Same as leaf sway but with slightly larger amplitude (grass/flowers sway more).
+// Flora cross-quads have bottom verts at y=blockFloor and top at y=blockFloor+1,
+// so the same vertTopWeight trick anchors them correctly.
+// ---------------------------------------------------------------------------
+function applyFloraWindShaderPatch(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.uDayFactor = dayFactorUniform;
+    shader.uniforms.uWorldTime = worldTimeUniform;
+
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <common>",
+      `#include <common>
+attribute vec3 tint;
+attribute float swayWeight;
+varying vec3 vLightColor;
+varying vec3 vTint;
+uniform float uWorldTime;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <color_vertex>",
+      `#include <color_vertex>
+vLightColor = vColor.rgb;
+vTint = tint;`,
+    );
+    shader.vertexShader = shader.vertexShader.replace(
+      "#include <begin_vertex>",
+      `#include <begin_vertex>
+float phaseX = floor(position.x) * 1.621 + floor(position.z) * 2.359;
+float phaseZ = floor(position.x) * 2.971 + floor(position.z) * 1.847;
+// Flora sways a bit more than leaves (0.04 vs 0.025); swayWeight=1 for top verts, 0 for bottom
+float windX = sin(uWorldTime * 1.4 + phaseX) * 0.040 + sin(uWorldTime * 2.1 + phaseX * 1.2) * 0.018;
+float windZ = sin(uWorldTime * 1.2 + phaseZ) * 0.035 + sin(uWorldTime * 1.8 + phaseZ * 1.0) * 0.014;
+transformed.x += windX * swayWeight;
+transformed.z += windZ * swayWeight;`,
+    );
+
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <common>",
+      `#include <common>
+uniform float uDayFactor;
+varying vec3 vLightColor;
+varying vec3 vTint;`,
+    );
+    shader.fragmentShader = shader.fragmentShader.replace(
+      "#include <color_fragment>",
+      `{
+  float skyLight = vLightColor.r * uDayFactor;
+  float blockLight = vLightColor.g;
+  float ao = vLightColor.b;
+  float ambientFloor = 0.08;
+  float lightFactor = max(max(skyLight, blockLight), ambientFloor) * ao;
+  diffuseColor.rgb *= lightFactor * vTint;
+}`,
+    );
+  };
+  material.needsUpdate = true;
+}
+
 export function createBlockMaterials(blockTypes, atlasTexture) {
   const baseMaterial = new THREE.MeshLambertMaterial({
     map: atlasTexture,
@@ -255,7 +465,7 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     side: THREE.DoubleSide,
     vertexColors: true,
   });
-  applyLightingShaderPatch(alphaCutoutMaterial);
+  applyLeafWindShaderPatch(alphaCutoutMaterial);
 
   // Full-transparent material for glass (class 2)
   const glassMaterial = new THREE.MeshLambertMaterial({
@@ -279,7 +489,7 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     alphaTest: 0.02,
     vertexColors: true,
   });
-  applyLightingShaderPatch(waterMaterial);
+  applyWaterShaderPatch(waterMaterial);
 
   // Wave 8: lava material — opaque orange-glow fluid, emissive so it glows even in dark caves.
   // Treated as its own transparent buffer (class 3) but is visually fully opaque from the tile;
@@ -341,7 +551,7 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     side: THREE.DoubleSide,
     vertexColors: true,
   });
-  applyLightingShaderPatch(floraMaterial);
+  applyFloraWindShaderPatch(floraMaterial);
   const floraMat = floraMaterial;
 
   return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat, flora: floraMat };
@@ -1561,6 +1771,7 @@ export class VoxelWorld {
     const leafUv     = [];
     const leafCol    = [];
     const leafTint   = []; // Wave 12
+    const leafSway   = []; // Graphics-B: per-vertex sway weight (0=bottom, 1=top)
     const leafIdx    = [];
     const glassPos   = [];
     const glassNorm  = [];
@@ -1587,6 +1798,7 @@ export class VoxelWorld {
     const floraUv    = [];
     const floraCol   = [];
     const floraTint  = []; // Wave 12
+    const floraSway  = []; // Graphics-B: per-vertex sway weight (0=bottom, 1=top)
     const floraIdx   = [];
 
     for (let lz = 0; lz < S; lz += 1) {
@@ -1604,7 +1816,7 @@ export class VoxelWorld {
           // so it renders on top of glass with its own material.
           // Lava (id 21, tclass=3) gets its own buffer after water.
           // Flora (tclass=4) gets a cross-quad buffer and skips the cube-face loop.
-          let posArr, normArr, uvArr, colArr, tintArr, idxArr;
+          let posArr, normArr, uvArr, colArr, tintArr, swayArr, idxArr;
           if (FLORA_BLOCK_IDS.has(blockType)) {
             // --- Cross-quad emitter for flora (two perpendicular quads = X shape) ---
             // Sample skylight / blocklight from the voxel above (open sky side).
@@ -1662,6 +1874,8 @@ export class VoxelWorld {
                 floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
                 floraCol.push(lightR, lightG, AO_NEUTRAL);
                 floraTint.push(ftr, ftg, ftb);
+                // Graphics-B: verts 0,1 are bottom (y0), verts 2,3 are top (y0+1)
+                floraSway.push(v < 2 ? 0.0 : 1.0);
               }
               // Two CCW triangles
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
@@ -1669,19 +1883,19 @@ export class VoxelWorld {
             continue; // skip the cube-face loop for flora
           } else if (blockType === 21) {
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
-            colArr  = lavaCol;   tintArr = lavaTint;  idxArr  = lavaIdx;
+            colArr  = lavaCol;   tintArr = lavaTint;  swayArr = null;     idxArr  = lavaIdx;
           } else if (blockType === 15) {
             posArr  = waterPos;  normArr = waterNorm; uvArr = waterUv;
-            colArr  = waterCol;  tintArr = waterTint; idxArr  = waterIdx;
+            colArr  = waterCol;  tintArr = waterTint; swayArr = null;      idxArr  = waterIdx;
           } else if (tclass === 2) {
             posArr  = glassPos;  normArr = glassNorm; uvArr = glassUv;
-            colArr  = glassCol;  tintArr = glassTint; idxArr  = glassIdx;
+            colArr  = glassCol;  tintArr = glassTint; swayArr = null;      idxArr  = glassIdx;
           } else if (tclass === 1) {
             posArr  = leafPos;   normArr = leafNorm;  uvArr = leafUv;
-            colArr  = leafCol;   tintArr = leafTint;  idxArr  = leafIdx;
+            colArr  = leafCol;   tintArr = leafTint;  swayArr = leafSway;  idxArr  = leafIdx;
           } else {
             posArr  = opaquePos; normArr = opaqueNorm; uvArr = opaqueUv;
-            colArr  = opaqueCol; tintArr = opaqueTint; idxArr  = opaqueIdx;
+            colArr  = opaqueCol; tintArr = opaqueTint; swayArr = null;     idxArr  = opaqueIdx;
           }
 
           // Wave 12: determine biome grass tint for this column (computed once per block).
@@ -1784,6 +1998,9 @@ export class VoxelWorld {
               );
               // Wave 12: biome grass tint (separate attribute — does NOT touch vColor).
               tintArr.push(fTR, fTG, fTB);
+              // Graphics-B: sway weight — 1.0 for top verts (by=1), 0.0 for base verts (by=0).
+              // Only leaf geometry uses this; other arrays leave swayArr null.
+              if (swayArr) swayArr.push(by);
             }
 
             // Two triangles forming the quad.
@@ -1827,7 +2044,7 @@ export class VoxelWorld {
     // Build Three.js meshes from the accumulated buffers.
     // Wave 12: tint is a separate per-vertex vec3 attribute carrying biome grass tint.
     // It does NOT touch vColor (which carries packed skylight/blocklight/AO).
-    const makeGeometry = (pos, norm, uv, col, tint, idx) => {
+    const makeGeometry = (pos, norm, uv, col, tint, idx, sway = null) => {
       if (idx.length === 0) return null;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
@@ -1835,6 +2052,10 @@ export class VoxelWorld {
       geo.setAttribute("uv",       new THREE.Float32BufferAttribute(uv, 2));
       geo.setAttribute("color",    new THREE.Float32BufferAttribute(col, 3));
       geo.setAttribute("tint",     new THREE.Float32BufferAttribute(tint, 3));
+      // Graphics-B: per-vertex sway weight for wind animation (leaves, flora only)
+      if (sway !== null) {
+        geo.setAttribute("swayWeight", new THREE.Float32BufferAttribute(sway, 1));
+      }
       geo.setIndex(idx);
       return geo;
     };
@@ -1848,7 +2069,7 @@ export class VoxelWorld {
       this.meshGroup.add(mesh);
     }
 
-    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafTint, leafIdx);
+    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafTint, leafIdx, leafSway);
     if (leafGeo) {
       const mesh = new THREE.Mesh(leafGeo, mats.leaf);
       mesh.renderOrder = 1;
@@ -1885,7 +2106,7 @@ export class VoxelWorld {
     }
 
     // Wave 11: flora cross-quads rendered after lava (renderOrder 5).
-    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraTint, floraIdx);
+    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraTint, floraIdx, floraSway);
     if (floraGeo) {
       const mesh = new THREE.Mesh(floraGeo, mats.flora);
       mesh.renderOrder = 5;
