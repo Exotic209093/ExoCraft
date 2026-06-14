@@ -118,6 +118,18 @@ export const ITEM_DEFS = {
   apple: { id: "apple", name: "Apple", food: { hunger: 4, saturation: 2.4 } },
   // cooked_apple: smelt an apple for a better food value
   cooked_apple: { id: "cooked_apple", name: "Cooked Apple", food: { hunger: 6, saturation: 7.2 } },
+  // Wave 9 — raw meat (low hunger, cook in furnace for better values)
+  raw_beef:      { id: "raw_beef",      name: "Raw Beef",      food: { hunger: 3, saturation: 1.8 } },
+  raw_porkchop:  { id: "raw_porkchop",  name: "Raw Porkchop",  food: { hunger: 3, saturation: 1.8 } },
+  raw_chicken:   { id: "raw_chicken",   name: "Raw Chicken",   food: { hunger: 2, saturation: 1.2 } },
+  // Wave 9 — cooked meat (smelted, much better food values)
+  steak:            { id: "steak",            name: "Steak",            food: { hunger: 8, saturation: 12.8 } },
+  cooked_porkchop:  { id: "cooked_porkchop",  name: "Cooked Porkchop",  food: { hunger: 8, saturation: 12.8 } },
+  cooked_chicken:   { id: "cooked_chicken",   name: "Cooked Chicken",   food: { hunger: 6, saturation: 7.2  } },
+  // Wave 9 — materials (feeds wave-10 armor/beds)
+  wool:    { id: "wool",    name: "Wool"    },
+  leather: { id: "leather", name: "Leather" },
+  feather: { id: "feather", name: "Feather" },
   wood_pickaxe: { id: "wood_pickaxe", name: "Wood Pickaxe", toolKind: "pickaxe", toolPower: 2.1 },
   wood_axe: { id: "wood_axe", name: "Wood Axe", toolKind: "axe", toolPower: 2.1 },
   wood_shovel: { id: "wood_shovel", name: "Wood Shovel", toolKind: "shovel", toolPower: 2.1 },
@@ -618,6 +630,25 @@ export const SMELTING_RECIPES = [
     inputItemId: "gold_ore",
     outputItemId: "gold_ingot",
     cookTimeMs: 3200,
+  },
+  // Wave 9 — cook meat into higher-value food
+  {
+    id: "steak",
+    inputItemId: "raw_beef",
+    outputItemId: "steak",
+    cookTimeMs: 1400,
+  },
+  {
+    id: "cooked_porkchop",
+    inputItemId: "raw_porkchop",
+    outputItemId: "cooked_porkchop",
+    cookTimeMs: 1400,
+  },
+  {
+    id: "cooked_chicken",
+    inputItemId: "raw_chicken",
+    outputItemId: "cooked_chicken",
+    cookTimeMs: 1200,
   },
 ];
 

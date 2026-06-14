@@ -42,6 +42,19 @@ import {
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform } from "./game/world";
 import {
+  MOB_TYPES,
+  pickRandomMobType,
+  getMobTypeDef,
+  rollMobDrops,
+  createArrowMesh,
+} from "./game/mobs";
+import {
+  PASSIVE_MOB_TYPES,
+  pickRandomPassiveMobType,
+  getPassiveMobTypeDef,
+  rollPassiveMobDrops,
+} from "./game/passiveMobs";
+import {
   createAtlasTexture,
   createCrackTextures,
   CRACK_STAGE_COUNT,
@@ -245,8 +258,10 @@ scene.add(world.meshGroup);
 
 const hostileMobGroup = new THREE.Group();
 scene.add(hostileMobGroup);
-const hostileMobGeometry = new THREE.BoxGeometry(0.82, 0.9, 0.82);
-const hostileMobMaterial = new THREE.MeshLambertMaterial({ color: 0xcc5a56, emissive: 0x2c0c0c });
+
+// Wave 9 — passive animal group
+const passiveMobGroup = new THREE.Group();
+scene.add(passiveMobGroup);
 
 const targetOutline = new THREE.LineSegments(
   new THREE.EdgesGeometry(new THREE.BoxGeometry(1.02, 1.02, 1.02)),
@@ -588,6 +603,35 @@ let inventoryPanelNeedsRefresh = true;
 let mobSpawnAccumulatorMs = 0;
 let hostileMobIdCounter = 1;
 const hostileMobs = [];
+
+// Wave 9 — passive animals
+let passiveMobIdCounter = 1;
+const passiveMobs = [];
+let passiveSpawnAccumulatorMs = 0;
+const PASSIVE_MOB_MAX_COUNT = 12;
+const PASSIVE_MOB_SPAWN_INTERVAL_MS = 3200;
+const PASSIVE_MOB_SPAWN_CHANCE = 0.55;
+const PASSIVE_MOB_SPAWN_MIN_DIST = 10;
+const PASSIVE_MOB_SPAWN_MAX_DIST = 26;
+const PASSIVE_MOB_SPAWN_DAY_THRESHOLD = 0.30;  // only spawn when dayFactor > this
+const PASSIVE_MOB_DESPAWN_DISTANCE = 40;
+
+// Wave 9 — arrow projectiles (skeleton ranged attack)
+const arrowProjectiles = [];     // { mesh, pos, dir, speed, damage, lifeMs }
+const ARROW_SPEED = 14;          // blocks/sec
+const ARROW_DAMAGE = 2;
+const ARROW_MAX_LIFE_MS = 3000;
+const ARROW_HIT_RADIUS = 0.5;
+const SKELETON_SHOOT_RANGE = 14;
+const SKELETON_SHOOT_COOLDOWN_MS = 2800;
+const SKELETON_MIN_DISTANCE = 5;  // skeleton backs away if player is closer than this
+
+// Wave 9 — creeper explosion state (per mob, stored in mob.creeperState)
+const CREEPER_FUSE_RANGE = 3.0;       // start fuse when within this distance
+const CREEPER_EXPLOSION_DELAY_MS = 1800;
+const CREEPER_EXPLOSION_RADIUS = 3;   // blast block radius
+const CREEPER_EXPLOSION_DAMAGE = 8;
+const CREEPER_FLASH_INTERVAL_MS = 200;
 let objectiveHudSignature = "";
 let objectiveWaypointNeedsRefresh = true;
 let objectiveWaypointScanAccumulatorMs = OBJECTIVE_WAYPOINT_RESCAN_MS;
@@ -2273,8 +2317,16 @@ function clearHostileMobs() {
   syncHostileMobCount();
 }
 
-function createHostileMob(position, saved = null) {
-  const mesh = new THREE.Mesh(hostileMobGeometry, hostileMobMaterial);
+function createHostileMob(position, saved = null, forcedType = null) {
+  // Wave 9: pick type — from save, forced arg, or random weighted
+  const typeId = (typeof saved?.mobType === "string" && MOB_TYPES[saved.mobType])
+    ? saved.mobType
+    : (typeof forcedType === "string" && MOB_TYPES[forcedType])
+      ? forcedType
+      : pickRandomMobType();
+
+  const typeDef = getMobTypeDef(typeId);
+  const mesh = typeDef.createMesh();
   mesh.castShadow = false;
   mesh.receiveShadow = false;
   hostileMobGroup.add(mesh);
@@ -2284,7 +2336,8 @@ function createHostileMob(position, saved = null) {
 
   const mob = {
     id,
-    health: Number.isFinite(saved?.health) ? Math.max(1, Math.floor(saved.health)) : 4,
+    mobType: typeId,
+    health: Number.isFinite(saved?.health) ? Math.max(1, Math.floor(saved.health)) : typeDef.maxHealth,
     mode: typeof saved?.mode === "string" ? saved.mode : "wander",
     y: position.y,
     pos: new THREE.Vector3(position.x, position.y, position.z),
@@ -2295,8 +2348,13 @@ function createHostileMob(position, saved = null) {
       : 900 + Math.random() * 1800,
     attackCooldownMs: Number.isFinite(saved?.attackCooldownMs) ? Math.max(0, saved.attackCooldownMs) : 0,
     chasing: Boolean(saved?.chasing),
+    // Per-type extra state
+    skeletonShootCooldownMs: 0,
+    creeperState: null,   // null | { fuseMs, flashing }
   };
-  mesh.userData.mobId = mob.id;
+  // Tag every child mesh with this mob's id so raycaster can find it
+  mesh.traverse((child) => { if (child.isMesh) child.userData.mobId = id; });
+  mesh.userData.mobId = id;
   mesh.position.copy(mob.pos);
   hostileMobs.push(mob);
   syncHostileMobCount();
@@ -2318,6 +2376,7 @@ function removeHostileMobAt(index) {
 function serializeHostileMobs() {
   return hostileMobs.slice(0, Number.isFinite(hostileMobConfig.maxPersisted) ? hostileMobConfig.maxPersisted : 20).map((mob) => ({
     id: mob.id,
+    mobType: mob.mobType || "zombie",
     x: Number(mob.pos.x.toFixed(3)),
     y: Number(mob.pos.y.toFixed(3)),
     z: Number(mob.pos.z.toFixed(3)),
@@ -2734,6 +2793,11 @@ function updateBranchEncounterState() {
 }
 
 function tryMoveHostileMob(mob, dirX, dirZ, moveDistance) {
+  const configStep = Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1;
+  return tryMoveHostileMobWithStep(mob, dirX, dirZ, moveDistance, configStep);
+}
+
+function tryMoveHostileMobWithStep(mob, dirX, dirZ, moveDistance, maxStep) {
   if (moveDistance <= 0) {
     return false;
   }
@@ -2743,13 +2807,307 @@ function tryMoveHostileMob(mob, dirX, dirZ, moveDistance) {
   if (!Number.isFinite(walkY)) {
     return false;
   }
-  const maxStep = Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1;
   if (Math.abs(walkY - mob.pos.y) > maxStep) {
     return false;
   }
   mob.pos.x = nextX;
   mob.pos.z = nextZ;
   mob.pos.y = walkY;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Wave 9 — Arrow projectiles (skeleton ranged attack)
+// ---------------------------------------------------------------------------
+
+function spawnArrow(originPos, dirX, dirZ) {
+  const mesh = createArrowMesh();
+  // Aim slightly upward (parabola approximation: just flat for short range)
+  mesh.position.set(originPos.x, originPos.y + 0.6, originPos.z);
+  // Rotate mesh to face direction
+  mesh.rotation.y = Math.atan2(dirX, dirZ);
+  scene.add(mesh);
+  arrowProjectiles.push({
+    mesh,
+    pos: new THREE.Vector3(originPos.x, originPos.y + 0.6, originPos.z),
+    dirX,
+    dirZ,
+    speed: ARROW_SPEED,
+    damage: ARROW_DAMAGE,
+    lifeMs: ARROW_MAX_LIFE_MS,
+  });
+}
+
+function updateArrowProjectiles(deltaMs) {
+  const dtSeconds = deltaMs / 1000;
+  for (let i = arrowProjectiles.length - 1; i >= 0; i -= 1) {
+    const arrow = arrowProjectiles[i];
+    arrow.lifeMs -= deltaMs;
+    if (arrow.lifeMs <= 0) {
+      scene.remove(arrow.mesh);
+      arrowProjectiles.splice(i, 1);
+      continue;
+    }
+    const travel = arrow.speed * dtSeconds;
+    arrow.pos.x += arrow.dirX * travel;
+    arrow.pos.z += arrow.dirZ * travel;
+    // Check hit with player
+    const dx = arrow.pos.x - state.playerPos.x;
+    const dz = arrow.pos.z - state.playerPos.z;
+    const dy = arrow.pos.y - (state.playerPos.y + 0.9);
+    const distSq = dx * dx + dy * dy + dz * dz;
+    if (distSq <= ARROW_HIT_RADIUS * ARROW_HIT_RADIUS) {
+      takeDamage(arrow.damage, "skeleton arrow");
+      scene.remove(arrow.mesh);
+      arrowProjectiles.splice(i, 1);
+      continue;
+    }
+    // Check block collision
+    const bx = Math.floor(arrow.pos.x);
+    const by = Math.floor(arrow.pos.y);
+    const bz = Math.floor(arrow.pos.z);
+    if (world.get(bx, by, bz) !== 0) {
+      scene.remove(arrow.mesh);
+      arrowProjectiles.splice(i, 1);
+      continue;
+    }
+    arrow.mesh.position.copy(arrow.pos);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Wave 9 — Creeper explosion
+// ---------------------------------------------------------------------------
+
+// Throttle block edits: collect positions then apply in small batches so we
+// don't stall the frame.  The blast is small (r=3, ~113 blocks max) so we
+// apply all at once — the existing world.set path handles markDirty + edits.
+function triggerCreeperExplosion(mob) {
+  const cx = Math.floor(mob.pos.x);
+  const cy = Math.floor(mob.pos.y);
+  const cz = Math.floor(mob.pos.z);
+  const r = CREEPER_EXPLOSION_RADIUS;
+  const rSq = r * r;
+
+  for (let dy = -r; dy <= r; dy += 1) {
+    for (let dz = -r; dz <= r; dz += 1) {
+      for (let dx = -r; dx <= r; dx += 1) {
+        if (dx * dx + dy * dy + dz * dz > rSq) continue;
+        const bx = cx + dx;
+        const by = cy + dy;
+        const bz = cz + dz;
+        const type = world.get(bx, by, bz);
+        // Don't remove bedrock, liquids (water=15, lava=21), or out-of-bounds
+        if (type === 0 || type === 13 || type === 15 || type === 21 || !world.isWithinVerticalBounds(by)) continue;
+        world.set(bx, by, bz, 0);
+      }
+    }
+  }
+
+  // Radial damage to player
+  const pdx = state.playerPos.x - mob.pos.x;
+  const pdy = state.playerPos.y - mob.pos.y;
+  const pdz = state.playerPos.z - mob.pos.z;
+  const playerDistSq = pdx * pdx + pdy * pdy + pdz * pdz;
+  const blastRadiusSq = (r + 1.5) * (r + 1.5);
+  if (playerDistSq <= blastRadiusSq) {
+    const falloff = 1 - Math.sqrt(playerDistSq) / (r + 1.5);
+    takeDamage(Math.max(1, Math.floor(CREEPER_EXPLOSION_DAMAGE * falloff)), "creeper explosion");
+  }
+
+  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+  state.recentAction = "Creeper exploded!";
+}
+
+// ---------------------------------------------------------------------------
+// Wave 9 — Passive animal system
+// ---------------------------------------------------------------------------
+
+function createPassiveMob(position, saved = null, forcedType = null) {
+  const typeId = (typeof saved?.mobType === "string" && PASSIVE_MOB_TYPES[saved.mobType])
+    ? saved.mobType
+    : (typeof forcedType === "string" && PASSIVE_MOB_TYPES[forcedType])
+      ? forcedType
+      : pickRandomPassiveMobType();
+
+  const typeDef = getPassiveMobTypeDef(typeId);
+  const mesh = typeDef.createMesh();
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  passiveMobGroup.add(mesh);
+
+  const id = Number.isFinite(saved?.id) ? Math.max(1, Math.floor(saved.id)) : passiveMobIdCounter;
+  passiveMobIdCounter = Math.max(passiveMobIdCounter, id + 1);
+
+  const mob = {
+    id,
+    mobType: typeId,
+    health: Number.isFinite(saved?.health) ? Math.max(1, Math.floor(saved.health)) : typeDef.maxHealth,
+    pos: new THREE.Vector3(position.x, position.y, position.z),
+    mesh,
+    wanderAngle: Number.isFinite(saved?.wanderAngle) ? saved.wanderAngle : Math.random() * Math.PI * 2,
+    wanderTimerMs: Number.isFinite(saved?.wanderTimerMs)
+      ? Math.max(0, saved.wanderTimerMs)
+      : 800 + Math.random() * 2400,
+  };
+  mesh.traverse((child) => { if (child.isMesh) child.userData.passiveMobId = id; });
+  mesh.userData.passiveMobId = id;
+  mesh.position.copy(mob.pos);
+  passiveMobs.push(mob);
+  return mob;
+}
+
+function removePassiveMobAt(index) {
+  if (index < 0 || index >= passiveMobs.length) return null;
+  const [mob] = passiveMobs.splice(index, 1);
+  if (mob) passiveMobGroup.remove(mob.mesh);
+  return mob || null;
+}
+
+function clearPassiveMobs() {
+  while (passiveMobs.length > 0) {
+    const mob = passiveMobs.pop();
+    passiveMobGroup.remove(mob.mesh);
+  }
+  passiveMobIdCounter = 1;
+  passiveSpawnAccumulatorMs = 0;
+}
+
+function serializePassiveMobs() {
+  return passiveMobs.slice(0, 20).map((mob) => ({
+    id: mob.id,
+    mobType: mob.mobType,
+    x: Number(mob.pos.x.toFixed(3)),
+    y: Number(mob.pos.y.toFixed(3)),
+    z: Number(mob.pos.z.toFixed(3)),
+    health: mob.health,
+    wanderAngle: Number(mob.wanderAngle.toFixed(4)),
+    wanderTimerMs: Math.floor(mob.wanderTimerMs),
+  }));
+}
+
+function loadPassiveMobs(serializedMobs) {
+  clearPassiveMobs();
+  if (!Array.isArray(serializedMobs)) return;
+  for (const raw of serializedMobs) {
+    if (!raw || !Number.isFinite(raw.x) || !Number.isFinite(raw.z)) continue;
+    if (passiveMobs.length >= PASSIVE_MOB_MAX_COUNT) break;
+    const y = isMobSpawnColumnWalkable(raw.x, raw.z);
+    if (!Number.isFinite(y)) continue;
+    createPassiveMob({ x: raw.x, y, z: raw.z }, raw);
+  }
+}
+
+function maybeSpawnPassiveMob() {
+  if (state.dayFactor < PASSIVE_MOB_SPAWN_DAY_THRESHOLD) return;
+  if (passiveMobs.length >= PASSIVE_MOB_MAX_COUNT) return;
+  if (Math.random() > PASSIVE_MOB_SPAWN_CHANCE) return;
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist = PASSIVE_MOB_SPAWN_MIN_DIST + Math.random() * (PASSIVE_MOB_SPAWN_MAX_DIST - PASSIVE_MOB_SPAWN_MIN_DIST);
+    const x = state.playerPos.x + Math.sin(angle) * dist;
+    const z = state.playerPos.z - Math.cos(angle) * dist;
+    const y = isMobSpawnColumnWalkable(x, z);
+    if (!Number.isFinite(y)) continue;
+    // Must land on grass (block type 1)
+    const groundType = world.get(Math.floor(x), Math.floor(y) - 1, Math.floor(z));
+    if (groundType !== 1) continue;
+    let tooClose = false;
+    for (const mob of passiveMobs) {
+      const dx = mob.pos.x - x; const dz = mob.pos.z - z;
+      if (dx * dx + dz * dz < 4) { tooClose = true; break; }
+    }
+    if (tooClose) continue;
+    createPassiveMob({ x, y, z });
+    return;
+  }
+}
+
+function updatePassiveMobs(deltaMs) {
+  if (state.mode !== "playing") return;
+  if (deltaMs <= 0) return;
+
+  // Spawn check
+  passiveSpawnAccumulatorMs += deltaMs;
+  while (passiveSpawnAccumulatorMs >= PASSIVE_MOB_SPAWN_INTERVAL_MS) {
+    passiveSpawnAccumulatorMs -= PASSIVE_MOB_SPAWN_INTERVAL_MS;
+    maybeSpawnPassiveMob();
+  }
+
+  const dtSeconds = deltaMs / 1000;
+  for (let i = passiveMobs.length - 1; i >= 0; i -= 1) {
+    const mob = passiveMobs[i];
+
+    // Despawn if far away
+    const dx = mob.pos.x - state.playerPos.x;
+    const dz = mob.pos.z - state.playerPos.z;
+    if (dx * dx + dz * dz > PASSIVE_MOB_DESPAWN_DISTANCE * PASSIVE_MOB_DESPAWN_DISTANCE) {
+      removePassiveMobAt(i);
+      continue;
+    }
+
+    // Despawn at night
+    if (state.dayFactor < 0.20 && Math.random() < 0.004 * dtSeconds * 60) {
+      removePassiveMobAt(i);
+      continue;
+    }
+
+    // Wander
+    const typeDef = getPassiveMobTypeDef(mob.mobType);
+    const speed = typeDef.speed ?? 1.2;
+    mob.wanderTimerMs -= deltaMs;
+    if (mob.wanderTimerMs <= 0) {
+      mob.wanderTimerMs = 600 + Math.random() * 2200;
+      mob.wanderAngle = Math.random() * Math.PI * 2;
+    }
+    const dirX = Math.sin(mob.wanderAngle);
+    const dirZ = -Math.cos(mob.wanderAngle);
+    const moved = tryMoveHostileMobWithStep(mob, dirX, dirZ, speed * dtSeconds, 1.1);
+    if (!moved) mob.wanderTimerMs = 0;
+
+    mob.mesh.position.copy(mob.pos);
+  }
+}
+
+function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
+  if (passiveMobs.length === 0) return false;
+  raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+  const hits = raycaster.intersectObjects(passiveMobGroup.children, true);
+  if (hits.length === 0) return false;
+  const maxReach = Number.isFinite(worldConfig.maxReach) ? worldConfig.maxReach : 6;
+  const hit = hits.find((e) => e.distance <= maxReach);
+  if (!hit) return false;
+  const blockingHit = hitTest(ndcX, ndcY, maxReach);
+  if (blockingHit && blockingHit.distance + 0.03 < hit.distance) return false;
+  const passiveMobId = hit.object?.userData?.passiveMobId;
+  if (!Number.isFinite(passiveMobId)) return false;
+  const index = passiveMobs.findIndex((m) => m.id === passiveMobId);
+  if (index < 0) return false;
+  const playerDamage = getSelectedMobDamage();
+  const mob = passiveMobs[index];
+  mob.health -= Math.max(1, Math.floor(playerDamage));
+  decrementDurability(state.inventory, state.selectedSlot, 1);
+  if (mob.health <= 0) {
+    const mobTypeId = mob.mobType;
+    removePassiveMobAt(index);
+    // Award drops
+    const drops = rollPassiveMobDrops(mobTypeId);
+    const granted = [];
+    for (const drop of drops) {
+      const leftover = addItemToInventory(state.inventory, drop.itemId, drop.count);
+      const got = drop.count - leftover;
+      if (got > 0) granted.push(`${got} ${getItemName(drop.itemId)}`);
+    }
+    state.recentAction = granted.length > 0
+      ? `Defeated ${mobTypeId} +${granted.join(", ")}`
+      : `Defeated ${mobTypeId}`;
+    markCraftPanelDirty();
+    markInventoryPanelDirty();
+  } else {
+    state.recentAction = `Hit ${mob.mobType} (${mob.health} hp)`;
+    markInventoryPanelDirty();
+  }
   return true;
 }
 
@@ -2799,6 +3157,29 @@ function updateHostileMobs(deltaMs) {
       continue;
     }
 
+    // --- Zombie: burn in direct daylight ---
+    if (mob.mobType === "zombie" && state.dayFactor > 0.7) {
+      const bx = Math.floor(mob.pos.x);
+      const by = Math.floor(mob.pos.y);
+      const bz = Math.floor(mob.pos.z);
+      // Check that sky is unobstructed above
+      let exposed = true;
+      for (let sy = by + 1; sy < Math.min(world.height, by + 20); sy += 1) {
+        if (world.get(bx, sy, bz) !== 0) { exposed = false; break; }
+      }
+      if (exposed) {
+        mob.health -= (1.5 * dtSeconds);
+        if (mob.health <= 0) {
+          const killWeapon = "zombie_burn";
+          removeHostileMobAt(i);
+          rewardHostileMobDefeat(killWeapon, "zombie");
+          markCraftPanelDirty();
+          markInventoryPanelDirty();
+          continue;
+        }
+      }
+    }
+
     if (state.dayFactor > despawnDayFactor && planarDistance >= despawnDistance) {
       if (Math.random() < despawnChancePerSecond * dtSeconds) {
         removeHostileMobAt(i);
@@ -2816,39 +3197,155 @@ function updateHostileMobs(deltaMs) {
       mob.mode = "chase";
     }
 
+    // --- Per-type speed overrides ---
+    const typeDef = getMobTypeDef(mob.mobType);
+    const typeWanderSpeed = typeDef.speed?.wander ?? wanderSpeed;
+    const typeChaseSpeed  = typeDef.speed?.chase  ?? chaseSpeed;
+
     let dirX = 0;
     let dirZ = 0;
-    let speed = wanderSpeed;
+    let speed = typeWanderSpeed;
 
-    if (mob.chasing && planarDistance > 0.001) {
-      dirX = toPlayerX / planarDistance;
-      dirZ = toPlayerZ / planarDistance;
-      speed = chaseSpeed;
-      mob.mode = "chase";
-      mob.wanderTimerMs = 0;
-    } else {
-      mob.mode = "wander";
-      mob.wanderTimerMs -= deltaMs;
-      if (mob.wanderTimerMs <= 0) {
-        mob.wanderTimerMs = 700 + Math.random() * 1700;
-        mob.wanderAngle = pickMobWanderAngle();
+    // --- Creeper: special approach/fuse/explode AI ---
+    if (mob.mobType === "creeper") {
+      if (mob.creeperState) {
+        // Fuse is lit — count down, keep approaching slowly
+        mob.creeperState.fuseMs -= deltaMs;
+        mob.creeperState.flashTimer = (mob.creeperState.flashTimer || 0) + deltaMs;
+        // Visual flash: toggle emissive intensity on all child meshes
+        if (mob.creeperState.flashTimer > CREEPER_FLASH_INTERVAL_MS) {
+          mob.creeperState.flashTimer = 0;
+          mob.creeperState.flashing = !mob.creeperState.flashing;
+          mob.mesh.traverse((child) => {
+            if (child.isMesh && child.material) {
+              child.material.emissiveIntensity = mob.creeperState.flashing ? 0.8 : 0.1;
+            }
+          });
+        }
+        // Explode
+        if (mob.creeperState.fuseMs <= 0) {
+          triggerCreeperExplosion(mob);
+          removeHostileMobAt(i);
+          continue;
+        }
+        // If player moves away reset fuse
+        if (planarDistance > CREEPER_FUSE_RANGE + 1.5) {
+          mob.creeperState = null;
+          mob.mesh.traverse((child) => {
+            if (child.isMesh && child.material) child.material.emissiveIntensity = 0.1;
+          });
+        }
+        // Still approach but slower
+        if (planarDistance > 0.001) {
+          dirX = toPlayerX / planarDistance;
+          dirZ = toPlayerZ / planarDistance;
+          speed = typeChaseSpeed * 0.5;
+          mob.mode = "chase";
+        }
+      } else if (mob.chasing && planarDistance <= CREEPER_FUSE_RANGE) {
+        // Ignite fuse
+        mob.creeperState = { fuseMs: CREEPER_EXPLOSION_DELAY_MS, flashing: false, flashTimer: 0 };
+        mob.mode = "fuse";
+        dirX = 0;
+        dirZ = 0;
+        speed = 0;
+      } else {
+        // Normal approach
+        if (mob.chasing && planarDistance > 0.001) {
+          dirX = toPlayerX / planarDistance;
+          dirZ = toPlayerZ / planarDistance;
+          speed = typeChaseSpeed;
+          mob.mode = "chase";
+          mob.wanderTimerMs = 0;
+        } else {
+          mob.mode = "wander";
+          mob.wanderTimerMs -= deltaMs;
+          if (mob.wanderTimerMs <= 0) {
+            mob.wanderTimerMs = 700 + Math.random() * 1700;
+            mob.wanderAngle = pickMobWanderAngle();
+          }
+          dirX = Math.sin(mob.wanderAngle);
+          dirZ = -Math.cos(mob.wanderAngle);
+        }
       }
-      dirX = Math.sin(mob.wanderAngle);
-      dirZ = -Math.cos(mob.wanderAngle);
+    } else if (mob.mobType === "skeleton") {
+      // --- Skeleton: keep distance, shoot arrows ---
+      mob.skeletonShootCooldownMs = Math.max(0, (mob.skeletonShootCooldownMs || 0) - deltaMs);
+      if (mob.chasing) {
+        if (planarDistance < SKELETON_MIN_DISTANCE) {
+          // Back away
+          dirX = -toPlayerX / planarDistance;
+          dirZ = -toPlayerZ / planarDistance;
+          speed = typeWanderSpeed;
+          mob.mode = "retreat";
+        } else if (planarDistance <= SKELETON_SHOOT_RANGE) {
+          // Stand and shoot
+          dirX = 0; dirZ = 0; speed = 0;
+          mob.mode = "shoot";
+          if (mob.skeletonShootCooldownMs <= 0 && planarDistance > 0.001) {
+            mob.skeletonShootCooldownMs = SKELETON_SHOOT_COOLDOWN_MS;
+            spawnArrow(mob.pos, toPlayerX / planarDistance, toPlayerZ / planarDistance);
+          }
+        } else {
+          // Close in
+          dirX = toPlayerX / planarDistance;
+          dirZ = toPlayerZ / planarDistance;
+          speed = typeChaseSpeed;
+          mob.mode = "chase";
+          mob.wanderTimerMs = 0;
+        }
+      } else {
+        mob.mode = "wander";
+        mob.wanderTimerMs -= deltaMs;
+        if (mob.wanderTimerMs <= 0) {
+          mob.wanderTimerMs = 700 + Math.random() * 1700;
+          mob.wanderAngle = pickMobWanderAngle();
+        }
+        dirX = Math.sin(mob.wanderAngle);
+        dirZ = -Math.cos(mob.wanderAngle);
+      }
+    } else {
+      // --- Default melee AI (zombie + spider) ---
+      if (mob.chasing && planarDistance > 0.001) {
+        dirX = toPlayerX / planarDistance;
+        dirZ = toPlayerZ / planarDistance;
+        speed = typeChaseSpeed;
+        mob.mode = "chase";
+        mob.wanderTimerMs = 0;
+      } else {
+        mob.mode = "wander";
+        mob.wanderTimerMs -= deltaMs;
+        if (mob.wanderTimerMs <= 0) {
+          mob.wanderTimerMs = 700 + Math.random() * 1700;
+          mob.wanderAngle = pickMobWanderAngle();
+        }
+        dirX = Math.sin(mob.wanderAngle);
+        dirZ = -Math.cos(mob.wanderAngle);
+      }
     }
 
-    const moved = tryMoveHostileMob(mob, dirX, dirZ, speed * dtSeconds);
-    if (!moved && !mob.chasing) {
-      mob.wanderTimerMs = 0;
+    if (speed > 0) {
+      // Spider: can climb up slightly more aggressively (extra step tolerance)
+      const maxStep = mob.mobType === "spider" ? 2.1 : (Number.isFinite(hostileMobConfig.maxStepHeight) ? hostileMobConfig.maxStepHeight : 1.1);
+      const moved = tryMoveHostileMobWithStep(mob, dirX, dirZ, speed * dtSeconds, maxStep);
+      if (!moved && !mob.chasing) {
+        mob.wanderTimerMs = 0;
+      }
     }
 
-    if (planarDistance <= attackRange && mob.attackCooldownMs <= 0) {
+    // Melee contact damage (skeleton does no contact damage — arrow only)
+    const mobContactDamage = typeDef.contactDamage ?? attackDamage;
+    if (mobContactDamage > 0 && planarDistance <= attackRange && mob.attackCooldownMs <= 0) {
       mob.attackCooldownMs = attackCooldownMs;
-      takeDamage(attackDamage, "hostile");
+      takeDamage(mobContactDamage, mob.mobType || "hostile");
     }
 
     mob.mesh.position.copy(mob.pos);
   }
+
+  // --- Update arrow projectiles ---
+  updateArrowProjectiles(deltaMs);
+
   syncHostileMobCount();
 }
 
@@ -2880,32 +3377,20 @@ function registerHostileMobDefeat(weaponItemId = getSelectedItemId()) {
   }
 }
 
-function rewardHostileMobDefeat(weaponItemId = getSelectedItemId()) {
+function rewardHostileMobDefeat(weaponItemId = getSelectedItemId(), mobTypeId = "zombie") {
   registerHostileMobDefeat(weaponItemId);
-  const dropItemId = typeof hostileMobConfig.dropItemId === "string" ? hostileMobConfig.dropItemId : "bone_shard";
-  const dropChance = Number.isFinite(hostileMobConfig.dropChance)
-    ? THREE.MathUtils.clamp(hostileMobConfig.dropChance, 0, 1)
-    : 1;
-  if (Math.random() > dropChance) {
-    state.recentAction = "Defeated hostile mob";
-    return;
+  // Wave 9: per-type drops from mobs.js registry
+  const drops = rollMobDrops(mobTypeId);
+  const granted = [];
+  for (const drop of drops) {
+    const leftover = addItemToInventory(state.inventory, drop.itemId, drop.count);
+    const got = drop.count - leftover;
+    if (got > 0) granted.push(`${got} ${getItemName(drop.itemId)}`);
   }
-
-  const minDrop = Number.isFinite(hostileMobConfig.dropMin) ? Math.max(1, Math.floor(hostileMobConfig.dropMin)) : 1;
-  const maxDrop = Number.isFinite(hostileMobConfig.dropMax) ? Math.max(minDrop, Math.floor(hostileMobConfig.dropMax)) : minDrop;
-  const dropCount = minDrop + Math.floor(Math.random() * (maxDrop - minDrop + 1));
-  const leftover = addItemToInventory(state.inventory, dropItemId, dropCount);
-  const gained = dropCount - leftover;
-
-  if (gained <= 0) {
-    state.recentAction = `Defeated hostile mob, inventory full`;
-    return;
-  }
-
-  if (leftover > 0) {
-    state.recentAction = `Defeated hostile mob +${gained} ${getItemName(dropItemId)}, inventory full`;
+  if (granted.length === 0) {
+    state.recentAction = `Defeated ${mobTypeId}`;
   } else {
-    state.recentAction = `Defeated hostile mob +${gained} ${getItemName(dropItemId)}`;
+    state.recentAction = `Defeated ${mobTypeId} +${granted.join(", ")}`;
   }
 }
 
@@ -2914,7 +3399,7 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
     return false;
   }
   raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
-  const hits = raycaster.intersectObjects(hostileMobGroup.children, false);
+  const hits = raycaster.intersectObjects(hostileMobGroup.children, true);
   if (hits.length === 0) {
     return false;
   }
@@ -2942,12 +3427,13 @@ function tryHitHostileMob(ndcX = 0, ndcY = 0) {
   decrementDurability(state.inventory, state.selectedSlot, 1);
   if (mob.health <= 0) {
     const killWeaponItemId = getSelectedItemId();
+    const mobTypeId = mob.mobType || "zombie";
     removeHostileMobAt(index);
-    rewardHostileMobDefeat(killWeaponItemId);
+    rewardHostileMobDefeat(killWeaponItemId, mobTypeId);
     markCraftPanelDirty();
     markInventoryPanelDirty();
   } else {
-    state.recentAction = `Hit hostile mob (${mob.health} hp)`;
+    state.recentAction = `Hit ${mob.mobType || "hostile mob"} (${mob.health} hp)`;
     markInventoryPanelDirty();
   }
   return true;
@@ -3656,6 +4142,7 @@ function collectSaveSnapshot() {
     inventory: serializeInventory(),
     furnaces: serializeFurnaces(),
     mobs: serializeHostileMobs(),
+    passiveMobs: serializePassiveMobs(),
     objectives: serializeObjectives(),
     edits: world.exportEdits(),
   };
@@ -3736,6 +4223,7 @@ async function loadGame() {
     deactivateTorchLights();
     loadFurnaces(snapshot.furnaces);
     loadHostileMobs(snapshot.mobs);
+    loadPassiveMobs(snapshot.passiveMobs);
     loadObjectives(snapshot.objectives);
     state.activeFurnaceKey = null;
     if (Number.isFinite(snapshot.worldTimeMs)) {
@@ -3830,6 +4318,9 @@ function updateTargetBlockFromCenter() {
 
 function breakBlock(ndcX = 0, ndcY = 0) {
   if (tryHitHostileMob(ndcX, ndcY)) {
+    return true;
+  }
+  if (tryHitPassiveMob(ndcX, ndcY)) {
     return true;
   }
   const hit = hitTest(ndcX, ndcY);
@@ -4209,6 +4700,7 @@ function regenerateWorld() {
   deactivateTorchLights();
   furnaceStates.clear();
   clearHostileMobs();
+  clearPassiveMobs();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
@@ -4230,6 +4722,7 @@ async function createNewWorld() {
   deactivateTorchLights();
   furnaceStates.clear();
   clearHostileMobs();
+  clearPassiveMobs();
   resetObjectives();
   state.activeFurnaceKey = null;
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
@@ -4297,6 +4790,7 @@ function updateSimulation(dtSeconds) {
 
   if (state.mode !== "playing") {
     updateHostileMobs(deltaMs);
+    updatePassiveMobs(deltaMs);
     updateTorchLights(deltaMs);
     updateObjectives(deltaMs);
     updateCameraTransform();
@@ -4570,6 +5064,7 @@ function updateSimulation(dtSeconds) {
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   updateFurnaceSimulation(deltaMs);
   updateHostileMobs(deltaMs);
+  updatePassiveMobs(deltaMs);
   updateTorchLights(deltaMs);
   updateParticles(deltaMs);
   updateFallingBlocks();
@@ -4817,15 +5312,31 @@ window.render_game_to_text = () => {
       count: hostileMobs.length,
       entries: hostileMobs.map((mob) => ({
         id: mob.id,
+        type: mob.mobType || "zombie",
         x: Number(mob.pos.x.toFixed(3)),
         y: Number(mob.pos.y.toFixed(3)),
         z: Number(mob.pos.z.toFixed(3)),
         health: mob.health,
         mode: mob.mode,
         chasing: mob.chasing,
+        creeperFuseMs: mob.creeperState ? Math.floor(mob.creeperState.fuseMs) : null,
       })),
       spawnDayFactorThreshold: hostileMobConfig.spawnDayFactorThreshold,
       dayFactor: Number(state.dayFactor.toFixed(3)),
+    },
+    passiveMobs: {
+      count: passiveMobs.length,
+      entries: passiveMobs.map((mob) => ({
+        id: mob.id,
+        type: mob.mobType,
+        x: Number(mob.pos.x.toFixed(3)),
+        y: Number(mob.pos.y.toFixed(3)),
+        z: Number(mob.pos.z.toFixed(3)),
+        health: mob.health,
+      })),
+    },
+    arrowProjectiles: {
+      count: arrowProjectiles.length,
     },
     combat: {
       baseMobDamage: playerBaseMobDamage + combinedBonuses.mobDamageBonus,
@@ -4893,6 +5404,37 @@ window.__exoCraftDebug = {
   },
   eatSelected: () => eatSelectedFood(),
   spawnHostileMobNearPlayer: (distance = 2.2) => Boolean(spawnHostileMobNearPlayer(distance)),
+  // Wave 9 debug hooks
+  spawnMob: (type = "zombie", dist = 4) => {
+    if (!MOB_TYPES[type]) {
+      return `Unknown type: ${type}. Valid: ${Object.keys(MOB_TYPES).join(", ")}`;
+    }
+    const angle = Math.random() * Math.PI * 2;
+    const x = state.playerPos.x + Math.sin(angle) * dist;
+    const z = state.playerPos.z - Math.cos(angle) * dist;
+    const y = isMobSpawnColumnWalkable(x, z) ?? state.playerPos.y;
+    const mob = createHostileMob({ x, y, z }, null, type);
+    return mob ? { id: mob.id, type: mob.mobType } : false;
+  },
+  spawnPassive: (type = "cow", dist = 4) => {
+    if (!PASSIVE_MOB_TYPES[type]) {
+      return `Unknown type: ${type}. Valid: ${Object.keys(PASSIVE_MOB_TYPES).join(", ")}`;
+    }
+    const angle = Math.random() * Math.PI * 2;
+    const x = state.playerPos.x + Math.sin(angle) * dist;
+    const z = state.playerPos.z - Math.cos(angle) * dist;
+    const y = isMobSpawnColumnWalkable(x, z) ?? state.playerPos.y;
+    const mob = createPassiveMob({ x, y, z }, null, type);
+    return mob ? { id: mob.id, type: mob.mobType } : false;
+  },
+  explodeNearestCreeper: () => {
+    const creeper = hostileMobs.find((m) => m.mobType === "creeper");
+    if (!creeper) return "No creeper in world";
+    const idx = hostileMobs.indexOf(creeper);
+    triggerCreeperExplosion(creeper);
+    removeHostileMobAt(idx);
+    return "Exploded!";
+  },
   grantInventoryItem: (itemId, count = 1) => {
     if (typeof itemId !== "string" || !ITEM_DEFS[itemId]) {
       return 0;
@@ -4918,8 +5460,9 @@ window.__exoCraftDebug = {
     if (hostileMobs.length <= 0) {
       return false;
     }
+    const mobTypeId = hostileMobs[0].mobType || "zombie";
     removeHostileMobAt(0);
-    rewardHostileMobDefeat(weaponItemId);
+    rewardHostileMobDefeat(weaponItemId, mobTypeId);
     markCraftPanelDirty();
     markInventoryPanelDirty();
     updateObjectives(0, true);
