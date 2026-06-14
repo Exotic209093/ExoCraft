@@ -1,6 +1,7 @@
 import "./style.css";
 import * as THREE from "three";
 import { createGameConfig } from "./game/config";
+import { Sky } from "./game/sky";
 import { setupControls } from "./game/controls";
 import { updateHud } from "./game/hud";
 import { aabbIntersectsBlock, playerAABBAt, resolveAxis } from "./game/physics";
@@ -185,6 +186,9 @@ const moonSprite = new THREE.Sprite(
 moonSprite.scale.set(SKY_BODY_SCALE * 0.7, SKY_BODY_SCALE * 0.7, 1);
 moonSprite.renderOrder = -1;
 scene.add(moonSprite);
+
+// Wave 6: gradient skydome + stars + clouds.
+const sky = new Sky(scene);
 
 const torchLights = [];
 let activeTorchLights = 0;
@@ -680,6 +684,10 @@ function updateDayNight(deltaMs) {
     moonSprite.material.opacity = moonAboveHorizon;
     moonSprite.visible = moonAboveHorizon > 0.02;
   }
+
+  // Wave 6: update sky dome, stars, and clouds. eyeInWater is read here so the
+  // sky hides itself whenever wave-5 underwater fog takes over.
+  sky.update(dayFactor, state.timeOfDayMs, camera.position, state.eyeInWater);
 }
 
 function getWorldNormal(hit) {
@@ -4155,6 +4163,18 @@ function collectNearbyBlocks() {
 function updateSimulation(dtSeconds) {
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
   const deltaMs = dtSeconds * 1000;
+
+  // Compute eyeInWater BEFORE updateDayNight so sky.update() and the fog override
+  // both see the same value on the frame the eye enters or exits water.
+  // Only meaningful in playing mode; in other modes state.eyeInWater stays as-is
+  // (safe: non-playing paths don't do underwater fog override).
+  if (state.mode === "playing") {
+    const _eyeTestX = Math.floor(state.playerPos.x);
+    const _eyeTestY = Math.floor(state.playerPos.y + playerConfig.eyeHeight);
+    const _eyeTestZ = Math.floor(state.playerPos.z);
+    state.eyeInWater = world.get(_eyeTestX, _eyeTestY, _eyeTestZ) === WATER_BLOCK_TYPE;
+  }
+
   updateDayNight(deltaMs);
 
   if (state.mode !== "playing") {
