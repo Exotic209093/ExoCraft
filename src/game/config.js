@@ -19,6 +19,12 @@ const DEFAULT_GAME_CONFIG = {
       { id: 7, name: "Furnace", color: 0x61666d },
       { id: 8, name: "Torch", color: 0xf4b65a, emissive: 0x6b3b08, emissiveIntensity: 0.32 },
       { id: 9, name: "Copper Ore", color: 0xad7547, emissive: 0x251307, emissiveIntensity: 0.2 },
+      // Wave 2 blocks
+      { id: 10, name: "Cobblestone", color: 0x808080 },
+      { id: 11, name: "Sand", color: 0xe4d28e },
+      { id: 12, name: "Gravel", color: 0x827a72 },
+      { id: 13, name: "Bedrock", color: 0x262626 },
+      { id: 14, name: "Glass", color: 0xb4dcf8, transparent: true },
     ],
     generation: {
       seed: 1337,

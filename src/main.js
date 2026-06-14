@@ -52,6 +52,13 @@ const CRAFTING_TABLE_BLOCK_TYPE = 6;
 const FURNACE_BLOCK_TYPE = 7;
 const TORCH_BLOCK_TYPE = 8;
 const COPPER_ORE_BLOCK_TYPE = 9;
+// Wave 2 block type ids
+const COBBLESTONE_BLOCK_TYPE = 10;
+const SAND_BLOCK_TYPE = 11;
+const GRAVEL_BLOCK_TYPE = 12;
+const BEDROCK_BLOCK_TYPE = 13;
+const GLASS_BLOCK_TYPE = 14;
+const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
 const OBJECTIVE_CAVE_MIN_ROOF_DEPTH = 3;
@@ -2529,6 +2536,75 @@ function spawnHostileMobAroundSite(site, preferredDistance = 2.6) {
   return null;
 }
 
+// Settle pass: gravity blocks (sand, gravel) fall one step per tick when unsupported.
+// Runs once per simulation step; multiple ticks cascade naturally.
+function updateFallingBlocks() {
+  if (!world) {
+    return;
+  }
+  // Collect every unsupported gravity block that is currently loaded.
+  // Iterate active chunks only so we don't scan the whole world.
+  for (const key of world.activeChunkKeys) {
+    const chunk = world.chunks.get(key);
+    if (!chunk) {
+      continue;
+    }
+    const { cx, cz } = (() => {
+      const parts = key.split(",");
+      return { cx: Number(parts[0]), cz: Number(parts[1]) };
+    })();
+    const baseX = cx * world.chunkSize;
+    const baseZ = cz * world.chunkSize;
+
+    // Seed the flag on first visit (chunk newly generated or loaded from save).
+    // This one-time scan per chunk avoids re-scanning every subsequent frame.
+    if (chunk.hasFallingBlocks === undefined) {
+      let found = false;
+      for (let i = 0; i < chunk.blocks.length; i += 1) {
+        if (FALLING_BLOCK_TYPES.has(chunk.blocks[i])) {
+          found = true;
+          break;
+        }
+      }
+      chunk.hasFallingBlocks = found;
+    }
+
+    // Skip chunks that contain no falling blocks — avoids scanning 153k cells/frame
+    // when nothing is falling.
+    if (!chunk.hasFallingBlocks) {
+      continue;
+    }
+
+    // Scan bottom-up so a column can cascade multiple steps across ticks naturally.
+    // Read from chunk.blocks[] via world.index() to avoid toChunkPosition+Map.get
+    // per cell; only call world.set() for actual moves so edits/markDirty persist.
+    let stillHasFalling = false;
+    for (let localZ = 0; localZ < world.chunkSize; localZ += 1) {
+      for (let localX = 0; localX < world.chunkSize; localX += 1) {
+        const worldX = baseX + localX;
+        const worldZ = baseZ + localZ;
+        for (let y = 1; y < world.height; y += 1) {
+          const type = chunk.blocks[world.index(localX, y, localZ)];
+          if (!FALLING_BLOCK_TYPES.has(type)) {
+            continue;
+          }
+          const below = chunk.blocks[world.index(localX, y - 1, localZ)];
+          if (below !== 0) {
+            // Still sitting on something — mark so we don't clear the flag.
+            stillHasFalling = true;
+            continue;
+          }
+          // Unsupported: move it down one block via world.set() so edits/markDirty persist.
+          world.set(worldX, y, worldZ, 0);
+          world.set(worldX, y - 1, worldZ, type);
+          stillHasFalling = true;
+        }
+      }
+    }
+    chunk.hasFallingBlocks = stillHasFalling;
+  }
+}
+
 function updateBranchEncounterState() {
   if (state.mode !== "playing" || !state.specialization.completed || !state.specialization.selected) {
     return;
@@ -3692,7 +3768,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
   const type = world.get(coords.x, coords.y, coords.z);
-  if (type === 0 || coords.y === 0) {
+  if (type === 0 || coords.y === 0 || type === BEDROCK_BLOCK_TYPE) {
     state.breakProgress.targetKey = null;
     state.breakProgress.amount = 0;
     return false;
@@ -3802,6 +3878,13 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
   world.set(coords.x, coords.y, coords.z, placeType);
+  if (FALLING_BLOCK_TYPES.has(placeType)) {
+    const placedPos = world.toChunkPosition(coords.x, coords.z);
+    const placedChunk = world.chunks.get(placedPos.key);
+    if (placedChunk) {
+      placedChunk.hasFallingBlocks = true;
+    }
+  }
   if (placeType === FURNACE_BLOCK_TYPE) {
     const furnaceKey = toFurnaceKey(coords.x, coords.y, coords.z);
     getFurnaceState(furnaceKey, true);
@@ -4198,6 +4281,7 @@ function updateSimulation(dtSeconds) {
   updateHostileMobs(deltaMs);
   updateTorchLights(deltaMs);
   updateParticles(deltaMs);
+  updateFallingBlocks();
   updateBranchEncounterState();
   updateObjectives(deltaMs);
   updateCameraTransform();

@@ -619,3 +619,11 @@ Goal: get ExoCraft as close to Minecraft as possible. Recon produced a 12-wave d
 - `index.html` + `src/style.css`: bottom-centre beveled hotbar, hearts row, full-screen `#damage-flash` red overlay (pointer-events:none), low-health vignette.
 - `src/main.js`: `triggerDamageFlash()` hooked into `takeDamage`.
 - Verified: build green; both reviewers pass; hooks confirm 10 hearts / 9 slots / icons / selection / damage-flash; screenshot reads as Minecraft.
+
+## Wave 2 complete — block palette + transparency + falling blocks
+- `src/game/textures.js`: atlas 4x4 -> 8x8 with 1px gutters (TILE_GUTTER, tileOrigin, gutter-inset tileUvRect) so mipmaps don't bleed. New pixel-art tiles + paint fns: cobblestone, sand, gravel, bedrock, glass. `BLOCK_TRANSPARENCY_CLASS` export (leaves=cutout, glass=full). paintLeaves now punches ~18% transparent pixels for true alpha-cutout.
+- `src/game/config.js`: blockTypes 10 Cobblestone, 11 Sand, 12 Gravel, 13 Bedrock, 14 Glass.
+- `src/game/survival.js`: registry entries (drops/hardness/preferred-tool/items) for new blocks; stone now drops cobblestone; smelting cobblestone->stone and sand->glass.
+- `src/game/world.js`: three material variants (opaque / alpha-cutout leaves DoubleSide / transparent glass depthWrite:false); transparency-class-aware hasExposedFace; transparent meshes renderOrder=1; bedrock band at y=0 in proceduralBlockTypeAt.
+- `src/main.js`: block-id constants + FALLING_BLOCK_TYPES; bedrock guard in breakBlock; updateFallingBlocks() with per-chunk hasFallingBlocks dirty flag + direct typed-array reads (no per-frame full-world scan), settles sand/gravel via world.set.
+- Reviewers flagged + fix-agent resolved: falling-block per-frame perf cliff, and opaque-leaves texture. Verified: build green; atlas intact (existing + new textures render); hotbar shows new icons; glass shows backdrop through it.

@@ -12,6 +12,12 @@ export const ITEM_DEFS = {
   furnace: { id: "furnace", name: "Furnace", placeBlockType: 7 },
   torch: { id: "torch", name: "Torch", placeBlockType: 8 },
   copper_ore: { id: "copper_ore", name: "Copper Ore", placeBlockType: 9 },
+  // Wave 2 placeable blocks
+  cobblestone: { id: "cobblestone", name: "Cobblestone", placeBlockType: 10 },
+  sand: { id: "sand", name: "Sand", placeBlockType: 11 },
+  gravel: { id: "gravel", name: "Gravel", placeBlockType: 12 },
+  // Bedrock is not placeable by the player.
+  glass: { id: "glass", name: "Glass", placeBlockType: 14 },
   plank: { id: "plank", name: "Plank" },
   stick: { id: "stick", name: "Stick" },
   bone_shard: { id: "bone_shard", name: "Bone Shard" },
@@ -38,13 +44,19 @@ export const ITEM_DEFS = {
 export const BLOCK_DROPS = {
   1: "grass",
   2: "dirt",
-  3: "stone",
+  3: "cobblestone", // stone drops cobblestone (Minecraft behaviour)
   4: "wood",
   5: "leaf",
   6: "crafting_table",
   7: "furnace",
   8: "torch",
   9: "copper_ore",
+  // Wave 2
+  10: "cobblestone",
+  11: "sand",
+  12: "gravel",
+  // 13 = bedrock: no drop (handled by breakBlock guard)
+  14: "glass",
 };
 
 const BLOCK_HARDNESS = {
@@ -57,6 +69,12 @@ const BLOCK_HARDNESS = {
   7: 2.6,
   8: 0.5,
   9: 3.3,
+  // Wave 2
+  10: 3.0,  // cobblestone — tougher than stone, needs pickaxe
+  11: 1.0,  // sand — shovel
+  12: 1.2,  // gravel — shovel
+  13: Infinity, // bedrock — unbreakable
+  14: 1.2,  // glass — fist or any tool
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -67,6 +85,12 @@ const BLOCK_PREFERRED_TOOL = {
   6: "axe",
   7: "pickaxe",
   9: "pickaxe",
+  // Wave 2
+  10: "pickaxe", // cobblestone
+  11: "shovel",  // sand
+  12: "shovel",  // gravel
+  // 13 bedrock: no tool matters — always Infinity hardness
+  // 14 glass: no preferred tool (any breaks it equally)
 };
 
 export const RECIPES = [
@@ -306,6 +330,19 @@ export const SMELTING_RECIPES = [
     inputItemId: "copper_ore",
     outputItemId: "copper_ingot",
     cookTimeMs: 2600,
+  },
+  // Wave 2 smelting
+  {
+    id: "cobblestone_to_stone",
+    inputItemId: "cobblestone",
+    outputItemId: "stone",
+    cookTimeMs: 2000,
+  },
+  {
+    id: "sand_to_glass",
+    inputItemId: "sand",
+    outputItemId: "glass",
+    cookTimeMs: 1600,
   },
 ];
 

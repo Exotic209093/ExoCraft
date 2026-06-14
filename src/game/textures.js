@@ -1,12 +1,16 @@
 import * as THREE from "three";
 
 const TILE_PX = 16;
-const ATLAS_COLS = 4;
-const ATLAS_ROWS = 4;
-const ATLAS_PX = TILE_PX * ATLAS_COLS;
+const ATLAS_COLS = 8;
+const ATLAS_ROWS = 8;
+// 1px gutter between tiles so mipmaps don't bleed across tile borders.
+const TILE_GUTTER = 1;
+const ATLAS_PX = (TILE_PX + TILE_GUTTER * 2) * ATLAS_COLS;
 
 // Atlas slot coordinates (col, row). Row 0 is the top row of the canvas.
+// Existing 14 tiles stay at the same logical [col, row] positions.
 const TILE = {
+  // --- existing tiles (rows 0-3, cols 0-3) ---
   grass_top:       [0, 0],
   grass_side:      [1, 0],
   dirt:            [2, 0],
@@ -21,6 +25,12 @@ const TILE = {
   furnace_front:   [3, 2],
   torch:           [0, 3],
   copper_ore:      [1, 3],
+  // --- new tiles (cols 4-7) ---
+  cobblestone:     [4, 0],
+  sand:            [5, 0],
+  gravel:          [6, 0],
+  bedrock:         [7, 0],
+  glass:           [4, 1],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -44,6 +54,16 @@ export const BLOCK_FACE_TILES = {
   8: { px: "torch", nx: "torch", py: "torch", ny: "torch", pz: "torch", nz: "torch" },
   // Copper ore: stone base with copper specks on every face.
   9: { px: "copper_ore", nx: "copper_ore", py: "copper_ore", ny: "copper_ore", pz: "copper_ore", nz: "copper_ore" },
+  // Cobblestone: uniform cracked stone.
+  10: { px: "cobblestone", nx: "cobblestone", py: "cobblestone", ny: "cobblestone", pz: "cobblestone", nz: "cobblestone" },
+  // Sand: warm sandy yellow.
+  11: { px: "sand", nx: "sand", py: "sand", ny: "sand", pz: "sand", nz: "sand" },
+  // Gravel: speckled grey-brown.
+  12: { px: "gravel", nx: "gravel", py: "gravel", ny: "gravel", pz: "gravel", nz: "gravel" },
+  // Bedrock: near-black, unbreakable.
+  13: { px: "bedrock", nx: "bedrock", py: "bedrock", ny: "bedrock", pz: "bedrock", nz: "bedrock" },
+  // Glass: transparent with opaque border.
+  14: { px: "glass", nx: "glass", py: "glass", ny: "glass", pz: "glass", nz: "glass" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -57,9 +77,16 @@ function shade(ctx, x, y, color) {
   ctx.fillRect(x, y, 1, 1);
 }
 
+// Pixel origin of a tile slot, accounting for per-tile gutter padding.
+function tileOrigin(col, row) {
+  const stride = TILE_PX + TILE_GUTTER * 2;
+  return { ox: col * stride + TILE_GUTTER, oy: row * stride + TILE_GUTTER };
+}
+
 function fillTile(ctx, col, row, baseColor) {
+  const { ox, oy } = tileOrigin(col, row);
   ctx.fillStyle = baseColor;
-  ctx.fillRect(col * TILE_PX, row * TILE_PX, TILE_PX, TILE_PX);
+  ctx.fillRect(ox, oy, TILE_PX, TILE_PX);
 }
 
 function rgb(r, g, b) {
@@ -67,8 +94,7 @@ function rgb(r, g, b) {
 }
 
 function paintGrassTop(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 1);
@@ -85,8 +111,7 @@ function paintGrassTop(ctx, col, row) {
 }
 
 function paintGrassSide(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   // Top 3 rows: grass; bottom: dirt; row 3 has tendrils stitching the two together.
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
@@ -113,8 +138,7 @@ function paintGrassSide(ctx, col, row) {
 }
 
 function paintDirt(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 3);
@@ -131,8 +155,7 @@ function paintDirt(ctx, col, row) {
 }
 
 function paintStone(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 4);
@@ -147,8 +170,7 @@ function paintStone(ctx, col, row) {
 }
 
 function paintWoodTop(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   const cx = (TILE_PX - 1) / 2;
   const cy = (TILE_PX - 1) / 2;
   for (let y = 0; y < TILE_PX; y += 1) {
@@ -169,8 +191,7 @@ function paintWoodTop(ctx, col, row) {
 }
 
 function paintWoodSide(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const stripe = (x % 4 === 0 || x % 4 === 3) ? -18 : 0;
@@ -186,11 +207,16 @@ function paintWoodSide(ctx, col, row) {
 }
 
 function paintLeaves(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 8);
+      // Leave ~18% of pixels transparent so the alpha-cutout material (alphaTest 0.5)
+      // produces Minecraft-style canopy gaps — sky shows through instead of solid green.
+      const hole = pixelNoise(x, y, 88);
+      if (hole < 0.18) {
+        continue; // alpha 0 < alphaTest 0.5 → discarded by shader
+      }
       // Base ≈ rgb(96, 168, 80) — Minecraft-ish leaves.
       let r = 96;
       let g = 168;
@@ -204,8 +230,7 @@ function paintLeaves(ctx, col, row) {
 }
 
 function paintCraftingTop(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 9);
@@ -221,8 +246,7 @@ function paintCraftingTop(ctx, col, row) {
 }
 
 function paintCraftingSide(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const plankRow = Math.floor(y / 4);
@@ -234,8 +258,7 @@ function paintCraftingSide(ctx, col, row) {
 }
 
 function paintFurnaceTop(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const border = x < 2 || y < 2 || x >= TILE_PX - 2 || y >= TILE_PX - 2;
@@ -249,8 +272,7 @@ function paintFurnaceTop(ctx, col, row) {
 }
 
 function paintFurnaceSide(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const stripe = (x === 0 || x === TILE_PX - 1) ? -32 : 0;
@@ -264,8 +286,7 @@ function paintFurnaceSide(ctx, col, row) {
 }
 
 function paintFurnaceFront(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const inOpening = x >= 4 && x < 12 && y >= 6 && y < 13;
@@ -297,8 +318,7 @@ function paintFurnaceFront(ctx, col, row) {
 }
 
 function paintTorch(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   // Dark backing with a vertical stick and a flame at the top.
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
@@ -322,8 +342,7 @@ function paintTorch(ctx, col, row) {
 }
 
 function paintCopperOre(ctx, col, row) {
-  const ox = col * TILE_PX;
-  const oy = row * TILE_PX;
+  const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
       const n = pixelNoise(x, y, 4);
@@ -349,6 +368,115 @@ function paintCopperOre(ctx, col, row) {
   }
 }
 
+function paintCobblestone(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 20);
+      // Cobblestone: mid-grey base with darker cracks forming irregular "stones".
+      // Crack pattern: sine-based grid offset per row gives irregular mortar lines.
+      const crackX = (x + Math.floor(Math.sin(y * 1.3 + 0.7) * 2)) % 5 === 0;
+      const crackY = (y + Math.floor(Math.sin(x * 1.7 + 1.1) * 2)) % 5 === 0;
+      let v;
+      if (crackX || crackY) {
+        v = 72 + (n < 0.4 ? -10 : 0);
+      } else {
+        v = 128 + (n < 0.18 ? -22 : n > 0.82 ? 18 : n < 0.45 ? -10 : 0);
+      }
+      shade(ctx, ox + x, oy + y, rgb(v, v, v + 2));
+    }
+  }
+}
+
+function paintSand(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 21);
+      const n2 = pixelNoise(x + 3, y + 5, 22);
+      // Warm sandy yellow with subtle grain variation.
+      let r = 228;
+      let g = 210;
+      let b = 142;
+      if (n < 0.15) { r -= 18; g -= 16; b -= 10; }
+      else if (n > 0.85) { r += 14; g += 12; b += 8; }
+      if (n2 < 0.12) { r -= 8; g -= 8; b -= 4; }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintGravel(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 23);
+      const n2 = pixelNoise(x * 2 + 1, y * 2 + 3, 24);
+      // Grey-brown gravel: speckled pebbles on a dark grey base.
+      let r;
+      let g;
+      let b;
+      if (n2 > 0.72) {
+        // Light pebble highlight
+        r = 170; g = 166; b = 162;
+      } else if (n2 < 0.18) {
+        // Dark crevice between pebbles
+        r = 92; g = 88; b = 84;
+      } else {
+        r = 130 + (n < 0.3 ? -18 : n > 0.75 ? 14 : 0);
+        g = 122 + (n < 0.3 ? -16 : n > 0.75 ? 12 : 0);
+        b = 114 + (n < 0.3 ? -14 : n > 0.75 ? 10 : 0);
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintBedrock(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 25);
+      const n2 = pixelNoise(x + 7, y + 9, 26);
+      // Very dark near-black with subtle lighter patches — unmistakably unbreakable.
+      let v;
+      if (n2 > 0.82) {
+        v = 62;
+      } else if (n < 0.15) {
+        v = 22;
+      } else {
+        v = 38 + (n < 0.4 ? -8 : n > 0.78 ? 12 : 0);
+      }
+      shade(ctx, ox + x, oy + y, rgb(v, v, v + 1));
+    }
+  }
+}
+
+function paintGlass(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      // Glass: transparent interior with a thin opaque white border.
+      const onBorder = x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1;
+      const innerBorder = x === 1 || y === 1 || x === TILE_PX - 2 || y === TILE_PX - 2;
+      if (onBorder) {
+        // Outer solid border.
+        shade(ctx, ox + x, oy + y, "rgba(220,240,255,255)");
+      } else if (innerBorder) {
+        shade(ctx, ox + x, oy + y, "rgba(200,228,248,180)");
+      } else {
+        // Interior: mostly transparent with a faint blue tint.
+        const glint = pixelNoise(x, y, 27);
+        if (glint > 0.92) {
+          shade(ctx, ox + x, oy + y, "rgba(255,255,255,120)");
+        } else {
+          shade(ctx, ox + x, oy + y, "rgba(180,220,255,30)");
+        }
+      }
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -366,6 +494,12 @@ function paintAtlas(ctx) {
   paintFurnaceFront(ctx, ...TILE.furnace_front);
   paintTorch(ctx, ...TILE.torch);
   paintCopperOre(ctx, ...TILE.copper_ore);
+  // New wave-2 tiles
+  paintCobblestone(ctx, ...TILE.cobblestone);
+  paintSand(ctx, ...TILE.sand);
+  paintGravel(ctx, ...TILE.gravel);
+  paintBedrock(ctx, ...TILE.bedrock);
+  paintGlass(ctx, ...TILE.glass);
 }
 
 export function createAtlasTexture() {
@@ -385,21 +519,35 @@ export function createAtlasTexture() {
 }
 
 // Returns the [u, v] rect for a named tile in atlas UV space (V=0 at bottom).
+// Insets by TILE_GUTTER pixels on each edge so mipmaps sample only within the tile.
 export function tileUvRect(tileName) {
   const slot = TILE[tileName];
-  if (!slot) {
-    return { uMin: 0, vMin: 0, uMax: 1 / ATLAS_COLS, vMax: 1 / ATLAS_ROWS };
-  }
-  const [col, rowFromTop] = slot;
-  const uMin = col / ATLAS_COLS;
-  const uMax = (col + 1) / ATLAS_COLS;
-  // Canvas row 0 is at the top; UV V=1 is also the top, so flip.
-  const vMin = 1 - (rowFromTop + 1) / ATLAS_ROWS;
-  const vMax = 1 - rowFromTop / ATLAS_ROWS;
+  const stride = TILE_PX + TILE_GUTTER * 2; // pixel stride per slot
+  const [col, rowFromTop] = slot || [0, 0];
+  // Pixel coordinates of the inset tile region within the atlas canvas.
+  const pxLeft   = col * stride + TILE_GUTTER;
+  const pxRight  = pxLeft + TILE_PX;
+  const pxTop    = rowFromTop * stride + TILE_GUTTER;
+  const pxBottom = pxTop + TILE_PX;
+  const uMin = pxLeft   / ATLAS_PX;
+  const uMax = pxRight  / ATLAS_PX;
+  // Canvas Y=0 is top; UV V=1 is top → invert.
+  const vMin = 1 - pxBottom / ATLAS_PX;
+  const vMax = 1 - pxTop    / ATLAS_PX;
   return { uMin, uMax, vMin, vMax };
 }
 
 export const ATLAS_TILE_PX = TILE_PX;
+
+// Transparency class for each block id.
+// 0 = opaque (default, not in map)
+// 1 = alpha-cutout (leaves: sky visible through gaps, same-class faces still culled)
+// 2 = full-transparent (glass: faces between same-class adjacent blocks are culled)
+// A face between two blocks of the SAME nonzero class is treated as interior (not exposed).
+export const BLOCK_TRANSPARENCY_CLASS = {
+  5:  1, // leaves — alpha cutout
+  14: 2, // glass — full transparent
+};
 
 // ----- Item icon canvases -----
 // Returns a lazily-painted atlas canvas (shared, painted once).
@@ -438,6 +586,11 @@ const ITEM_CHIP_COLORS = {
   stone_shovel:       "#8890a0",
   reinforced_pickaxe: "#7090b0",
   copper_pickaxe:     "#c87040",
+  // Wave 2 block items
+  cobblestone:        "#808080",
+  sand:               "#e4d28e",
+  gravel:             "#827a72",
+  glass:              "#b4dcf8",
 };
 
 const ICON_SIZE = 32;
@@ -470,8 +623,7 @@ export function getItemIconCanvas(itemId, placeBlockType) {
     const slot = TILE[tileName];
     if (slot) {
       const [col, row] = slot;
-      const srcX = col * TILE_PX;
-      const srcY = row * TILE_PX;
+      const { ox: srcX, oy: srcY } = tileOrigin(col, row);
       ctx.drawImage(getAtlasCanvas(), srcX, srcY, TILE_PX, TILE_PX, 0, 0, ICON_SIZE, ICON_SIZE);
       drawnFromAtlas = true;
     }

@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -37,23 +37,48 @@ function setBoundedCache(cache, key, value) {
 
 // One shared material per emissive variant. Most blocks use the opaque atlas material;
 // emissive blocks (torch, copper ore) use a tinted clone so they self-light.
+// Transparent blocks (glass, leaves) use alpha-aware clones.
 export function createBlockMaterials(blockTypes, atlasTexture) {
   const baseMaterial = new THREE.MeshLambertMaterial({
     map: atlasTexture,
     transparent: false,
     alphaTest: 0,
   });
+  // Alpha-cutout material for leaves (class 1): geometry stays opaque, sky peeks
+  // through pixels below the alpha threshold — no depth-sort needed.
+  const alphaCutoutMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: false,
+    alphaTest: 0.5,
+    side: THREE.DoubleSide,
+  });
+  // Full-transparent material for glass (class 2): depth-sorted, no depthWrite so
+  // blocks behind render correctly.
+  const glassMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: true,
+    opacity: 1.0,
+    depthWrite: false,
+    alphaTest: 0.05,
+  });
+
   const materials = new Map();
   for (const block of blockTypes) {
-    if (block.emissive && block.emissive !== 0x000000) {
-      const emissiveMaterial = baseMaterial.clone();
-      emissiveMaterial.emissive = new THREE.Color(block.emissive);
-      emissiveMaterial.emissiveMap = atlasTexture;
-      emissiveMaterial.emissiveIntensity = Number.isFinite(block.emissiveIntensity) ? block.emissiveIntensity : 0.3;
-      materials.set(block.id, emissiveMaterial);
+    const tclass = BLOCK_TRANSPARENCY_CLASS[block.id] || 0;
+    let mat;
+    if (tclass === 2) {
+      mat = glassMaterial;
+    } else if (tclass === 1) {
+      mat = alphaCutoutMaterial;
+    } else if (block.emissive && block.emissive !== 0x000000) {
+      mat = baseMaterial.clone();
+      mat.emissive = new THREE.Color(block.emissive);
+      mat.emissiveMap = atlasTexture;
+      mat.emissiveIntensity = Number.isFinite(block.emissiveIntensity) ? block.emissiveIntensity : 0.3;
     } else {
-      materials.set(block.id, baseMaterial);
+      mat = baseMaterial;
     }
+    materials.set(block.id, mat);
   }
   return materials;
 }
@@ -306,6 +331,11 @@ export class VoxelWorld {
       return 0;
     }
 
+    // Bedrock: always present at y=0.
+    if (y === 0) {
+      return 13;
+    }
+
     const g = this.generation;
     const topY = this.surfaceHeight(worldX, worldZ);
     if (y <= topY) {
@@ -473,8 +503,24 @@ export class VoxelWorld {
   }
 
   hasExposedFace(worldX, y, worldZ) {
+    const selfType = this.get(worldX, y, worldZ);
+    const selfClass = BLOCK_TRANSPARENCY_CLASS[selfType] || 0;
     for (const [dx, dy, dz] of CARDINAL_DIRECTIONS) {
-      if (this.get(worldX + dx, y + dy, worldZ + dz) === 0) {
+      const neighborType = this.get(worldX + dx, y + dy, worldZ + dz);
+      if (neighborType === 0) {
+        // Face borders air — always exposed.
+        return true;
+      }
+      const neighborClass = BLOCK_TRANSPARENCY_CLASS[neighborType] || 0;
+      // A face is exposed when:
+      // 1. The neighbor is transparent (any class > 0) and self is opaque — the
+      //    opaque block must render its face so it shows through glass/leaves.
+      // 2. Self is transparent and the neighbor is a different transparency class
+      //    (e.g. glass next to opaque stone, or glass next to leaves).
+      if (neighborClass !== 0 && selfClass === 0) {
+        return true;
+      }
+      if (selfClass !== 0 && neighborClass !== selfClass) {
         return true;
       }
     }
@@ -591,6 +637,12 @@ export class VoxelWorld {
         mesh.setMatrixAt(i / 3, this.tempMatrix);
       }
       mesh.instanceMatrix.needsUpdate = true;
+      // Transparent blocks must draw after all opaque geometry so depth blending
+      // works correctly. renderOrder 1 > default 0.
+      const tclass = BLOCK_TRANSPARENCY_CLASS[blockType.id] || 0;
+      if (tclass !== 0) {
+        mesh.renderOrder = 1;
+      }
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }
