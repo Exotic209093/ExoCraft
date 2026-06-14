@@ -31,6 +31,8 @@ const TILE = {
   gravel:          [6, 0],
   bedrock:         [7, 0],
   glass:           [4, 1],
+  // Wave 5
+  water:           [5, 1],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -64,6 +66,8 @@ export const BLOCK_FACE_TILES = {
   13: { px: "bedrock", nx: "bedrock", py: "bedrock", ny: "bedrock", pz: "bedrock", nz: "bedrock" },
   // Glass: transparent with opaque border.
   14: { px: "glass", nx: "glass", py: "glass", ny: "glass", pz: "glass", nz: "glass" },
+  // Water: same tile on all faces.
+  15: { px: "water", nx: "water", py: "water", ny: "water", pz: "water", nz: "water" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -477,6 +481,31 @@ function paintGlass(ctx, col, row) {
   }
 }
 
+function paintWater(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      // Animated-looking still water: diagonal wave pattern + noise variation.
+      const wave = Math.sin((x + y) * 0.9 + 1.3) * 0.5 + 0.5;
+      const n = pixelNoise(x, y, 30);
+      const n2 = pixelNoise(x + 5, y + 3, 31);
+      // Base deep blue; lighter crests, darker troughs.
+      let r = 28  + Math.floor(wave * 22) + (n > 0.78 ? 20 : 0);
+      let g = 80  + Math.floor(wave * 28) + (n > 0.78 ? 18 : 0);
+      let b = 180 + Math.floor(wave * 40) + (n2 < 0.12 ? -20 : 0);
+      // Bright specular glint on some pixels
+      if (n > 0.93) { r += 40; g += 40; b += 20; }
+      // Clamp
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
+      // Semi-transparent: alpha ~168 (≈66%) gives a nice translucent water look.
+      ctx.fillStyle = `rgba(${r},${g},${b},168)`;
+      ctx.fillRect(ox + x, oy + y, 1, 1);
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -500,6 +529,8 @@ function paintAtlas(ctx) {
   paintGravel(ctx, ...TILE.gravel);
   paintBedrock(ctx, ...TILE.bedrock);
   paintGlass(ctx, ...TILE.glass);
+  // Wave 5
+  paintWater(ctx, ...TILE.water);
 }
 
 export function createAtlasTexture() {
@@ -547,6 +578,7 @@ export const ATLAS_TILE_PX = TILE_PX;
 export const BLOCK_TRANSPARENCY_CLASS = {
   5:  1, // leaves — alpha cutout
   14: 2, // glass — full transparent
+  15: 2, // water — full transparent (water-water faces culled; water-air/solid faces emitted)
 };
 
 // ----- Item icon canvases -----
@@ -591,6 +623,8 @@ const ITEM_CHIP_COLORS = {
   sand:               "#e4d28e",
   gravel:             "#827a72",
   glass:              "#b4dcf8",
+  // Wave 5
+  water:              "#2b6ccc",
 };
 
 const ICON_SIZE = 32;

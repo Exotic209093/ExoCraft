@@ -33,6 +33,8 @@ const DEFAULT_GAME_CONFIG = {
       { id: 12, name: "Gravel", color: 0x827a72 },
       { id: 13, name: "Bedrock", color: 0x262626 },
       { id: 14, name: "Glass", color: 0xb4dcf8, transparent: true },
+      // Wave 5
+      { id: 15, name: "Water", color: 0x2b6ccc, transparent: true },
     ],
     generation: {
       seed: 1337,
@@ -73,6 +75,14 @@ const DEFAULT_GAME_CONFIG = {
       caveDetailFrequency: 0.18,
       caveDetailStrength: 0.20,
       caveMinRoofDepth: 5,
+
+      // --- Water (Wave 5) ---
+      // Sea level at Y=38: valleys (~Y28) fill nicely as oceans; surface (~Y48) stays
+      // above water so the player spawns on land. 10-block margin gives visible coastline.
+      seaLevel: 38,
+      // Beach: replace top dirt/grass with sand when the surface is within this many
+      // blocks above sea level (visible shoreline band around every body of water).
+      beachWidth: 4,
 
       // --- Copper ore (objective system must stay reachable) ---
       // Surface nodes: just below the surface, same relative depth as before

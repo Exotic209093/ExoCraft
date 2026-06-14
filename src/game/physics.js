@@ -20,6 +20,16 @@ export function aabbIntersectsBlock(aabb, x, y, z) {
   );
 }
 
+// Block ids that the player can move through (passable for collision purposes).
+// Water is passable — the player enters and swims; buoyancy is handled in main.js.
+const PASSABLE_BLOCKS = new Set([
+  15, // water
+]);
+
+function isPassable(blockType) {
+  return blockType === 0 || PASSABLE_BLOCKS.has(blockType);
+}
+
 function aabbCollidesWorld(aabb, world, epsilon) {
   const minX = Math.floor(aabb.minX);
   const maxX = Math.floor(aabb.maxX - epsilon);
@@ -31,7 +41,7 @@ function aabbCollidesWorld(aabb, world, epsilon) {
   for (let y = minY; y <= maxY; y += 1) {
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (world.get(x, y, z) === 0) {
+        if (isPassable(world.get(x, y, z))) {
           continue;
         }
         if (aabbIntersectsBlock(aabb, x, y, z)) {
@@ -71,7 +81,7 @@ export function resolveAxis({
   for (let y = minY; y <= maxY; y += 1) {
     for (let z = minZ; z <= maxZ; z += 1) {
       for (let x = minX; x <= maxX; x += 1) {
-        if (world.get(x, y, z) === 0) {
+        if (isPassable(world.get(x, y, z))) {
           continue;
         }
         if (!aabbIntersectsBlock(aabb, x, y, z)) {

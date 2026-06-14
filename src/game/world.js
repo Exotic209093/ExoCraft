@@ -138,6 +138,13 @@ const BLOCK_LIGHT_EMIT = {
   9: 3,   // copper ore
 };
 
+// Block types that allow light (sky + block) to propagate through them.
+// Air (0) is always passable; any id in this set is also passable.
+// Water passes light so underwater areas aren't pitch black by day.
+const LIGHT_PASSABLE = new Set([
+  15, // water
+]);
+
 function toChunkKey(cx, cz) {
   return `${cx},${cz}`;
 }
@@ -252,11 +259,32 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   });
   applyLightingShaderPatch(glassMaterial);
 
+  // Water material: same class 2 path but named separately so wave 8 lava can fork it.
+  // Uses the same atlas + lighting shader; the water tile's per-pixel alpha (~168/255)
+  // gives natural translucency without needing a separate opacity parameter.
+  const waterMaterial = new THREE.MeshLambertMaterial({
+    map: atlasTexture,
+    transparent: true,
+    opacity: 1.0,
+    depthWrite: false,
+    alphaTest: 0.02,
+    vertexColors: true,
+  });
+  applyLightingShaderPatch(waterMaterial);
+
+  // Block id -> material override for blocks that need a specific material
+  // beyond what their transparency class dictates (water differs from glass).
+  const BLOCK_MATERIAL_OVERRIDE = {
+    15: waterMaterial, // water uses its own material, not the shared glassMaterial
+  };
+
   const materials = new Map();
   for (const block of blockTypes) {
     const tclass = BLOCK_TRANSPARENCY_CLASS[block.id] || 0;
     let mat;
-    if (tclass === 2) {
+    if (BLOCK_MATERIAL_OVERRIDE[block.id]) {
+      mat = BLOCK_MATERIAL_OVERRIDE[block.id];
+    } else if (tclass === 2) {
       mat = glassMaterial;
     } else if (tclass === 1) {
       mat = alphaCutoutMaterial;
@@ -277,8 +305,9 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   const opaqueMat = baseMaterial;
   const leafMat = alphaCutoutMaterial;
   const glassMat = glassMaterial;
+  const waterMat = waterMaterial;
 
-  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat };
+  return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat };
 }
 
 // ---------------------------------------------------------------------------
@@ -599,13 +628,19 @@ export class VoxelWorld {
     }
 
     const g = this.generation;
+    const seaLevel = Number.isFinite(g.seaLevel) ? g.seaLevel : 38;
+    const beachWidth = Number.isFinite(g.beachWidth) ? g.beachWidth : 4;
     const topY = this.surfaceHeight(worldX, worldZ);
+
     if (y <= topY) {
       let baseType = 3;
       if (y === topY) {
-        baseType = 1;
+        // Near-shore: replace grass/dirt top with sand for beaches.
+        // A column is a beach if its surface is within beachWidth blocks above seaLevel.
+        baseType = (topY <= seaLevel + beachWidth) ? 11 : 1;
       } else if (y >= topY - 2) {
-        baseType = 2;
+        // Sub-surface layer: also sand near shoreline, otherwise dirt.
+        baseType = (topY <= seaLevel + beachWidth) ? 11 : 2;
       }
 
       if (baseType === 3) {
@@ -624,6 +659,13 @@ export class VoxelWorld {
       }
 
       return baseType;
+    }
+
+    // Above the terrain surface: check for water fill first.
+    // Any air voxel at or below seaLevel becomes water.
+    if (y <= seaLevel) {
+      // Trees and leaves don't grow below sea level — place water unconditionally.
+      return 15; // WATER
     }
 
     const treeAtColumn = this.getTreeInfo(worldX, worldZ);
@@ -892,7 +934,7 @@ export class VoxelWorld {
         let open = true;
         for (let y = H - 1; y >= 0; y -= 1) {
           const block = this.get(wx, y, wz);
-          if (block !== 0) {
+          if (block !== 0 && !LIGHT_PASSABLE.has(block)) {
             open = false;
           }
           if (open) {
@@ -1007,9 +1049,9 @@ export class VoxelWorld {
         if (nlx < 0 || nlx >= S || nlz < 0 || nlz >= S) continue;
         const nidx = lIndex(nlx, ny, nlz);
         if (nextLevel <= skylight[nidx]) continue;
-        // Only propagate through air / transparent blocks
+        // Only propagate through air or light-passable blocks (water etc.)
         const block = this.get(nx, ny, nz);
-        if (block !== 0) continue;
+        if (block !== 0 && !LIGHT_PASSABLE.has(block)) continue;
         skylight[nidx] = nextLevel;
         queue.push(nx, ny, nz, nextLevel);
       }
@@ -1109,7 +1151,7 @@ export class VoxelWorld {
         const nidx = lIndex(nlx, ny, nlz);
         if (nextLevel <= blocklight[nidx]) continue;
         const block = this.get(nx, ny, nz);
-        if (block !== 0) continue;
+        if (block !== 0 && !LIGHT_PASSABLE.has(block)) continue;
         blocklight[nidx] = nextLevel;
         blQueue.push(nx, ny, nz, nextLevel);
       }
@@ -1176,7 +1218,7 @@ export class VoxelWorld {
     const lIndex = (lx, ly, lz) => lx + S * (lz + S * ly);
 
     // Geometry buffers for opaque and transparent faces.
-    // We keep leaves and glass separate because they need different material params.
+    // We keep leaves, glass, and water separate because they need different material params.
     const opaquePos  = [];
     const opaqueNorm = [];
     const opaqueUv   = [];
@@ -1192,6 +1234,11 @@ export class VoxelWorld {
     const glassUv    = [];
     const glassCol   = [];
     const glassIdx   = [];
+    const waterPos   = [];
+    const waterNorm  = [];
+    const waterUv    = [];
+    const waterCol   = [];
+    const waterIdx   = [];
 
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
@@ -1203,9 +1250,14 @@ export class VoxelWorld {
 
           const tclass = BLOCK_TRANSPARENCY_CLASS[blockType] || 0;
 
-          // Pick which buffer set to push into
+          // Pick which buffer set to push into.
+          // Water (id 15) gets its own buffer even though it's also tclass=2,
+          // so it renders on top of glass with its own material.
           let posArr, normArr, uvArr, colArr, idxArr;
-          if (tclass === 2) {
+          if (blockType === 15) {
+            posArr  = waterPos;  normArr = waterNorm; uvArr = waterUv;
+            colArr  = waterCol;  idxArr  = waterIdx;
+          } else if (tclass === 2) {
             posArr  = glassPos;  normArr = glassNorm; uvArr = glassUv;
             colArr  = glassCol;  idxArr  = glassIdx;
           } else if (tclass === 1) {
@@ -1370,6 +1422,16 @@ export class VoxelWorld {
     if (glassGeo) {
       const mesh = new THREE.Mesh(glassGeo, mats.glass);
       mesh.renderOrder = 2;
+      chunk.meshes.push(mesh);
+      this.meshGroup.add(mesh);
+    }
+
+    // Water rendered last (renderOrder 3) — after all other transparent geometry.
+    const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterIdx);
+    if (waterGeo) {
+      const mesh = new THREE.Mesh(waterGeo, mats.water);
+      mesh.renderOrder = 3;
+      mesh.userData.isWater = true;
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }

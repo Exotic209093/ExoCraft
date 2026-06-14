@@ -58,6 +58,8 @@ const SAND_BLOCK_TYPE = 11;
 const GRAVEL_BLOCK_TYPE = 12;
 const BEDROCK_BLOCK_TYPE = 13;
 const GLASS_BLOCK_TYPE = 14;
+// Wave 5 block type ids
+const WATER_BLOCK_TYPE = 15;
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -130,6 +132,10 @@ scene.background = new THREE.Color(renderConfig.backgroundColor);
 scene.fog = new THREE.Fog(renderConfig.backgroundColor, renderConfig.fogNear, renderConfig.fogFar);
 const daySkyColor = new THREE.Color(renderConfig.backgroundColor);
 const nightSkyColor = new THREE.Color(0x10182a);
+// Underwater fog: deep blue tint with short draw distance to feel immersed.
+const underwaterFogColor = new THREE.Color(0x0a3a7a);
+const UNDERWATER_FOG_NEAR = 2;
+const UNDERWATER_FOG_FAR  = 16;
 const dayGroundColor = new THREE.Color(lightingConfig.hemisphere.groundColor);
 const nightGroundColor = new THREE.Color(0x1b2029);
 const daySunColor = new THREE.Color(lightingConfig.sun.color);
@@ -525,6 +531,9 @@ const state = {
   cameraFov: renderConfig.fov,
   targetFov: renderConfig.fov,
   isSprinting: false,
+  // Wave 5: water submersion state
+  inWater: false,       // true when player body (torso/feet) is in water
+  eyeInWater: false,    // true when the camera eye voxel is water
 };
 
 // Automation runs should advance only through window.advanceTime().
@@ -3697,7 +3706,8 @@ async function loadGame() {
 
 function hitTest(ndcX = 0, ndcY = 0, maxDistance = worldConfig.maxReach) {
   raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
-  const hits = raycaster.intersectObjects(world.meshGroup.children, false);
+  const solidMeshes = world.meshGroup.children.filter(m => !m.userData.isWater);
+  const hits = raycaster.intersectObjects(solidMeshes, false);
   for (const hit of hits) {
     if (hit.distance <= maxDistance) {
       return hit;
@@ -3725,7 +3735,7 @@ function updateTargetBlockFromCenter() {
 
   const coords = toBlockCoords(hit.point, normal, -1);
   const type = world.get(coords.x, coords.y, coords.z);
-  if (type === 0) {
+  if (type === 0 || type === WATER_BLOCK_TYPE) {
     state.targetBlock = null;
     targetOutline.visible = false;
     hideCrackOverlay();
@@ -3770,7 +3780,7 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
   const type = world.get(coords.x, coords.y, coords.z);
-  if (type === 0 || coords.y === 0 || type === BEDROCK_BLOCK_TYPE) {
+  if (type === 0 || type === WATER_BLOCK_TYPE || coords.y === 0 || type === BEDROCK_BLOCK_TYPE) {
     state.breakProgress.targetKey = null;
     state.breakProgress.amount = 0;
     return false;
@@ -3943,7 +3953,7 @@ function pickSpawnPoint() {
       const z = centerZ + dz;
       const y = world.findSurfaceY(x, z);
       const surfaceType = world.get(x, y, z);
-      if (surfaceType === 0 || surfaceType === WOOD_BLOCK_TYPE || surfaceType === LEAF_BLOCK_TYPE) {
+      if (surfaceType === 0 || surfaceType === WATER_BLOCK_TYPE || surfaceType === WOOD_BLOCK_TYPE || surfaceType === LEAF_BLOCK_TYPE) {
         continue;
       }
       if (!world.isWithinVerticalBounds(y + 2)) {
@@ -3980,7 +3990,11 @@ function pickSpawnPoint() {
     }
   }
 
-  const fallbackY = world.findSurfaceY(centerX, centerZ);
+  // findSurfaceY may return a water block; scan down to find the first solid surface.
+  let fallbackY = world.findSurfaceY(centerX, centerZ);
+  while (fallbackY > 0 && world.get(centerX, fallbackY, centerZ) === WATER_BLOCK_TYPE) {
+    fallbackY -= 1;
+  }
   const best = bestCandidate || { x: centerX, z: centerZ, y: fallbackY };
   let bestYaw = Math.PI;
   let bestDistance = -1;
@@ -4195,64 +4209,150 @@ function updateSimulation(dtSeconds) {
   const rightZ = -sinYaw;
   const moveSpeed = getCurrentMoveSpeed();
 
-  state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
-  state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * moveSpeed;
-  state.playerVel.y += playerConfig.gravity * dtSeconds;
-  const wasOnGround = state.onGround;
-  const impactVelocityY = state.playerVel.y;
-  let jumpedThisFrame = false;
+  // --- Water submersion test ---
+  // Sample the block at the player's body center (waist) and eye to detect water.
+  const bodyTestY  = Math.floor(state.playerPos.y + playerConfig.height * 0.4);
+  const eyeTestX   = Math.floor(state.playerPos.x);
+  const eyeTestY   = Math.floor(state.playerPos.y + playerConfig.eyeHeight);
+  const eyeTestZ   = Math.floor(state.playerPos.z);
+  const bodyBlock  = world.get(eyeTestX, bodyTestY, eyeTestZ);
+  const eyeBlock   = world.get(eyeTestX, eyeTestY,  eyeTestZ);
+  state.inWater    = bodyBlock === WATER_BLOCK_TYPE;
+  state.eyeInWater = eyeBlock  === WATER_BLOCK_TYPE;
 
-  if (state.jumpQueued && state.onGround) {
-    state.playerVel.y = playerConfig.jumpSpeed;
+  // Water movement constants
+  const WATER_SWIM_SPEED        = moveSpeed * 0.55;
+  const WATER_BUOYANCY_VEL      = 6.0;
+  const WATER_GRAVITY_FACTOR    = 0.18;
+  // Exponential vertical damping: half-life ~0.17s → terminal sink ~2-3 m/s.
+  const WATER_VERTICAL_DAMP     = 4.0;
+  const WATER_MAX_SINK          = 3.0;
+
+  if (state.inWater) {
+    // --- IN WATER: buoyancy + swim physics ---
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * WATER_SWIM_SPEED;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * WATER_SWIM_SPEED;
+
+    // Space swims upward regardless of onGround state.
+    if (state.jumpQueued) {
+      state.playerVel.y = WATER_BUOYANCY_VEL;
+    } else {
+      state.playerVel.y += playerConfig.gravity * WATER_GRAVITY_FACTOR * dtSeconds;
+    }
+    state.jumpQueued = false;
+
+    // Exponential vertical damping + hard sink-speed cap.
+    state.playerVel.y *= Math.exp(-WATER_VERTICAL_DAMP * dtSeconds);
+    state.playerVel.y = Math.max(state.playerVel.y, -WATER_MAX_SINK);
+
     state.onGround = false;
-    state.recentAction = "Jumped";
-    jumpedThisFrame = true;
-    playJumpSound();
+    resolveAxis({
+      axis: "x",
+      delta: state.playerVel.x * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    resolveAxis({
+      axis: "y",
+      delta: state.playerVel.y * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    resolveAxis({
+      axis: "z",
+      delta: state.playerVel.z * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    // No fall damage when landing in water. Clamp downward velocity against floor.
+    if (state.onGround && state.playerVel.y < 0) {
+      state.playerVel.y = 0;
+    }
+  } else {
+    // --- ON LAND: original physics (unchanged) ---
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * moveSpeed;
+    state.playerVel.y += playerConfig.gravity * dtSeconds;
+    const wasOnGround = state.onGround;
+    const impactVelocityY = state.playerVel.y;
+    let jumpedThisFrame = false;
+
+    if (state.jumpQueued && state.onGround) {
+      state.playerVel.y = playerConfig.jumpSpeed;
+      state.onGround = false;
+      state.recentAction = "Jumped";
+      jumpedThisFrame = true;
+      playJumpSound();
+    }
+    state.jumpQueued = false;
+
+    state.onGround = false;
+    const allowStepUp = wasOnGround && !jumpedThisFrame && playerConfig.stepHeight > 0;
+    resolveAxis({
+      axis: "x",
+      delta: state.playerVel.x * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+      allowStepUp,
+      stepHeight: playerConfig.stepHeight,
+    });
+    resolveAxis({
+      axis: "y",
+      delta: state.playerVel.y * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+    });
+    resolveAxis({
+      axis: "z",
+      delta: state.playerVel.z * dtSeconds,
+      state,
+      world,
+      playerRadius: playerConfig.radius,
+      playerHeight: playerConfig.height,
+      epsilon: simConfig.epsilon,
+      allowStepUp,
+      stepHeight: playerConfig.stepHeight,
+    });
+
+    if (!wasOnGround && state.onGround && impactVelocityY < -playerConfig.fallDamageSafeSpeed) {
+      const overSpeed = Math.abs(impactVelocityY) - playerConfig.fallDamageSafeSpeed;
+      const damage = overSpeed * playerConfig.fallDamageMultiplier;
+      takeDamage(damage, "fall");
+    }
+
+    if (state.onGround && state.playerVel.y < 0) {
+      state.playerVel.y = 0;
+    }
   }
-  state.jumpQueued = false;
 
-  state.onGround = false;
-  const allowStepUp = wasOnGround && !jumpedThisFrame && playerConfig.stepHeight > 0;
-  resolveAxis({
-    axis: "x",
-    delta: state.playerVel.x * dtSeconds,
-    state,
-    world,
-    playerRadius: playerConfig.radius,
-    playerHeight: playerConfig.height,
-    epsilon: simConfig.epsilon,
-    allowStepUp,
-    stepHeight: playerConfig.stepHeight,
-  });
-  resolveAxis({
-    axis: "y",
-    delta: state.playerVel.y * dtSeconds,
-    state,
-    world,
-    playerRadius: playerConfig.radius,
-    playerHeight: playerConfig.height,
-    epsilon: simConfig.epsilon,
-  });
-  resolveAxis({
-    axis: "z",
-    delta: state.playerVel.z * dtSeconds,
-    state,
-    world,
-    playerRadius: playerConfig.radius,
-    playerHeight: playerConfig.height,
-    epsilon: simConfig.epsilon,
-    allowStepUp,
-    stepHeight: playerConfig.stepHeight,
-  });
-
-  if (!wasOnGround && state.onGround && impactVelocityY < -playerConfig.fallDamageSafeSpeed) {
-    const overSpeed = Math.abs(impactVelocityY) - playerConfig.fallDamageSafeSpeed;
-    const damage = overSpeed * playerConfig.fallDamageMultiplier;
-    takeDamage(damage, "fall");
-  }
-
-  if (state.onGround && state.playerVel.y < 0) {
-    state.playerVel.y = 0;
+  // --- Underwater fog override ---
+  // updateDayNight already set scene.fog to the sky/night color. If the camera eye
+  // is inside water, override fog to a deep-blue tint and pull the draw distance in.
+  // Restore normal fog as soon as the eye leaves water.
+  if (state.eyeInWater) {
+    scene.fog.color.copy(underwaterFogColor);
+    scene.fog.near = UNDERWATER_FOG_NEAR;
+    scene.fog.far  = UNDERWATER_FOG_FAR;
+    scene.background.copy(underwaterFogColor);
+  } else {
+    // Restore normal fog distances (color was already set by updateDayNight).
+    scene.fog.near = renderConfig.fogNear;
+    scene.fog.far  = renderConfig.fogFar;
   }
 
   // FOV lerp toward sprint target. Fast enough to feel responsive but not snappy.
@@ -4458,6 +4558,8 @@ window.render_game_to_text = () => {
       vy: Number(state.playerVel.y.toFixed(3)),
       vz: Number(state.playerVel.z.toFixed(3)),
       onGround: state.onGround,
+      inWater: state.inWater,
+      eyeInWater: state.eyeInWater,
       health: Number(state.health.toFixed(2)),
       maxHealth: state.maxHealth,
       moveSpeed: Number(getCurrentMoveSpeed().toFixed(3)),
@@ -4556,6 +4658,7 @@ window.render_game_to_text = () => {
       seed: world.getSeed(),
       chunkSize: world.chunkSize,
       worldHeight: world.height,
+      seaLevel: worldConfig.generation.seaLevel,
       activeRadius: world.activeRadius,
       loadedChunks: world.getLoadedChunkCount(),
       generatedChunks: world.getGeneratedChunkCount(),

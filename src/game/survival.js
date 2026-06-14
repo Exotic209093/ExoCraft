@@ -18,6 +18,8 @@ export const ITEM_DEFS = {
   gravel: { id: "gravel", name: "Gravel", placeBlockType: 12 },
   // Bedrock is not placeable by the player.
   glass: { id: "glass", name: "Glass", placeBlockType: 14 },
+  // Wave 5 — water is not placeable or obtainable by the player (bucket later)
+  water: { id: "water", name: "Water" },
   plank: { id: "plank", name: "Plank" },
   stick: { id: "stick", name: "Stick" },
   bone_shard: { id: "bone_shard", name: "Bone Shard" },
@@ -57,6 +59,7 @@ export const BLOCK_DROPS = {
   12: "gravel",
   // 13 = bedrock: no drop (handled by breakBlock guard)
   14: "glass",
+  // 15 = water: no drop (bucket mechanic deferred to wave 8)
 };
 
 const BLOCK_HARDNESS = {
@@ -75,6 +78,7 @@ const BLOCK_HARDNESS = {
   12: 1.2,  // gravel — shovel
   13: Infinity, // bedrock — unbreakable
   14: 1.2,  // glass — fist or any tool
+  15: Infinity, // water — not breakable (flow/bucket mechanic deferred)
 };
 
 const BLOCK_PREFERRED_TOOL = {
