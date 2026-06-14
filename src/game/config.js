@@ -74,6 +74,8 @@ const DEFAULT_GAME_CONFIG = {
       { id: 43, name: "Wood Stairs (E)", color: 0xc8a060 },
       { id: 44, name: "Wood Stairs (S)", color: 0xc8a060 },
       { id: 45, name: "Wood Stairs (W)", color: 0xc8a060 },
+      // Wave F7 — bed
+      { id: 46, name: "Bed", color: 0xcc3333 },
     ],
     generation: {
       seed: 1337,

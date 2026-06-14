@@ -146,6 +146,10 @@ const TALL_GRASS_BLOCK_TYPE   = 23;
 const FLOWER_BLOCK_TYPE       = 24;
 const SAPLING_BLOCK_TYPE      = 25;
 const CHEST_INTERACT_RADIUS   = 6;
+// Wave F7 — bed
+const BED_BLOCK_TYPE = 46;
+const BED_SLEEP_DAY_FACTOR_MAX = 0.25; // only sleep when night (dayFactor below this)
+const BED_MOB_CHECK_RADIUS = 8;        // hostile-mob proximity radius (blocks)
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -648,6 +652,8 @@ const state = {
   // Initialised to 0; grows with each tick. Not persisted — resets on load (phase 0 = full moon).
   _totalWorldTimeMs: 0,
   dayFactor: 1,
+  // Wave F7 — respawn point set by sleeping in a bed. null = world spawn.
+  spawnPoint: null,
   hostileMobCount: 0,
   objectiveIndex: 0,
   objectiveStats: createDefaultObjectiveStats(),
@@ -5503,11 +5509,12 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 8, // Wave F8: persist dayCount for deterministic moon phase
+    version: 10, // Wave F7: added spawnPoint; version 9 was the previous save format
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
     dayCount: Math.floor(state._totalWorldTimeMs / (simConfig.dayNightCycleMs || 1200000)),
+    spawnPoint: state.spawnPoint ? { x: state.spawnPoint.x, y: state.spawnPoint.y, z: state.spawnPoint.z } : null,
     player: {
       x: state.playerPos.x,
       y: state.playerPos.y,
@@ -5644,6 +5651,15 @@ async function loadGame() {
       const cycleMs = simConfig.dayNightCycleMs || 1200000;
       const savedDayCount = Number.isFinite(snapshot.dayCount) ? Math.max(0, Math.floor(snapshot.dayCount)) : 0;
       state._totalWorldTimeMs = savedDayCount * cycleMs + state.timeOfDayMs;
+    }
+    // Wave F7: restore bed spawn point. v<=9 saves have no spawnPoint field → null (world spawn).
+    {
+      const sp = snapshot.spawnPoint;
+      if (sp && Number.isFinite(sp.x) && Number.isFinite(sp.y) && Number.isFinite(sp.z)) {
+        state.spawnPoint = { x: sp.x, y: sp.y, z: sp.z };
+      } else {
+        state.spawnPoint = null;
+      }
     }
     markCraftPanelDirty();
     markInventoryPanelDirty();
@@ -5942,8 +5958,69 @@ function eatSelectedFood() {
   return true;
 }
 
+// Wave F7: attempt sleep at a bed. Returns status string: "slept"|"not-night"|"monsters"|"no-bed"|"no-target".
+// bedX/Y/Z: the block coordinates of the bed the player is right-clicking.
+// When force=true, skips day/night and monster checks (debug hook).
+function trySleeepInBed(bedX, bedY, bedZ, force = false) {
+  if (!force) {
+    if (state.dayFactor >= BED_SLEEP_DAY_FACTOR_MAX) {
+      state.recentAction = "You can only sleep during the night";
+      return "not-night";
+    }
+    // Check for hostile mobs within BED_MOB_CHECK_RADIUS blocks.
+    for (const mob of hostileMobs) {
+      const dx = mob.pos.x - state.playerPos.x;
+      const dy = mob.pos.y - state.playerPos.y;
+      const dz = mob.pos.z - state.playerPos.z;
+      if (dx * dx + dy * dy + dz * dz <= BED_MOB_CHECK_RADIUS * BED_MOB_CHECK_RADIUS) {
+        state.recentAction = "Monsters are nearby";
+        return "monsters";
+      }
+    }
+  }
+
+  // Fast-forward time to morning (dawn): set timeOfDayMs to the start of daytime (dayFactor ~1).
+  // In the day/night cycle, dawn is near 0 ms (the cycle starts at day).
+  // Advance the day counter by 1 so moon phase progresses correctly.
+  const cycleMs = simConfig.dayNightCycleMs || 240000;
+  // "Morning" = 25% into the cycle (matches initialTimeOfDayMs = 60000 = cycle*0.25, dayFactor 0.5).
+  // 0.10 was pitch-dark night (dayFactor ~0.095), below the 0.25 sleep gate and 0.20 mob-spawn band.
+  const morningMs = cycleMs * 0.25;
+  // Snap to next day's morning by advancing the total time.
+  const currentDay = Math.floor(state._totalWorldTimeMs / cycleMs);
+  const nextMorningTotal = (currentDay + 1) * cycleMs + morningMs;
+  state._totalWorldTimeMs = nextMorningTotal;
+  state.timeOfDayMs = normalizeTimeOfDayMs(morningMs);
+
+  // Set the respawn point to the cell just above the bed.
+  const safeY = bedY + 1; // one block above the top of the bed
+  state.spawnPoint = { x: bedX + 0.5, y: safeY + 0.1, z: bedZ + 0.5 };
+
+  // Restore a little health (optional, mirrors Minecraft).
+  state.health = Math.min(state.maxHealth, state.health + 1);
+
+  updateDayNight(0);
+  state.recentAction = "Good morning!";
+  refreshHud();
+  return "slept";
+}
+
 function placeBlock(ndcX = 0, ndcY = 0) {
   if (state.chestOpen) return false;
+  // Wave F7 — check if right-clicking a bed block before chest/item logic.
+  {
+    const bedHit = hitTest(ndcX, ndcY);
+    if (bedHit) {
+      const normal = getWorldNormal(bedHit);
+      if (normal) {
+        const coords = toBlockCoords(bedHit.point, normal, -1);
+        if (world.get(coords.x, coords.y, coords.z) === BED_BLOCK_TYPE) {
+          trySleeepInBed(coords.x, coords.y, coords.z);
+          return true;
+        }
+      }
+    }
+  }
   // Wave 10 — check if player is right-clicking a chest block (before item logic)
   {
     const chestHit = hitTest(ndcX, ndcY);
@@ -6203,7 +6280,28 @@ function pickSpawnPoint() {
 
 function respawnPlayer(options = {}) {
   const { healToMax = false } = options;
-  const spawn = pickSpawnPoint();
+  // Wave F7: use bed spawn point when set, falling back to world spawn if the bed
+  // position is obstructed (solid block at head or feet level) — same logic as Minecraft.
+  let spawn;
+  if (state.spawnPoint) {
+    const sp = state.spawnPoint;
+    const bx = Math.floor(sp.x);
+    const by = Math.floor(sp.y);
+    const bz = Math.floor(sp.z);
+    // Check the two player-height cells above the bed position are clear (air or passable).
+    const footClear = world.get(bx, by, bz) === 0 || PASSABLE_BLOCKS.has(world.get(bx, by, bz));
+    const headClear = world.get(bx, by + 1, bz) === 0 || PASSABLE_BLOCKS.has(world.get(bx, by + 1, bz));
+    if (footClear && headClear && world.inBounds(bx, by, bz)) {
+      spawn = { x: sp.x, y: sp.y, z: sp.z, yaw: Math.PI };
+    } else {
+      // Bed obstructed — fall back to world spawn and clear the point.
+      state.spawnPoint = null;
+      state.recentAction = "Spawn point obstructed — returned to world spawn";
+      spawn = pickSpawnPoint();
+    }
+  } else {
+    spawn = pickSpawnPoint();
+  }
   state.playerPos.set(spawn.x, spawn.y, spawn.z);
   state.playerVel.set(0, 0, 0);
   state.onGround = false;
@@ -6319,6 +6417,7 @@ function regenerateWorld() {
   if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
   state._totalWorldTimeMs = 0;
+  state.spawnPoint = null; // Wave F7: reset bed respawn point on regen
   respawnPlayer({ healToMax: true });
   state.recentAction = "Regenerated terrain";
   markCraftPanelDirty();
@@ -6353,6 +6452,7 @@ async function createNewWorld() {
   if (chestPanel) chestPanel.classList.add("hidden");
   state.timeOfDayMs = normalizeTimeOfDayMs(simConfig.initialTimeOfDayMs);
   state._totalWorldTimeMs = 0;
+  state.spawnPoint = null; // Wave F7: reset bed respawn point on new world
   state.inventory = createStartingInventory();
   state.selectedSlot = 0;
   respawnPlayer({ healToMax: true });
@@ -7277,6 +7377,15 @@ window.render_game_to_text = () => {
         return { key, slotCount: slots.filter(Boolean).length };
       })(),
     },
+    sleep: {
+      spawnPoint: state.spawnPoint ? { x: Number(state.spawnPoint.x.toFixed(3)), y: Number(state.spawnPoint.y.toFixed(3)), z: Number(state.spawnPoint.z.toFixed(3)) } : null,
+      canSleep: state.dayFactor < BED_SLEEP_DAY_FACTOR_MAX && !hostileMobs.some((m) => {
+        const dx = m.pos.x - state.playerPos.x;
+        const dy = m.pos.y - state.playerPos.y;
+        const dz = m.pos.z - state.playerPos.z;
+        return dx * dx + dy * dy + dz * dz <= BED_MOB_CHECK_RADIUS * BED_MOB_CHECK_RADIUS;
+      }),
+    },
     targetBlock: state.targetBlock,
     itemEntities: itemEntities.getState(),
     xp: {
@@ -7822,6 +7931,45 @@ window.__exoCraftDebug = {
     totalOrbs:    xpOrbs.getState().count,
   }),
   clearXpOrbs: () => { xpOrbs.clear(); return true; },
+  // Wave F7 — bed / sleep debug hooks
+  // sleepInBed() — force-attempts a sleep at the nearest bed within 16 blocks, or forces
+  // the sleep flow bypassing day/night and monster checks if force=true.
+  // Returns "slept"|"not-night"|"monsters"|"no-bed".
+  sleepInBed: (force = false) => {
+    // Find nearest bed block within 16 blocks of the player.
+    const px = Math.floor(state.playerPos.x);
+    const py = Math.floor(state.playerPos.y);
+    const pz = Math.floor(state.playerPos.z);
+    const radius = 16;
+    let nearest = null;
+    let nearestDist = Infinity;
+    for (let dy = -radius; dy <= radius; dy += 1) {
+      for (let dz = -radius; dz <= radius; dz += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) {
+          const bx = px + dx, by = py + dy, bz = pz + dz;
+          if (!world.inBounds(bx, by, bz)) continue;
+          if (world.get(bx, by, bz) === BED_BLOCK_TYPE) {
+            const d = dx * dx + dy * dy + dz * dz;
+            if (d < nearestDist) {
+              nearestDist = d;
+              nearest = { x: bx, y: by, z: bz };
+            }
+          }
+        }
+      }
+    }
+    if (!nearest) return "no-bed";
+    return trySleeepInBed(nearest.x, nearest.y, nearest.z, force);
+  },
+  getSpawnPoint: () => state.spawnPoint ? { ...state.spawnPoint } : null,
+  setSpawnPoint: (x, y, z) => {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      state.spawnPoint = null;
+      return null;
+    }
+    state.spawnPoint = { x: Number(x), y: Number(y), z: Number(z) };
+    return { ...state.spawnPoint };
+  },
 };
 
 function frame(now) {

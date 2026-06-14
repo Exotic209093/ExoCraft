@@ -52,6 +52,9 @@ const TILE = {
   spruce_side:     [7, 4],
   spruce_leaf:     [0, 5],
   snow:            [1, 5],
+  // Wave F7 — bed tiles (row 5, cols 2-3)
+  bed_top:         [2, 5],  // red mattress with white pillow band
+  bed_side:        [3, 5],  // side panel (wood frame + red mattress)
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -128,6 +131,8 @@ export const BLOCK_FACE_TILES = {
   43: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
   44: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
   45: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
+  // Wave F7 — bed (ID 46): red mattress top + white pillow band; wood-framed sides.
+  46: { px: "bed_side", nx: "bed_side", py: "bed_top", ny: "crafting_side", pz: "bed_side", nz: "bed_side" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -857,6 +862,66 @@ function paintSapling(ctx, col, row) {
   }
 }
 
+// Wave F7 — bed tiles
+function paintBedTop(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  // Red mattress base with a white pillow band across the top 5 rows.
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 110);
+      const inPillow = y < 5;
+      let r, g, b;
+      if (inPillow) {
+        // White pillow band with subtle crinkle noise
+        r = 248 + (n < 0.15 ? -14 : n > 0.88 ? 7 : 0);
+        g = 244 + (n < 0.15 ? -12 : n > 0.88 ? 7 : 0);
+        b = 240 + (n < 0.15 ? -10 : n > 0.88 ? 7 : 0);
+        // Pillow border stitching (dark red line at y=4 / bottom of pillow)
+        if (y === 4) { r = 160; g = 30; b = 30; }
+      } else {
+        // Red mattress with fabric noise
+        r = 192 + (n < 0.2 ? -28 : n > 0.82 ? 20 : 0);
+        g = 36  + (n < 0.2 ? -10 : n > 0.82 ? 10 : 0);
+        b = 36  + (n < 0.2 ? -10 : n > 0.82 ? 10 : 0);
+        // Thin vertical stripe "quilt" lines every 4 px
+        if (x % 4 === 0) { r -= 22; g -= 8; b -= 8; }
+      }
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+function paintBedSide(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  // Wood frame along top and bottom edges; red fabric fill in middle.
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 111);
+      const isFrame = y <= 1 || y >= TILE_PX - 2;
+      let r, g, b;
+      if (isFrame) {
+        // Wood frame: warm brown
+        const stripe = (x % 4 === 0 || x % 4 === 3) ? -18 : 0;
+        r = 180 + stripe + (n < 0.15 ? -18 : 0);
+        g = 128 + stripe + (n < 0.15 ? -12 : 0);
+        b = 70  + stripe + (n < 0.15 ? -8  : 0);
+      } else {
+        // Red mattress side
+        r = 186 + (n < 0.2 ? -24 : n > 0.84 ? 16 : 0);
+        g = 34  + (n < 0.2 ? -8  : n > 0.84 ? 8  : 0);
+        b = 34  + (n < 0.2 ? -8  : n > 0.84 ? 8  : 0);
+      }
+      r = Math.max(0, Math.min(255, r));
+      g = Math.max(0, Math.min(255, g));
+      b = Math.max(0, Math.min(255, b));
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -901,6 +966,9 @@ function paintAtlas(ctx) {
   paintSpruceSide(ctx,  ...TILE.spruce_side);
   paintSpruceLeaf(ctx,  ...TILE.spruce_leaf);
   paintSnow(ctx,        ...TILE.snow);
+  // Wave F7 — bed
+  paintBedTop(ctx,  ...TILE.bed_top);
+  paintBedSide(ctx, ...TILE.bed_side);
 }
 
 export function createAtlasTexture() {
@@ -968,6 +1036,8 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   34: 5, 35: 5, 36: 5, 37: 5,
   38: 5, 39: 5, 40: 5, 41: 5,
   42: 5, 43: 5, 44: 5, 45: 5,
+  // Wave F7 — bed: partial geometry, same class.
+  46: 5,
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -980,6 +1050,7 @@ export const SLAB_BLOCK_IDS = new Set([
   31, // stone slab
   32, // cobblestone slab
   33, // wood plank slab
+  46, // bed (low box ~0.55 height — emitted as flat slab geometry then stretched)
 ]);
 
 // Stairs: 4 orientation ids per material (N / E / S / W facing).
@@ -1111,6 +1182,8 @@ const ITEM_CHIP_COLORS = {
   diamond_boots:      "#60f0e0",
   // Wave 11 — flora/plant blocks
   tall_grass:         "#6ab040",
+  // Wave F7 — bed
+  bed:                "#cc3333",
   // Wave F4 — slabs and stairs
   stone_slab:         "#8890a0",
   cobblestone_slab:   "#808080",

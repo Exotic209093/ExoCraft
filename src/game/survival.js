@@ -140,6 +140,8 @@ export const ITEM_DEFS = {
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
   wood_slab:        { id: "wood_slab",        name: "Wood Slab",        placeBlockType: 33 },
+  // Wave F7 — bed
+  bed: { id: "bed", name: "Bed", placeBlockType: 46 },
   // Wave F4 — stair items (one item per material; placement chooses orientation id from yaw)
   // placeBlockType is the NORTH orientation by default; placement logic overrides this.
   stone_stairs:       { id: "stone_stairs",       name: "Stone Stairs",       placeBlockType: 34 },
@@ -297,6 +299,8 @@ export const BLOCK_DROPS = {
   28: "spruce_log",  // spruce log → spruce log item
   29: "spruce_leaf", // spruce leaf
   30: "snow_block",  // snow block → snow block item
+  // Wave F7 — bed: breaking returns the bed item
+  46: "bed",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -375,6 +379,8 @@ const BLOCK_HARDNESS = {
   34: 2.2,  35: 2.2,  36: 2.2,  37: 2.2,  // stone stairs
   38: 3.0,  39: 3.0,  40: 3.0,  41: 3.0,  // cobblestone stairs
   42: 1.5,  43: 1.5,  44: 1.5,  45: 1.5,  // wood stairs
+  // Wave F7 — bed: breaks quickly (soft material, no tool required)
+  46: 0.4,
   // Wave 12 — wood/snow variants
   26: 1.6,   // birch log — same as oak
   27: 0.8,   // birch leaf — same as oak leaf
@@ -1060,6 +1066,19 @@ export const RECIPES = [
     key: { X: "plank" },
     inputs: [{ itemId: "plank", count: 6 }],
     output: { itemId: "wood_stairs", count: 4 },
+    requiresWorkbench: true,
+  },
+  // Wave F7 — bed (3 wool over 3 planks: wool in top row, planks in bottom row)
+  {
+    id: "bed",
+    name: "Bed",
+    pattern: ["WWW", "PPP", "___"],
+    key: { W: "wool", P: "plank" },
+    inputs: [
+      { itemId: "wool",  count: 3 },
+      { itemId: "plank", count: 3 },
+    ],
+    output: { itemId: "bed", count: 1 },
     requiresWorkbench: true,
   },
   // Wave F5 — bucket (3 iron ingots in a U-shape: bottom row + left + right of middle row)
