@@ -1,4 +1,4 @@
-import { SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
+import { SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, DOOR_OPEN_IDS, TRAPDOOR_OPEN_IDS, TRAPDOOR_CLOSED_IDS } from "./textures";
 
 export function playerAABBAt(position, playerRadius, playerHeight) {
   return playerAABBInto({}, position, playerRadius, playerHeight);
@@ -35,6 +35,8 @@ export function aabbIntersectsBlock(aabb, x, y, z) {
 // Wave F4 — block-height-aware AABB test.
 // Slabs occupy the lower half of the cell; everything else is full-height.
 function getBlockTopY(blockType) {
+  // Wave G2b — a closed trapdoor is a thin floor you stand on (3/16 high).
+  if (TRAPDOOR_CLOSED_IDS.has(blockType)) return 0.1875;
   return SLAB_BLOCK_IDS.has(blockType) ? 0.5 : 1.0;
 }
 
@@ -119,6 +121,15 @@ export const PASSABLE_BLOCKS = new Set([
   23, // tall grass (Wave 11)
   24, // flower (Wave 11)
   25, // sapling (Wave 11)
+  // Wave G1 — wheat crop stages: non-colliding flora (farmland 51 is a solid full cube)
+  47, 48, 49, 50,
+  // Wave G2a — ladders (54-57): non-colliding; vertical climb is handled in updateSimulation.
+  // Fence (52) + glass pane (53) deliberately collide as full cubes (block movement; you can
+  // also stand on top — a minor v1 simplification vs Minecraft's 1.5-tall / thin boxes).
+  54, 55, 56, 57,
+  // Wave G2b — open doors + open trapdoors are walk-through. Closed doors collide as full
+  // cubes (not listed); closed trapdoors are thin floors via getBlockTopY (also not listed).
+  ...DOOR_OPEN_IDS, ...TRAPDOOR_OPEN_IDS,
 ]);
 
 function isPassable(blockType) {

@@ -51,6 +51,12 @@ import {
   getTotalDefense,
   ARMOR_DEFENSE,
   NON_STACKABLE,
+  // Wave G1 — farming
+  isHoe,
+  // Wave G3 — ranged
+  isBow,
+  // Wave G4 — shears
+  isShears,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
@@ -93,6 +99,19 @@ import {
   STAIR_BLOCK_IDS,
   PARTIAL_BLOCK_IDS,
   STAIR_BASE_IDS,
+  // Wave G2a — building
+  FENCE_BLOCK_IDS,
+  PANE_BLOCK_IDS,
+  LADDER_BLOCK_IDS,
+  // Wave G2b — doors + trapdoors
+  DOOR_BLOCK_IDS,
+  DOOR_LOWER_IDS,
+  DOOR_UPPER_IDS,
+  doorOrient,
+  doorIsOpen,
+  doorToggle,
+  TRAPDOOR_BLOCK_IDS,
+  trapdoorToggle,
 } from "./game/textures";
 import {
   ensureAudio as _ensureAudioModule,
@@ -150,6 +169,15 @@ const CHEST_INTERACT_RADIUS   = 6;
 const BED_BLOCK_TYPE = 46;
 const BED_SLEEP_DAY_FACTOR_MAX = 0.25; // only sleep when night (dayFactor below this)
 const BED_MOB_CHECK_RADIUS = 8;        // hostile-mob proximity radius (blocks)
+// Wave G1 — farming. Wheat crops are 4 distinct ids (47..50); growth = world.set(id+1).
+const WHEAT_STAGE_MIN = 47;
+const WHEAT_STAGE_MAX = 50; // mature, harvestable
+const FARMLAND_BLOCK_TYPE = 51;
+// Wave G4 — wool block + tuning.
+const WOOL_BLOCK_TYPE = 82;
+const WOOL_REGROW_MS = 120000;            // sheared sheep regrows wool after ~2 min on grass
+const HOSTILE_HARD_DESPAWN_DIST = 44;     // hostiles beyond this from the player vanish
+const HOSTILE_PER_TYPE_CAP = 4;           // at most this many of each hostile type at once
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -805,6 +833,11 @@ const hostileMobs = [];
 let passiveMobIdCounter = 1;
 const passiveMobs = [];
 let passiveSpawnAccumulatorMs = 0;
+// Wave G1 — crop growth: a deterministic bounded random-tick. Accumulator + seeded LCG
+// (state._cropTickSeed) so growth replays identically across reload/automation.
+let cropGrowthAccumMs = 0;
+const CROP_GROWTH_INTERVAL_MS = 2000;
+const CROP_CANDIDATES_PER_SCAN = 12;
 const PASSIVE_MOB_MAX_COUNT = 12;
 const PASSIVE_MOB_SPAWN_INTERVAL_MS = 3200;
 const PASSIVE_MOB_SPAWN_CHANCE = 0.55;
@@ -2596,8 +2629,37 @@ function getChestState(key, createIfMissing = true) {
   if (!chest && createIfMissing) {
     chest = createDefaultChestInventory();
     chestStates.set(key, chest);
+    // Wave G4 — a structure (hut) chest fills with deterministic loot the first time it's
+    // created; afterwards it persists as a normal chest, so it never re-fills.
+    if (world.structureChests && world.structureChests.has(key)) {
+      fillStructureChestLoot(chest, key);
+    }
   }
   return chest || null;
+}
+
+// Wave G4 — deterministic loot keyed by the chest's world position (no Math.random, so a
+// reload/regen before opening produces identical loot).
+function fillStructureChestLoot(chest, key) {
+  const [x, y, z] = key.split(",").map(Number);
+  let seed = ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0) || 1;
+  const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  const pool = [
+    { itemId: "bread", min: 1, max: 3 },
+    { itemId: "arrow", min: 2, max: 6 },
+    { itemId: "iron_ingot", min: 1, max: 2 },
+    { itemId: "coal", min: 1, max: 4 },
+    { itemId: "apple", min: 1, max: 2 },
+    { itemId: "wheat", min: 1, max: 3 },
+  ];
+  const stacks = 3 + Math.floor(rnd() * 3); // 3-5 stacks
+  for (let i = 0; i < stacks; i += 1) {
+    const item = pool[Math.floor(rnd() * pool.length)];
+    const count = item.min + Math.floor(rnd() * (item.max - item.min + 1));
+    const slot = Math.floor(rnd() * chest.length);
+    if (!chest[slot]) chest[slot] = { itemId: item.itemId, count };
+    else chest[slot].count = Math.min(64, chest[slot].count + count);
+  }
 }
 
 function serializeChests() {
@@ -2910,6 +2972,13 @@ function maybeSpawnHostileMob() {
   if (hostileMobs.length >= maxCount) {
     return;
   }
+  // Wave G4 — per-type spawn cap so one mob type can't monopolise the active set.
+  const typeCounts = {};
+  for (const mob of hostileMobs) typeCounts[mob.mobType] = (typeCounts[mob.mobType] || 0) + 1;
+  const allowedTypes = Object.keys(MOB_TYPES).filter((t) => (typeCounts[t] || 0) < HOSTILE_PER_TYPE_CAP);
+  if (allowedTypes.length === 0) {
+    return;
+  }
   const threshold = Number.isFinite(hostileMobConfig.spawnDayFactorThreshold)
     ? hostileMobConfig.spawnDayFactorThreshold
     : 0.56;
@@ -2951,7 +3020,9 @@ function maybeSpawnHostileMob() {
     if (tooClose) {
       continue;
     }
-    createHostileMob({ x, y, z });
+    // Force a type that is still under its per-type cap (Wave G4).
+    const forcedType = allowedTypes[Math.floor(Math.random() * allowedTypes.length)];
+    createHostileMob({ x, y, z }, null, forcedType);
     state.recentAction = "Hostile mob spawned";
     return;
   }
@@ -3043,6 +3114,45 @@ function spawnHostileMobAroundSite(site, preferredDistance = 2.6) {
     }
   }
   return null;
+}
+
+// Wave G1 — bounded deterministic crop-growth random-tick. Each interval, sample a fixed
+// number of candidate cells near the player via a seeded LCG; a wheat crop (47-49) sitting
+// on farmland and exposed to light advances one stage (world.set(id+1)). Cost per scan is
+// capped at CROP_CANDIDATES_PER_SCAN gets + at most that many single-chunk remeshes.
+function cropHasLight(x, y, z) {
+  // Open-to-sky (no skylight accessor exists) OR daytime — coarse but deterministic.
+  return state.dayFactor > 0.4 || world.findSurfaceY(x, z) <= y;
+}
+function updateCropGrowth(deltaMs) {
+  if (!world || deltaMs <= 0) return;
+  if (!Number.isFinite(state._cropTickSeed) || state._cropTickSeed === 0) {
+    state._cropTickSeed = ((world.getSeed() >>> 0) ^ 0x9e3779b9) >>> 0 || 1;
+  }
+  cropGrowthAccumMs += deltaMs;
+  const px = Math.floor(state.playerPos.x);
+  const py = Math.floor(state.playerPos.y);
+  const pz = Math.floor(state.playerPos.z);
+  while (cropGrowthAccumMs >= CROP_GROWTH_INTERVAL_MS) {
+    cropGrowthAccumMs -= CROP_GROWTH_INTERVAL_MS;
+    for (let n = 0; n < CROP_CANDIDATES_PER_SCAN; n += 1) {
+      // LCG step (Numerical Recipes constants).
+      state._cropTickSeed = (Math.imul(state._cropTickSeed, 1664525) + 1013904223) >>> 0;
+      const s = state._cropTickSeed;
+      const dx = ((s & 31) - 16);        // -16..15
+      const dz = (((s >>> 5) & 31) - 16);
+      const dy = (((s >>> 10) & 7) - 4);  // -4..3
+      const x = px + dx, y = py + dy, z = pz + dz;
+      if (!world.inBounds(x, y, z)) continue;
+      const b = world.get(x, y, z);
+      if (b >= WHEAT_STAGE_MIN && b < WHEAT_STAGE_MAX) {
+        if (world.get(x, y - 1, z) === FARMLAND_BLOCK_TYPE && cropHasLight(x, y, z)) {
+          world.set(x, y, z, b + 1);
+          world.rebuildEditedChunksNow(x, z);
+        }
+      }
+    }
+  }
 }
 
 // Settle pass: gravity blocks (sand, gravel) fall one step per tick when unsupported.
@@ -3259,6 +3369,136 @@ function updateArrowProjectiles(deltaMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Wave G3 — player bow + arrows. A SEPARATE projectile array from the skeleton
+// arrows above: these fly a gravity arc and damage MOBS (never the player).
+// ---------------------------------------------------------------------------
+const playerArrows = []; // { mesh, pos:Vec3, vel:{x,y,z}, damage, lifeMs, stuck }
+const BOW_DRAW_MS = 1000;       // full draw time (wall-clock for live play)
+const BOW_MIN_CHARGE = 0.15;    // below this the shot is too weak to fire
+const PA_MIN_SPEED = 14, PA_MAX_SPEED = 40;   // blocks/sec at min/full charge
+const PA_MIN_DAMAGE = 2, PA_MAX_DAMAGE = 9;
+const PA_GRAVITY = -10.0;       // blocks/sec²
+const PA_LIFE_MS = 6000;
+const PA_HIT_R2 = 0.65 * 0.65;
+
+function damageMobWithArrow(mob, amount, fromPos, hostile) {
+  if (!mob || isMobDying(mob)) return false;
+  mob.health -= Math.max(1, Math.floor(amount));
+  // light knockback away from the arrow
+  const kx = mob.pos.x - fromPos.x, kz = mob.pos.z - fromPos.z;
+  const kl = Math.hypot(kx, kz);
+  if (kl > 0.001) { mob.vel = mob.vel || new THREE.Vector3(); mob.vel.x = (kx / kl) * 5; mob.vel.y = 3.0; mob.vel.z = (kz / kl) * 5; }
+  if (mob.health <= 0) {
+    const mobTypeId = mob.mobType || (hostile ? "zombie" : "cow");
+    const dp = { x: mob.pos.x, y: mob.pos.y + (hostile ? 0 : 0.5), z: mob.pos.z };
+    if (hostile) {
+      rewardHostileMobDefeat(getSelectedItemId(), mobTypeId, dp);
+    } else {
+      for (const drop of rollPassiveMobDrops(mobTypeId)) itemEntities.spawnItemEntity(drop.itemId, drop.count, dp.x, dp.y, dp.z);
+      xpOrbs.spawnXp(1 + Math.floor(seededXpFloat(++_xpBreakCounter) * 3), dp.x, dp.y, dp.z);
+    }
+    markCraftPanelDirty(); markInventoryPanelDirty();
+    startMobDeath(mob);
+  } else {
+    triggerHurtFlash(mob);
+  }
+  return true;
+}
+
+function spawnPlayerArrow(charge) {
+  const c = Math.max(0, Math.min(1, charge));
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+  const speed = PA_MIN_SPEED + (PA_MAX_SPEED - PA_MIN_SPEED) * c;
+  const damage = Math.round(PA_MIN_DAMAGE + (PA_MAX_DAMAGE - PA_MIN_DAMAGE) * c);
+  const ox = state.playerPos.x + dir.x * 0.5;
+  const oy = state.playerPos.y + playerConfig.eyeHeight + dir.y * 0.5;
+  const oz = state.playerPos.z + dir.z * 0.5;
+  const mesh = createArrowMesh();
+  mesh.position.set(ox, oy, oz);
+  scene.add(mesh);
+  playerArrows.push({
+    mesh,
+    pos: new THREE.Vector3(ox, oy, oz),
+    vel: { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed },
+    damage, lifeMs: PA_LIFE_MS, stuck: false,
+  });
+}
+
+function updatePlayerArrows(deltaMs) {
+  const dt = deltaMs / 1000;
+  for (let i = playerArrows.length - 1; i >= 0; i -= 1) {
+    const a = playerArrows[i];
+    a.lifeMs -= deltaMs;
+    if (a.lifeMs <= 0) { scene.remove(a.mesh); playerArrows.splice(i, 1); continue; }
+    if (a.stuck) continue;
+    a.vel.y += PA_GRAVITY * dt;
+    // Sub-step so a fast arrow can't tunnel through a mob or wall in one tick.
+    const dist = Math.hypot(a.vel.x, a.vel.y, a.vel.z) * dt;
+    const steps = Math.max(1, Math.ceil(dist / 0.4));
+    const sdt = dt / steps;
+    let consumed = false;
+    for (let s = 0; s < steps && !consumed; s += 1) {
+      a.pos.x += a.vel.x * sdt; a.pos.y += a.vel.y * sdt; a.pos.z += a.vel.z * sdt;
+      for (const m of hostileMobs) {
+        if (isMobDying(m)) continue;
+        const dx = a.pos.x - m.pos.x, dy = a.pos.y - (m.pos.y + 0.9), dz = a.pos.z - m.pos.z;
+        if (dx * dx + dy * dy + dz * dz <= PA_HIT_R2) { damageMobWithArrow(m, a.damage, a.pos, true); consumed = true; break; }
+      }
+      if (consumed) break;
+      for (const m of passiveMobs) {
+        if (isMobDying(m)) continue;
+        const dx = a.pos.x - m.pos.x, dy = a.pos.y - (m.pos.y + 0.5), dz = a.pos.z - m.pos.z;
+        if (dx * dx + dy * dy + dz * dz <= PA_HIT_R2) { damageMobWithArrow(m, a.damage, a.pos, false); consumed = true; break; }
+      }
+      if (consumed) break;
+      const bx = Math.floor(a.pos.x), by = Math.floor(a.pos.y), bz = Math.floor(a.pos.z);
+      const bt = world.get(bx, by, bz);
+      if (bt !== 0 && !PASSABLE_BLOCKS.has(bt)) { a.stuck = true; a.lifeMs = Math.min(a.lifeMs, 1500); break; }
+    }
+    if (consumed) { scene.remove(a.mesh); playerArrows.splice(i, 1); continue; }
+    a.mesh.position.copy(a.pos);
+    a.mesh.rotation.y = Math.atan2(a.vel.x, a.vel.z);
+    const horiz = Math.hypot(a.vel.x, a.vel.z);
+    a.mesh.rotation.x = Math.atan2(a.vel.y, horiz);
+  }
+}
+
+function clearPlayerArrows() {
+  for (const a of playerArrows) scene.remove(a.mesh);
+  playerArrows.length = 0;
+  state.bowDrawing = false;
+}
+
+function currentBowCharge() {
+  if (!state.bowDrawing) return 0;
+  const elapsed = performance.now() - state.bowDrawStartMs;
+  return Math.max(0, Math.min(1, elapsed / BOW_DRAW_MS));
+}
+
+function startBowDraw() {
+  state.bowDrawing = true;
+  state.bowDrawStartMs = performance.now();
+}
+
+function releaseBowShot() {
+  if (!state.bowDrawing) return false;
+  const charge = currentBowCharge();
+  state.bowDrawing = false;
+  if (charge < BOW_MIN_CHARGE) return false;
+  // Need an arrow in inventory (consume 1). Bow with no arrows just relaxes.
+  if (!consumeItemFromInventory(state.inventory, "arrow", 1)) {
+    state.recentAction = "Out of arrows";
+    return false;
+  }
+  spawnPlayerArrow(charge);
+  decrementDurability(state.inventory, state.selectedSlot, 1);
+  viewmodel.triggerSwing();
+  state.recentAction = "Loosed an arrow";
+  markInventoryPanelDirty();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Wave 9 — Creeper explosion
 // ---------------------------------------------------------------------------
 
@@ -3332,7 +3572,22 @@ function createPassiveMob(position, saved = null, forcedType = null) {
     wanderTimerMs: Number.isFinite(saved?.wanderTimerMs)
       ? Math.max(0, saved.wanderTimerMs)
       : 800 + Math.random() * 2400,
+    // Wave G1 — breeding/baby state.
+    isBaby: saved?.isBaby === true,
+    babyGrowMsRemaining: Number.isFinite(saved?.babyGrowMsRemaining) ? Math.max(0, saved.babyGrowMsRemaining) : 0,
+    breedCooldownMs: Number.isFinite(saved?.breedCooldownMs) ? Math.max(0, saved.breedCooldownMs) : 0,
+    loveTimerMs: 0, // transient (never persisted)
+    // Wave G4 — sheared state (sheep only).
+    sheared: saved?.sheared === true,
+    woolRegrowMs: Number.isFinite(saved?.woolRegrowMs) ? Math.max(0, saved.woolRegrowMs) : 0,
   };
+  if (mob.isBaby) {
+    mesh.scale.setScalar(0.5);
+  }
+  if (mob.sheared) {
+    const bodyPart = mesh.userData?.parts?.body;
+    if (bodyPart) bodyPart.visible = false;
+  }
   mesh.traverse((child) => { if (child.isMesh) child.userData.passiveMobId = id; });
   mesh.userData.passiveMobId = id;
   mesh.position.copy(mob.pos);
@@ -3377,6 +3632,13 @@ function serializePassiveMobs() {
       health: mob.health,
       wanderAngle: Number(mob.wanderAngle.toFixed(4)),
       wanderTimerMs: Math.floor(mob.wanderTimerMs),
+      // Wave G1 — breeding/baby (loveTimerMs is transient, not persisted).
+      isBaby: mob.isBaby === true,
+      babyGrowMsRemaining: Math.floor(mob.babyGrowMsRemaining || 0),
+      breedCooldownMs: Math.floor(mob.breedCooldownMs || 0),
+      // Wave G4 — sheared state.
+      sheared: mob.sheared === true,
+      woolRegrowMs: Math.floor(mob.woolRegrowMs || 0),
     });
   }
   return result;
@@ -3453,10 +3715,31 @@ function updatePassiveMobs(deltaMs) {
       continue;
     }
 
-    // Despawn at night
-    if (state.dayFactor < 0.20 && Math.random() < 0.004 * dtSeconds * 60) {
+    // Despawn at night (babies stay — they're player-bred)
+    if (!mob.isBaby && state.dayFactor < 0.20 && Math.random() < 0.004 * dtSeconds * 60) {
       removePassiveMobAt(i);
       continue;
+    }
+
+    // Wave G1 — breeding/baby timers (pure deltaMs decrement; deterministic).
+    if (mob.breedCooldownMs > 0) mob.breedCooldownMs = Math.max(0, mob.breedCooldownMs - deltaMs);
+    if (mob.loveTimerMs > 0) mob.loveTimerMs = Math.max(0, mob.loveTimerMs - deltaMs);
+    if (mob.isBaby) {
+      mob.babyGrowMsRemaining = Math.max(0, mob.babyGrowMsRemaining - deltaMs);
+      if (mob.babyGrowMsRemaining <= 0) {
+        mob.isBaby = false;
+        mob.mesh.scale.setScalar(1);
+      }
+    }
+    // Wave G4 — a sheared sheep regrows its wool, faster while standing on grass.
+    if (mob.sheared) {
+      const onGrass = world.get(Math.floor(mob.pos.x), Math.floor(mob.pos.y) - 1, Math.floor(mob.pos.z)) === 1;
+      mob.woolRegrowMs = Math.max(0, mob.woolRegrowMs - deltaMs * (onGrass ? 2 : 1));
+      if (mob.woolRegrowMs <= 0) {
+        mob.sheared = false;
+        const bodyPart = mob.mesh.userData?.parts?.body;
+        if (bodyPart) bodyPart.visible = true;
+      }
     }
 
     // Wander — record position before move for travel tracking
@@ -3532,8 +3815,108 @@ function updatePassiveMobs(deltaMs) {
     mob.mesh.position.copy(mob.pos);
   }
 
+  // Wave G1 — breeding pairing: two same-type adults both in love within 1.5 blocks
+  // produce a baby at their midpoint (capped by PASSIVE_MOB_MAX_COUNT). O(n²) but n is
+  // capped at 12. Done after the per-mob loop so the new mob never disturbs iteration.
+  updatePassiveMobBreeding();
+
   // Wave F3 — drive limb/head animations
   tickMobAnims(passiveMobs, deltaMs, state.playerPos, true);
+}
+
+// Wave G1 — feed a passive mob (held wheat/seeds) to put it in "love mode". Mirrors
+// tryHitPassiveMob's raycast against the mob group. Returns true if a mob was fed.
+const BREED_LOVE_MS = 30000;     // love window after feeding
+const BREED_COOLDOWN_MS = 60000; // post-breed cooldown before an animal can breed again
+const BABY_GROW_MS = 300000;     // baby → adult (5 min)
+function feedFoodMatchesMob(itemId, mobType) {
+  if (mobType === "cow" || mobType === "sheep") return itemId === "wheat";
+  if (mobType === "chicken" || mobType === "pig") return itemId === "seeds";
+  return false;
+}
+function tryFeedPassiveMob(ndcX = 0, ndcY = 0) {
+  if (passiveMobs.length === 0) return false;
+  const heldId = getSelectedItemId();
+  if (heldId !== "wheat" && heldId !== "seeds") return false;
+  raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+  const hits = raycaster.intersectObjects(passiveMobGroup.children, true);
+  if (hits.length === 0) return false;
+  const maxReach = Number.isFinite(worldConfig.maxReach) ? worldConfig.maxReach : 6;
+  const hit = hits.find((e) => e.distance <= maxReach);
+  if (!hit) return false;
+  const passiveMobId = hit.object?.userData?.passiveMobId;
+  if (!Number.isFinite(passiveMobId)) return false;
+  const mob = passiveMobs.find((m) => m.id === passiveMobId);
+  if (!mob || isMobDying(mob)) return false;
+  if (mob.isBaby) { state.recentAction = "It's still a baby"; return false; }
+  if (!feedFoodMatchesMob(heldId, mob.mobType)) return false;
+  if (mob.breedCooldownMs > 0) { state.recentAction = "Not ready to breed"; return false; }
+  mob.loveTimerMs = BREED_LOVE_MS;
+  consumeFromSlot(state.inventory, state.selectedSlot, 1);
+  xpOrbs.spawnXp(1, mob.pos.x, mob.pos.y + 0.6, mob.pos.z);
+  viewmodel.triggerSwing();
+  state.recentAction = `Fed the ${mob.mobType}`;
+  markInventoryPanelDirty();
+  markCraftPanelDirty();
+  return true;
+}
+
+// Wave G4 — right-click a sheep with shears → drop wool + hide the wool body until it
+// regrows. Mirrors tryFeedPassiveMob's raycast against the mob group.
+function tryShearSheep(ndcX = 0, ndcY = 0) {
+  if (passiveMobs.length === 0) return false;
+  if (!isShears(getSelectedItemId())) return false;
+  raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+  const hits = raycaster.intersectObjects(passiveMobGroup.children, true);
+  if (hits.length === 0) return false;
+  const maxReach = Number.isFinite(worldConfig.maxReach) ? worldConfig.maxReach : 6;
+  const hit = hits.find((e) => e.distance <= maxReach);
+  if (!hit) return false;
+  const passiveMobId = hit.object?.userData?.passiveMobId;
+  if (!Number.isFinite(passiveMobId)) return false;
+  const mob = passiveMobs.find((m) => m.id === passiveMobId);
+  if (!mob || isMobDying(mob)) return false;
+  if (mob.mobType !== "sheep") { state.recentAction = "Only sheep can be sheared"; return false; }
+  if (mob.sheared) { state.recentAction = "Already sheared"; return false; }
+  // 1-3 wool, deterministic from the sheep id (no Math.random in the loot count).
+  const woolCount = 1 + Math.floor(seededXpFloat((mob.id * 2654435761) >>> 0) * 3);
+  itemEntities.spawnItemEntity("wool", woolCount, mob.pos.x, mob.pos.y + 0.6, mob.pos.z);
+  mob.sheared = true;
+  mob.woolRegrowMs = WOOL_REGROW_MS;
+  const bodyPart = mob.mesh.userData?.parts?.body;
+  if (bodyPart) bodyPart.visible = false;
+  decrementDurability(state.inventory, state.selectedSlot, 1);
+  viewmodel.triggerSwing();
+  state.recentAction = `Sheared the sheep (+${woolCount} wool)`;
+  markInventoryPanelDirty();
+  return true;
+}
+
+function updatePassiveMobBreeding() {
+  for (let a = 0; a < passiveMobs.length; a += 1) {
+    const ma = passiveMobs[a];
+    if (ma.isBaby || ma.dying || ma.loveTimerMs <= 0 || ma.breedCooldownMs > 0) continue;
+    for (let b = a + 1; b < passiveMobs.length; b += 1) {
+      const mb = passiveMobs[b];
+      if (mb.isBaby || mb.dying || mb.loveTimerMs <= 0 || mb.breedCooldownMs > 0) continue;
+      if (mb.mobType !== ma.mobType) continue;
+      const dx = ma.pos.x - mb.pos.x;
+      const dy = ma.pos.y - mb.pos.y;
+      const dz = ma.pos.z - mb.pos.z;
+      if (dx * dx + dy * dy + dz * dz > 1.5 * 1.5) continue;
+      if (passiveMobs.length >= PASSIVE_MOB_MAX_COUNT) return;
+      // Spawn a baby at the parents' midpoint.
+      const bx = (ma.pos.x + mb.pos.x) / 2;
+      const by = (ma.pos.y + mb.pos.y) / 2;
+      const bz = (ma.pos.z + mb.pos.z) / 2;
+      createPassiveMob({ x: bx, y: by, z: bz }, { mobType: ma.mobType, isBaby: true, babyGrowMsRemaining: BABY_GROW_MS });
+      ma.loveTimerMs = 0; mb.loveTimerMs = 0;
+      ma.breedCooldownMs = BREED_COOLDOWN_MS; mb.breedCooldownMs = BREED_COOLDOWN_MS;
+      xpOrbs.spawnXp(3, bx, by + 0.5, bz);
+      state.recentAction = `A baby ${ma.mobType} was born!`;
+      return; // one birth per tick keeps it gentle + deterministic
+    }
+  }
 }
 
 function tryHitPassiveMob(ndcX = 0, ndcY = 0) {
@@ -3632,6 +4015,13 @@ function updateHostileMobs(deltaMs) {
     const toPlayerZ = state.playerPos.z - mob.pos.z;
     const planarDistance = Math.hypot(toPlayerX, toPlayerZ);
     mob.attackCooldownMs = Math.max(0, mob.attackCooldownMs - deltaMs);
+
+    // Wave G4 — hard despawn hostiles that wander too far from the player (Minecraft-style),
+    // keeping the active mob set bounded near the player.
+    if (planarDistance > HOSTILE_HARD_DESPAWN_DIST) {
+      removeHostileMobAt(i);
+      continue;
+    }
 
     if (state.mode !== "playing") {
       mob.mesh.position.copy(mob.pos);
@@ -3922,6 +4312,7 @@ function updateHostileMobs(deltaMs) {
 
   // --- Update arrow projectiles ---
   updateArrowProjectiles(deltaMs);
+  updatePlayerArrows(deltaMs);
 
   syncHostileMobCount();
 }
@@ -5519,12 +5910,15 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 10, // Wave F7: added spawnPoint; version 9 was the previous save format
+    version: 11, // Wave G1: added cropTickSeed + breeding mob fields; v10 added spawnPoint
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
     dayCount: Math.floor(state._totalWorldTimeMs / (simConfig.dayNightCycleMs || 1200000)),
     spawnPoint: state.spawnPoint ? { x: state.spawnPoint.x, y: state.spawnPoint.y, z: state.spawnPoint.z } : null,
+    // Wave G1 — deterministic crop-growth RNG state (crops/farmland persist as block edits).
+    cropTickSeed: state._cropTickSeed,
+    cropGrowthAccumMs: cropGrowthAccumMs,
     player: {
       x: state.playerPos.x,
       y: state.playerPos.y,
@@ -5635,6 +6029,7 @@ async function loadGame() {
     loadChests(snapshot.chests);
     loadHostileMobs(snapshot.mobs);
     loadPassiveMobs(snapshot.passiveMobs);
+    clearPlayerArrows(); // Wave G3 — no arrows in flight after a load
     // Wave F1: restore item entities; v<=5 saves have no itemEntities field → clear
     itemEntities.restore(snapshot.itemEntities ?? null);
     // Wave F5: restore flowing fluid cells; null snapshot = no flowing cells (clears map)
@@ -5671,6 +6066,11 @@ async function loadGame() {
         state.spawnPoint = null;
       }
     }
+    // Wave G1: restore deterministic crop-growth state. v<=10 saves default from the seed.
+    state._cropTickSeed = Number.isFinite(snapshot.cropTickSeed) && snapshot.cropTickSeed !== 0
+      ? (snapshot.cropTickSeed >>> 0)
+      : (((world.getSeed() >>> 0) ^ 0x9e3779b9) >>> 0 || 1);
+    cropGrowthAccumMs = Number.isFinite(snapshot.cropGrowthAccumMs) ? Math.max(0, snapshot.cropGrowthAccumMs) : 0;
     markCraftPanelDirty();
     markInventoryPanelDirty();
 
@@ -5878,6 +6278,14 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   const minedDeepCopper = type === COPPER_ORE_BLOCK_TYPE && isTorchPlacementInCave(coords.x, coords.y, coords.z);
   world.set(coords.x, coords.y, coords.z, 0);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid flow into dug space
+  // Wave G2b — a door is 2 cells: breaking one half clears the other (which drops nothing,
+  // so exactly one door item drops via the broken half's BLOCK_DROPS entry).
+  if (DOOR_BLOCK_IDS.has(type)) {
+    const otherY = DOOR_LOWER_IDS.has(type) ? coords.y + 1 : coords.y - 1;
+    if (DOOR_BLOCK_IDS.has(world.get(coords.x, otherY, coords.z))) {
+      world.set(coords.x, otherY, coords.z, 0);
+    }
+  }
   if (type === FURNACE_BLOCK_TYPE) {
     furnaceStates.delete(targetKey);
     if (state.activeFurnaceKey === targetKey) {
@@ -5943,6 +6351,22 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     state.recentAction = `Need better tool for ${blockName(type)}`;
   } else if (!toolBroke) {
     state.recentAction = `Broke ${blockName(type)}`;
+  }
+
+  // Wave G1: harvesting wheat. Mature (stage 3) yields 1 wheat + 1-3 seeds; an immature
+  // crop yields just 1 seed (so re-planting is always possible). Deterministic seed count
+  // (position hash, no Math.random) so automation/replay is stable.
+  if (type >= WHEAT_STAGE_MIN && type <= WHEAT_STAGE_MAX) {
+    const cx = coords.x + 0.5, cy = coords.y + 0.5, cz = coords.z + 0.5;
+    if (type === WHEAT_STAGE_MAX) {
+      itemEntities.spawnItemEntity("wheat", 1, cx, cy, cz);
+      const seedCount = 1 + (((coords.x * 31 + coords.y * 17 + coords.z * 13) >>> 0) % 3);
+      itemEntities.spawnItemEntity("seeds", seedCount, cx, cy, cz);
+      state.recentAction = "Harvested wheat";
+    } else {
+      itemEntities.spawnItemEntity("seeds", 1, cx, cy, cz);
+      state.recentAction = "Pulled up wheat";
+    }
   }
 
   // Wave F2: spawn XP orbs for ore blocks (only when drop not suppressed).
@@ -6055,6 +6479,12 @@ function trySleeepInBed(bedX, bedY, bedZ, force = false) {
 
 function placeBlock(ndcX = 0, ndcY = 0) {
   if (state.chestOpen) return false;
+  // Wave G3 — holding a bow: right-click begins drawing; the shot fires on release
+  // (controls.js mouseup → onRightRelease → releaseBowShot). Short-circuits placement.
+  if (isBow(getSelectedItemId())) {
+    startBowDraw();
+    return true;
+  }
   // One raycast for the whole right-click. solidCoords = the targeted solid cell (used by
   // bed/chest interactions); placeCoords = the adjacent empty cell (bucket fill + block
   // placement). Nothing mutates the world or camera between here and use, so this is
@@ -6077,11 +6507,73 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       return true;
     }
   }
+  // Wave G2b — right-click toggles a door (both halves) or trapdoor open/closed.
+  if (solidCoords) {
+    const sb = world.get(solidCoords.x, solidCoords.y, solidCoords.z);
+    if (DOOR_BLOCK_IDS.has(sb)) {
+      const otherY = DOOR_LOWER_IDS.has(sb) ? solidCoords.y + 1 : solidCoords.y - 1;
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z, doorToggle(sb));
+      const ob = world.get(solidCoords.x, otherY, solidCoords.z);
+      if (DOOR_BLOCK_IDS.has(ob)) world.set(solidCoords.x, otherY, solidCoords.z, doorToggle(ob));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = doorIsOpen(sb) ? "Closed door" : "Opened door";
+      viewmodel.triggerSwing();
+      return true;
+    }
+    if (TRAPDOOR_BLOCK_IDS.has(sb)) {
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z, trapdoorToggle(sb));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = "Toggled trapdoor";
+      viewmodel.triggerSwing();
+      return true;
+    }
+  }
 
   const slot = getSelectedInventorySlot();
   if (!slot) {
     state.recentAction = "Selected slot empty";
     return false;
+  }
+
+  // Wave G4 — shear a sheep (right-click with shears).
+  if (isShears(slot.itemId) && tryShearSheep(ndcX, ndcY)) {
+    return true;
+  }
+
+  // Wave G1 — feed an animal to breed it (wheat → cow/sheep, seeds → chicken/pig). Checked
+  // before tilling/planting so right-clicking a chicken with seeds feeds it, not the ground.
+  if ((slot.itemId === "wheat" || slot.itemId === "seeds") && tryFeedPassiveMob(ndcX, ndcY)) {
+    return true;
+  }
+
+  // Wave G1 — hoe tills grass(1)/dirt(2) with an open cell above into farmland.
+  if (isHoe(slot.itemId) && solidCoords) {
+    const t = world.get(solidCoords.x, solidCoords.y, solidCoords.z);
+    const above = world.get(solidCoords.x, solidCoords.y + 1, solidCoords.z);
+    if ((t === 1 || t === 2) && above === 0) {
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z, FARMLAND_BLOCK_TYPE);
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      decrementDurability(state.inventory, state.selectedSlot, 1);
+      viewmodel.triggerSwing();
+      state.recentAction = "Tilled farmland";
+      markInventoryPanelDirty();
+      return true;
+    }
+  }
+
+  // Wave G1 — plant seeds: only into an empty cell directly above farmland (never floating).
+  if (slot.itemId === "seeds" && placeCoords) {
+    const below = world.get(placeCoords.x, placeCoords.y - 1, placeCoords.z);
+    if (below === FARMLAND_BLOCK_TYPE && world.get(placeCoords.x, placeCoords.y, placeCoords.z) === 0) {
+      world.set(placeCoords.x, placeCoords.y, placeCoords.z, WHEAT_STAGE_MIN);
+      world.rebuildEditedChunksNow(placeCoords.x, placeCoords.z);
+      consumeFromSlot(state.inventory, state.selectedSlot, 1);
+      viewmodel.triggerSwing();
+      state.recentAction = "Planted wheat";
+      markInventoryPanelDirty();
+      markCraftPanelDirty();
+      return true;
+    }
   }
 
   // Food items: eat before attempting block placement.
@@ -6146,6 +6638,36 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     placeType = stairBase + orient;
   }
 
+  // Wave G2a — ladder placement: pick the orientation id (54-57) so the climbable face
+  // points back toward the player (same 4-quadrant yaw logic as stairs).
+  if (placeType === 54) {
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    const deg = (normYaw / Math.PI) * 180;
+    let orient;
+    if (deg < 45 || deg >= 315) orient = 0;      // looks -Z → faces +Z
+    else if (deg < 135) orient = 3;              // looks -X → faces +X
+    else if (deg < 225) orient = 2;              // looks +Z → faces -Z
+    else orient = 1;                             // looks +X → faces -X
+    placeType = [54, 57, 55, 56][orient];
+  }
+
+  // Wave G2b — door + trapdoor orientation from yaw (door is placed as a 2-cell pair below;
+  // trapdoor is single-cell and rides the generic placement path).
+  let doorLowerId = null;
+  if (placeType === 58 || placeType === 74) {
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    const deg = (normYaw / Math.PI) * 180;
+    let orient;
+    if (deg < 45 || deg >= 315) orient = 0;
+    else if (deg < 135) orient = 3;
+    else if (deg < 225) orient = 2;
+    else orient = 1;
+    if (placeType === 58) doorLowerId = 58 + orient;
+    else placeType = 74 + orient;
+  }
+
   if (!placeCoords) {
     return false;
   }
@@ -6158,6 +6680,27 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   }
   if (playerInsideBlock(coords.x, coords.y, coords.z)) {
     return false;
+  }
+  // Wave G2b — a door needs this cell AND the one above it empty (placed atomically).
+  if (doorLowerId !== null) {
+    if (!world.inBounds(coords.x, coords.y + 1, coords.z)
+      || world.get(coords.x, coords.y + 1, coords.z) !== 0
+      || playerInsideBlock(coords.x, coords.y + 1, coords.z)) {
+      state.recentAction = "No room for the door";
+      return false;
+    }
+    const orient = doorLowerId - 58;
+    world.set(coords.x, coords.y, coords.z, doorLowerId);     // lower closed
+    world.set(coords.x, coords.y + 1, coords.z, 66 + orient); // upper closed
+    world.rebuildEditedChunksNow(coords.x, coords.z);
+    world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
+    consumeFromSlot(state.inventory, state.selectedSlot, 1);
+    viewmodel.triggerSwing();
+    state.recentAction = "Placed door";
+    markInventoryPanelDirty();
+    markCraftPanelDirty();
+    playPlaceSound(doorLowerId);
+    return true;
   }
   world.set(coords.x, coords.y, coords.z, placeType);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid react to placed block
@@ -6440,6 +6983,8 @@ function regenerateWorld() {
   chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
+  cropGrowthAccumMs = 0; state._cropTickSeed = 0; // Wave G1 — re-derive growth RNG from new seed
+  clearPlayerArrows(); // Wave G3 — flush in-flight arrows on world reset
   itemEntities.clear();
   xpOrbs.clear();
   state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
@@ -6474,6 +7019,8 @@ async function createNewWorld() {
   chestStates.clear();
   clearHostileMobs();
   clearPassiveMobs();
+  cropGrowthAccumMs = 0; state._cropTickSeed = 0; // Wave G1 — re-derive growth RNG from new seed
+  clearPlayerArrows(); // Wave G3 — flush in-flight arrows on world reset
   itemEntities.clear();
   xpOrbs.clear();
   state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
@@ -6628,6 +7175,9 @@ function updateSimulation(dtSeconds) {
   // Wave 8: lava submersion (body in lava = damage + slow; eye in lava = orange fog).
   state.inLava     = bodyBlock === LAVA_BLOCK_TYPE;
   state.eyeInLava  = eyeBlock  === LAVA_BLOCK_TYPE;
+  // Wave G2a: on a ladder if the player's feet OR body cell is a ladder block.
+  const feetBlock  = world.get(eyeTestX, Math.floor(state.playerPos.y + 0.1), eyeTestZ);
+  state.onLadder   = LADDER_BLOCK_IDS.has(bodyBlock) || LADDER_BLOCK_IDS.has(feetBlock);
 
   // Water movement constants
   const WATER_SWIM_SPEED        = moveSpeed * 0.55;
@@ -6731,6 +7281,24 @@ function updateSimulation(dtSeconds) {
     if (state.onGround && state.playerVel.y < 0) {
       state.playerVel.y = 0;
     }
+  } else if (state.onLadder) {
+    // --- ON A LADDER: gravity is overridden by climb input (guard order fly > water >
+    // ladder > land so vy is written exactly once). Hold forward / Space to climb up,
+    // back / Sneak to descend; otherwise cling and slide slowly. ---
+    const CLIMB_SPEED = 3.0;
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * moveSpeed;
+    const ascending = forwardInput > 0 || state.keys.has("Space") || state.jumpQueued;
+    const descending = forwardInput < 0 || state.isSneaking;
+    if (ascending && !descending) state.playerVel.y = CLIMB_SPEED;
+    else if (descending && !ascending) state.playerVel.y = -CLIMB_SPEED;
+    else state.playerVel.y = -1.0; // gentle cling-slide
+    state.jumpQueued = false;
+    state.onGround = false;
+    resolveAxis({ axis: "x", delta: state.playerVel.x * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    resolveAxis({ axis: "y", delta: state.playerVel.y * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    resolveAxis({ axis: "z", delta: state.playerVel.z * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    if (state.onGround && state.playerVel.y < 0) state.playerVel.y = 0;
   } else {
     // --- ON LAND (or in lava): original physics with lava slowdown ---
     // Wave 8: lava halves movement speed (same as Minecraft's lava drag).
@@ -6974,6 +7542,7 @@ function updateSimulation(dtSeconds) {
     }
   }
   updateFallingBlocks();
+  updateCropGrowth(deltaMs);
   updateBranchEncounterState();
   updateObjectives(deltaMs);
   updateCameraTransform();
@@ -7098,6 +7667,7 @@ setupControls({
   closeChestPanel,
   breakBlockAt: breakBlock,
   placeBlockAt: placeBlock,
+  onRightRelease: releaseBowShot,
   toNdc,
   toggleF3Overlay: () => {
     state.f3Visible = !state.f3Visible;
@@ -7256,6 +7826,7 @@ window.render_game_to_text = () => {
       vy: Number(state.playerVel.y.toFixed(3)),
       vz: Number(state.playerVel.z.toFixed(3)),
       onGround: state.onGround,
+      onLadder: state.onLadder === true,
       sneaking: state.isSneaking,
       sprinting: state.isSprinting,
       flying: state.isFlying,
@@ -7357,10 +7928,29 @@ window.render_game_to_text = () => {
         y: Number(mob.pos.y.toFixed(3)),
         z: Number(mob.pos.z.toFixed(3)),
         health: mob.health,
+        isBaby: mob.isBaby === true,
+        inLove: (mob.loveTimerMs || 0) > 0,
+        breedCooldownMs: Math.floor(mob.breedCooldownMs || 0),
+        sheared: mob.sheared === true,
       })),
     },
     arrowProjectiles: {
       count: arrowProjectiles.length,
+    },
+    playerArrows: {
+      count: playerArrows.length,
+      charging: state.bowDrawing === true,
+      charge: Number(currentBowCharge().toFixed(3)),
+      entries: playerArrows.slice(0, 8).map((a) => ({
+        x: Number(a.pos.x.toFixed(2)), y: Number(a.pos.y.toFixed(2)), z: Number(a.pos.z.toFixed(2)),
+        vy: Number(a.vel.y.toFixed(2)), stuck: a.stuck, damage: a.damage,
+      })),
+    },
+    farming: {
+      tilledNearby: nearbyBlocks.filter((e) => e.type === FARMLAND_BLOCK_TYPE).length,
+      cropsNearby: nearbyBlocks.filter((e) => e.type >= WHEAT_STAGE_MIN && e.type <= WHEAT_STAGE_MAX).length,
+      matureCrops: nearbyBlocks.filter((e) => e.type === WHEAT_STAGE_MAX).length,
+      cropTickSeed: state._cropTickSeed >>> 0,
     },
     combat: {
       baseMobDamage: playerBaseMobDamage + combinedBonuses.mobDamageBonus,
@@ -7454,6 +8044,187 @@ window.render_game_to_text = () => {
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Wave G2a building debug hooks -----------------------------------------------
+  // placeBuildingBlock(kind, x, y, z, orient) — kind: "fence"|"pane"|"ladder".
+  placeBuildingBlock: (kind, x, y, z, orient = 0) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const o = Math.max(0, Math.min(3, Math.floor(orient)));
+    let id = null;
+    if (kind === "fence") id = 52;
+    else if (kind === "pane") id = 53;
+    else if (kind === "ladder") id = 54 + o;
+    else if (kind === "trapdoor") id = 74 + o;
+    else if (kind === "door") {
+      // doors are 2 cells: lower closed (58+o) + upper closed (66+o)
+      world.set(bx, by, bz, 58 + o);
+      world.set(bx, by + 1, bz, 66 + o);
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, lower: world.get(bx, by, bz), upper: world.get(bx, by + 1, bz) };
+    }
+    if (id === null) return { ok: false, reason: "unknown kind" };
+    const ok = world.set(bx, by, bz, id);
+    if (ok) world.rebuildEditedChunksNow(bx, bz);
+    return { ok, block: world.get(bx, by, bz) };
+  },
+  toggleDoorAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const sb = world.get(bx, by, bz);
+    if (DOOR_BLOCK_IDS.has(sb)) {
+      const otherY = DOOR_LOWER_IDS.has(sb) ? by + 1 : by - 1;
+      world.set(bx, by, bz, doorToggle(sb));
+      const ob = world.get(bx, otherY, bz);
+      if (DOOR_BLOCK_IDS.has(ob)) world.set(bx, otherY, bz, doorToggle(ob));
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, lower: world.get(bx, DOOR_LOWER_IDS.has(sb) ? by : otherY, bz) };
+    }
+    if (TRAPDOOR_BLOCK_IDS.has(sb)) {
+      world.set(bx, by, bz, trapdoorToggle(sb));
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, block: world.get(bx, by, bz) };
+    }
+    return { ok: false, reason: "not a door/trapdoor", block: sb };
+  },
+  getBlockAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    return { id: world.get(bx, by, bz) };
+  },
+  onLadder: () => state.onLadder === true,
+  // Wave G4 — shear a sheep by id (test helper); returns its sheared/wool state.
+  shearSheepById: (id) => {
+    const mob = passiveMobs.find((m) => m.id === id);
+    if (!mob) return { ok: false, reason: "no mob" };
+    if (mob.mobType !== "sheep") return { ok: false, reason: "not a sheep" };
+    if (mob.sheared) return { ok: false, reason: "already sheared" };
+    const woolCount = 1 + Math.floor(seededXpFloat((mob.id * 2654435761) >>> 0) * 3);
+    itemEntities.spawnItemEntity("wool", woolCount, mob.pos.x, mob.pos.y + 0.6, mob.pos.z);
+    mob.sheared = true; mob.woolRegrowMs = WOOL_REGROW_MS;
+    const bp = mob.mesh.userData?.parts?.body; if (bp) bp.visible = false;
+    return { ok: true, woolCount, sheared: true };
+  },
+  regrowSheepById: (id) => {
+    const mob = passiveMobs.find((m) => m.id === id);
+    if (!mob) return { ok: false };
+    mob.woolRegrowMs = 1; // next tick clears it
+    return { ok: true };
+  },
+  hostileTypeCounts: () => {
+    const c = {}; for (const m of hostileMobs) c[m.mobType] = (c[m.mobType] || 0) + 1; return c;
+  },
+  // Wave G4 — generate chunks in a radius (chunks) and return the nearest hut loot chest.
+  findNearestHut: (radiusChunks = 12) => {
+    const S = worldConfig.chunk.size;
+    const pcx = Math.floor(state.playerPos.x / S), pcz = Math.floor(state.playerPos.z / S);
+    const r = Math.max(1, Math.min(20, Math.floor(radiusChunks)));
+    for (let dz = -r; dz <= r; dz += 1) for (let dx = -r; dx <= r; dx += 1) {
+      world.ensureChunk(pcx + dx, pcz + dz);
+    }
+    let best = null, bestD = Infinity;
+    for (const k of world.structureChests) {
+      const [x, y, z] = k.split(",").map(Number);
+      const d = (x - state.playerPos.x) ** 2 + (z - state.playerPos.z) ** 2;
+      if (d < bestD) { bestD = d; best = { x, y, z, key: k, block: world.get(x, y, z) }; }
+    }
+    return { count: world.structureChests.size, nearest: best };
+  },
+  // Wave G4 — open (or fill) the chest at a position and return its non-empty stacks.
+  peekChestLoot: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (world.get(bx, by, bz) !== CHEST_BLOCK_TYPE) return { ok: false, reason: "no chest", block: world.get(bx, by, bz) };
+    const chest = getChestState(toChestKey(bx, by, bz), true);
+    const items = (chest || []).filter(Boolean).map((s) => ({ itemId: s.itemId, count: s.count }));
+    return { ok: true, items, total: items.reduce((a, s) => a + s.count, 0) };
+  },
+  // Wave G3 bow debug hooks ------------------------------------------------------
+  drawBow: () => { startBowDraw(); return { drawing: state.bowDrawing }; },
+  // setBowCharge(c) back-dates the draw start so currentBowCharge() == c without relying
+  // on wall-clock (performance.now doesn't advance under headless advanceTime).
+  setBowCharge: (c = 1) => {
+    const cc = Math.max(0, Math.min(1, Number(c) || 0));
+    state.bowDrawing = true;
+    state.bowDrawStartMs = performance.now() - cc * BOW_DRAW_MS;
+    return { charge: currentBowCharge() };
+  },
+  fireBow: () => { const ok = releaseBowShot(); return { fired: ok, arrows: playerArrows.length }; },
+  playerArrowCount: () => playerArrows.length,
+  // aimAt(x,y,z) — point the camera yaw+pitch at a world point (for deterministic bow tests).
+  aimAt: (x, y, z) => {
+    const dx = x - state.playerPos.x;
+    const dy = y - (state.playerPos.y + playerConfig.eyeHeight);
+    const dz = z - state.playerPos.z;
+    const h = Math.hypot(dx, dz);
+    state.yaw = Math.atan2(-dx, -dz);
+    state.pitch = Math.atan2(dy, h);
+    updateCameraTransform();
+    return { yaw: state.yaw, pitch: state.pitch };
+  },
+  // Wave G1 farming debug hooks -------------------------------------------------
+  till: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const ok = world.set(bx, by, bz, FARMLAND_BLOCK_TYPE);
+    if (ok) world.rebuildEditedChunksNow(bx, bz);
+    return { ok, block: world.get(bx, by, bz) };
+  },
+  plantWheat: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (world.get(bx, by - 1, bz) !== FARMLAND_BLOCK_TYPE) return { ok: false, reason: "no farmland below" };
+    const ok = world.set(bx, by, bz, WHEAT_STAGE_MIN);
+    if (ok) world.rebuildEditedChunksNow(bx, bz);
+    return { ok, block: world.get(bx, by, bz) };
+  },
+  growCrop: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const b = world.get(bx, by, bz);
+    if (b < WHEAT_STAGE_MIN || b >= WHEAT_STAGE_MAX) return { ok: false, block: b };
+    world.set(bx, by, bz, b + 1);
+    world.rebuildEditedChunksNow(bx, bz);
+    return { ok: true, block: world.get(bx, by, bz) };
+  },
+  forceGrowAll: () => {
+    // Bump every immature crop in loaded chunks one stage (test helper, ignores light).
+    let grown = 0;
+    const r = 40, px = Math.floor(state.playerPos.x), py = Math.floor(state.playerPos.y), pz = Math.floor(state.playerPos.z);
+    for (let dy = -8; dy <= 8; dy += 1) {
+      for (let dz = -r; dz <= r; dz += 1) {
+        for (let dx = -r; dx <= r; dx += 1) {
+          const x = px + dx, y = py + dy, z = pz + dz;
+          if (!world.inBounds(x, y, z)) continue;
+          const b = world.get(x, y, z);
+          if (b >= WHEAT_STAGE_MIN && b < WHEAT_STAGE_MAX) {
+            world.set(x, y, z, b + 1);
+            world.rebuildEditedChunksNow(x, z);
+            grown += 1;
+          }
+        }
+      }
+    }
+    return { grown };
+  },
+  spawnBabyAnimal: (type = "cow", dx = 1, dz = 1) => {
+    const x = state.playerPos.x + (Number(dx) || 0);
+    const z = state.playerPos.z + (Number(dz) || 0);
+    const y = state.playerPos.y;
+    const mob = createPassiveMob({ x, y, z }, { mobType: type, isBaby: true, babyGrowMsRemaining: BABY_GROW_MS });
+    return mob ? { id: mob.id, type: mob.mobType, isBaby: mob.isBaby } : null;
+  },
+  feedAnimalById: (id) => {
+    const mob = passiveMobs.find((m) => m.id === id);
+    if (!mob) return { ok: false, reason: "no mob" };
+    mob.isBaby = false; mob.mesh.scale.setScalar(1); mob.babyGrowMsRemaining = 0;
+    mob.loveTimerMs = BREED_LOVE_MS; mob.breedCooldownMs = 0;
+    return { ok: true, id, inLove: true };
+  },
+  breedNow: (type = "cow") => {
+    // Put the two nearest same-type adults in love so the next tick breeds them.
+    const adults = passiveMobs.filter((m) => m.mobType === type && !m.isBaby && !m.dying);
+    if (adults.length < 2) return { ok: false, adults: adults.length };
+    adults[0].loveTimerMs = BREED_LOVE_MS; adults[0].breedCooldownMs = 0;
+    adults[1].loveTimerMs = BREED_LOVE_MS; adults[1].breedCooldownMs = 0;
+    // Teleport them adjacent so the 1.5-block pairing check passes.
+    adults[1].pos.set(adults[0].pos.x + 0.5, adults[0].pos.y, adults[0].pos.z);
+    adults[1].mesh.position.copy(adults[1].pos);
+    updatePassiveMobBreeding();
+    return { ok: true, count: passiveMobs.filter((m) => m.mobType === type).length };
+  },
   // Wave F5 fluid debug hooks ---------------------------------------------------
   // placeFluidSource(x,y,z,type) — "water"|"lava" or numeric id (15|21)
   placeFluidSource: (x, y, z, type) => {

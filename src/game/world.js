@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -151,6 +151,10 @@ const LIGHT_PASSABLE = new Set([
   21, // lava (Wave 8) — light propagates through lava itself
   // Wave 11 flora — cross-quad, no collision, light passes through freely
   23, 24, 25,
+  // Wave G1 — wheat crop stages: cross-quad, pass light like tall grass (farmland 51 is opaque)
+  47, 48, 49, 50,
+  // Wave G2a — glass pane (53) + ladders (54-57): thin, pass light (fence 52 blocks like wood)
+  53, 54, 55, 56, 57,
 ]);
 
 function toChunkKey(cx, cz) {
@@ -646,6 +650,11 @@ export class VoxelWorld {
     // Bumped on every block mutation (the single set() chokepoint). Lets the per-frame
     // target-block raycast skip when neither the camera nor the world changed.
     this.editVersion = 0;
+
+    // Wave G4 — world positions ("x,y,z") of structure (hut) loot chests. Re-derived
+    // deterministically whenever a chunk is (re)generated; consumed once by main.js to
+    // fill the chest with loot on first open (then it persists as a normal chest).
+    this.structureChests = new Set();
 
     this.surfaceHeightCache = new Map();
     this.treeInfoCache = new Map();
@@ -1282,6 +1291,58 @@ export class VoxelWorld {
     return 0;
   }
 
+  // Wave G4 — deterministically stamp a small cobblestone hut with a loot chest into a
+  // rare chunk. Fully contained within one chunk (footprint local 5..9) so it never spans a
+  // seam. Pure function of (cx,cz)+seed via hashLattice2, so it regenerates identically on
+  // eviction/reload. Records the chest world-position in structureChests for main.js to fill.
+  maybeStampHut(cx, cz, blocks, emitters) {
+    if (this.hashLattice2(cx * 131 + 7, cz * 197 + 13) >= 0.06) return; // ~6% of chunks
+    const S = this.chunkSize;
+    const seaLevel = this.generation.seaLevel || 38;
+    // Surface scan of the 5x5 footprint (local 5..9): require flat, grass-topped, dry ground.
+    let minSurf = Infinity, maxSurf = -Infinity, ok = true;
+    for (let lz = 5; lz <= 9 && ok; lz += 1) {
+      for (let lx = 5; lx <= 9; lx += 1) {
+        let sy = -1;
+        for (let y = this.height - 1; y >= 0; y -= 1) {
+          const b = blocks[this.index(lx, y, lz)];
+          if (b !== 0) { sy = y; break; }
+        }
+        if (sy < 0 || blocks[this.index(lx, sy, lz)] !== 1) { ok = false; break; } // must be grass-topped
+        if (sy <= seaLevel || sy >= this.height - 6) { ok = false; break; }
+        if (sy < minSurf) minSurf = sy;
+        if (sy > maxSurf) maxSurf = sy;
+      }
+    }
+    if (!ok || maxSurf - minSurf > 1) return; // skip on uneven ground (still deterministic)
+
+    const sy = minSurf;
+    const put = (lx, ly, lz, id) => {
+      if (lx < 0 || lx >= S || lz < 0 || lz >= S || ly < 0 || ly >= this.height) return;
+      const idx = this.index(lx, ly, lz);
+      blocks[idx] = id;
+      const emit = BLOCK_LIGHT_EMIT[id] || 0;
+      if (emit > 0) emitters.set(idx, emit); else emitters.delete(idx);
+    };
+    // Floor (cobblestone), interior cleared, cobblestone walls, wood roof.
+    for (let lz = 5; lz <= 9; lz += 1) for (let lx = 5; lx <= 9; lx += 1) {
+      put(lx, sy, lz, 10);           // floor
+      put(lx, sy + 4, lz, 4);        // roof (wood)
+      for (let h = 1; h <= 3; h += 1) {
+        const edge = (lx === 5 || lx === 9 || lz === 5 || lz === 9);
+        put(lx, sy + h, lz, edge ? 10 : 0); // walls vs hollow interior
+      }
+    }
+    // Doorway on the +Z wall (centre): clear + place a 2-tall door (lower 58 / upper 66, N).
+    put(7, sy + 1, 9, 58);
+    put(7, sy + 2, 9, 66);
+    // A torch on an interior wall for light.
+    put(6, sy + 2, 5, 8);
+    // A loot chest in the back corner; register it for deterministic fill on first open.
+    put(8, sy + 1, 6, 22);
+    this.structureChests.add(`${cx * S + 8},${sy + 1},${cz * S + 6}`);
+  }
+
   createChunk(cx, cz) {
     const key = toChunkKey(cx, cz);
     const blocks = new Uint8Array(this.chunkSize * this.chunkSize * this.height);
@@ -1311,6 +1372,10 @@ export class VoxelWorld {
         }
       }
     }
+
+    // Wave G4 — stamp a rare hut+chest BEFORE applying player edits, so a player who
+    // breaks the hut (recorded as edits) overrides it on regen.
+    this.maybeStampHut(cx, cz, blocks, emitters);
 
     const edits = this.chunkEdits.get(key);
     if (edits) {
@@ -2045,23 +2110,30 @@ export class VoxelWorld {
             const AO_NEUTRAL = 1.0; // no AO for flora
             const lightR = floraSky / 15.0;
             const lightG = floraBlk / 15.0;
-            // Wave 12: tint flora with biome grass tint
-            const floraBiome = this.biomeAt(worldX, worldZ);
-            const [ftr, ftg, ftb] = floraBiome.grassTint;
+            // Wave G1 — wheat crops (47-50): shorter at early stages + NO biome grass tint
+            // (golden mature wheat must not be tinted green). Other flora keep the grass tint.
+            const isCrop = blockType >= 47 && blockType <= 50;
+            let ftr = 1.0, ftg = 1.0, ftb = 1.0;
+            if (!isCrop) {
+              const floraBiome = this.biomeAt(worldX, worldZ);
+              [ftr, ftg, ftb] = floraBiome.grassTint;
+            }
+            const cropTop = isCrop ? [0.35, 0.55, 0.8, 1.0][blockType - 47] : 1.0;
+            const yTop = y0 + cropTop;
             const quadDefs = [
               // Quad A verts: [bl, br, tl, tr] along SW–NE diagonal
               [
-                [x0 + 0.1, y0,     z0 + 0.9],
-                [x0 + 0.9, y0,     z0 + 0.1],
-                [x0 + 0.1, y0 + 1, z0 + 0.9],
-                [x0 + 0.9, y0 + 1, z0 + 0.1],
+                [x0 + 0.1, y0,    z0 + 0.9],
+                [x0 + 0.9, y0,    z0 + 0.1],
+                [x0 + 0.1, yTop,  z0 + 0.9],
+                [x0 + 0.9, yTop,  z0 + 0.1],
               ],
               // Quad B verts: [bl, br, tl, tr] along NW–SE diagonal
               [
-                [x0 + 0.9, y0,     z0 + 0.9],
-                [x0 + 0.1, y0,     z0 + 0.1],
-                [x0 + 0.9, y0 + 1, z0 + 0.9],
-                [x0 + 0.1, y0 + 1, z0 + 0.1],
+                [x0 + 0.9, y0,    z0 + 0.9],
+                [x0 + 0.1, y0,    z0 + 0.1],
+                [x0 + 0.9, yTop,  z0 + 0.9],
+                [x0 + 0.1, yTop,  z0 + 0.1],
               ],
             ];
             for (const qverts of quadDefs) {
@@ -2080,6 +2152,81 @@ export class VoxelWorld {
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
             }
             continue; // skip the cube-face loop for flora
+          } else if (LADDER_BLOCK_IDS.has(blockType)) {
+            // --- Wave G2a: ladder — a single flat alpha-cutout quad flush to one wall,
+            // emitted into the flora buffer (DoubleSide alpha-cutout, no wind sway). ---
+            const lSky = skylight[lIndex(lx, y, lz)];
+            const lBlk = blocklight[lIndex(lx, y, lz)];
+            const lr = lSky / 15.0, lg = lBlk / 15.0;
+            const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, FACE_PY);
+            const facing = ladderFacing(blockType); // 0=+Z,1=-Z,2=+X,3=-X
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const EPS = 0.05;
+            let lverts;
+            if (facing === 0) {        // +Z: plane near the -Z wall
+              const zc = z0 + EPS;
+              lverts = [[x0, y0, zc], [x0 + 1, y0, zc], [x0, y0 + 1, zc], [x0 + 1, y0 + 1, zc]];
+            } else if (facing === 1) { // -Z: plane near the +Z wall
+              const zc = z0 + 1 - EPS;
+              lverts = [[x0 + 1, y0, zc], [x0, y0, zc], [x0 + 1, y0 + 1, zc], [x0, y0 + 1, zc]];
+            } else if (facing === 2) { // +X: plane near the -X wall
+              const xc = x0 + EPS;
+              lverts = [[xc, y0, z0 + 1], [xc, y0, z0], [xc, y0 + 1, z0 + 1], [xc, y0 + 1, z0]];
+            } else {                   // -X: plane near the +X wall
+              const xc = x0 + 1 - EPS;
+              lverts = [[xc, y0, z0], [xc, y0, z0 + 1], [xc, y0 + 1, z0], [xc, y0 + 1, z0 + 1]];
+            }
+            const lbase = floraPos.length / 3;
+            for (let v = 0; v < 4; v += 1) {
+              floraPos.push(...lverts[v]);
+              floraNorm.push(0, 0, 1);
+              const [ut, vt] = FACE_UV_INDICES[v];
+              floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+              floraCol.push(lr, lg, 1.0);
+              floraTint.push(1.0, 1.0, 1.0);
+              floraSway.push(0.0); // ladders never wave
+            }
+            floraIdx.push(lbase, lbase + 1, lbase + 2, lbase + 1, lbase + 3, lbase + 2);
+            continue;
+          } else if (PANE_BLOCK_IDS.has(blockType)) {
+            // --- Wave G2a: glass pane — central post + arms to connected cardinal
+            // neighbours (solid OR pane/glass), emitted into the glass buffer. ---
+            const pSky = skylight[lIndex(lx, y, lz)];
+            const pBlk = blocklight[lIndex(lx, y, lz)];
+            const pr = pSky / 15.0, pg = pBlk / 15.0;
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const emitGlassBox = (ox, oy, oz, sx, sy, sz) => {
+              const faces = [
+                [[[ox+sx,oy,oz+sz],[ox+sx,oy,oz],[ox+sx,oy+sy,oz+sz],[ox+sx,oy+sy,oz]], 1,0,0, FACE_PX],
+                [[[ox,oy,oz],[ox,oy,oz+sz],[ox,oy+sy,oz],[ox,oy+sy,oz+sz]], -1,0,0, FACE_NX],
+                [[[ox,oy+sy,oz],[ox+sx,oy+sy,oz],[ox,oy+sy,oz+sz],[ox+sx,oy+sy,oz+sz]], 0,1,0, FACE_PY],
+                [[[ox,oy,oz+sz],[ox+sx,oy,oz+sz],[ox,oy,oz],[ox+sx,oy,oz]], 0,-1,0, FACE_NY],
+                [[[ox,oy,oz+sz],[ox+sx,oy,oz+sz],[ox,oy+sy,oz+sz],[ox+sx,oy+sy,oz+sz]], 0,0,1, FACE_PZ],
+                [[[ox+sx,oy,oz],[ox,oy,oz],[ox+sx,oy+sy,oz],[ox,oy+sy,oz]], 0,0,-1, FACE_NZ],
+              ];
+              for (const [verts, nx, ny, nz, faceIdx] of faces) {
+                const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, faceIdx);
+                const base = glassPos.length / 3;
+                for (let v = 0; v < 4; v += 1) {
+                  glassPos.push(...verts[v]);
+                  glassNorm.push(nx, ny, nz);
+                  const [ut, vt] = FACE_UV_INDICES[v];
+                  glassUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+                  glassCol.push(pr, pg, 1.0);
+                  glassTint.push(1.0, 1.0, 1.0);
+                }
+                if (ny !== 0) glassIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+                else glassIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+              }
+            };
+            const paneConnect = (nb) => nb !== 0 && (PANE_BLOCK_IDS.has(nb) || nb === 14 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 0 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 5);
+            const t = 0.0625; // half-thickness 1/16 → post is 0.125 wide
+            emitGlassBox(x0 + 0.5 - t, y0, z0 + 0.5 - t, 2 * t, 1.0, 2 * t); // central post
+            if (paneConnect(this.get(worldX + 1, y, worldZ))) emitGlassBox(x0 + 0.5 + t, y0, z0 + 0.5 - t, 0.5 - t, 1.0, 2 * t);
+            if (paneConnect(this.get(worldX - 1, y, worldZ))) emitGlassBox(x0, y0, z0 + 0.5 - t, 0.5 - t, 1.0, 2 * t);
+            if (paneConnect(this.get(worldX, y, worldZ + 1))) emitGlassBox(x0 + 0.5 - t, y0, z0 + 0.5 + t, 2 * t, 1.0, 0.5 - t);
+            if (paneConnect(this.get(worldX, y, worldZ - 1))) emitGlassBox(x0 + 0.5 - t, y0, z0, 2 * t, 1.0, 0.5 - t);
+            continue;
           } else if (PARTIAL_BLOCK_IDS.has(blockType)) {
             // --- Wave F4: partial-geometry emitter (slabs and stairs) ---
             // Sample light from the voxel above (open sky side), same pattern as flora.
@@ -2170,6 +2317,44 @@ export class VoxelWorld {
             if (SLAB_BLOCK_IDS.has(blockType)) {
               // Slab: full-footprint bottom half (y0..y0+0.5).
               emitBox(x0, y0, z0, 1.0, 0.5, 1.0, blockType);
+            } else if (FENCE_BLOCK_IDS.has(blockType)) {
+              // Wave G2a — fence: a central post + 2 rails toward each connected cardinal
+              // neighbour (another fence or any solid-opaque block).
+              const fenceConnect = (nb) => FENCE_BLOCK_IDS.has(nb)
+                || (nb !== 0 && ((BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 0 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 5) && !FLORA_BLOCK_IDS.has(nb));
+              emitBox(x0 + 0.375, y0, z0 + 0.375, 0.25, 1.0, 0.25, blockType); // post
+              const rail = (ox, oz, sx, sz) => {
+                emitBox(ox, y0 + 0.375, oz, sx, 0.1875, sz, blockType); // lower rail
+                emitBox(ox, y0 + 0.75,  oz, sx, 0.1875, sz, blockType); // upper rail
+              };
+              if (fenceConnect(this.get(worldX + 1, y, worldZ))) rail(x0 + 0.5625, z0 + 0.4375, 0.4375, 0.125);
+              if (fenceConnect(this.get(worldX - 1, y, worldZ))) rail(x0, z0 + 0.4375, 0.4375, 0.125);
+              if (fenceConnect(this.get(worldX, y, worldZ + 1))) rail(x0 + 0.4375, z0 + 0.5625, 0.125, 0.4375);
+              if (fenceConnect(this.get(worldX, y, worldZ - 1))) rail(x0 + 0.4375, z0, 0.125, 0.4375);
+            } else if (DOOR_BLOCK_IDS.has(blockType)) {
+              // Wave G2b — door: a 0.1875-thick full-height slab on one cell edge. orient =
+              // which edge when closed; opening rotates it 90° to the perpendicular edge.
+              const T = 0.1875;
+              const orient = doorOrient(blockType);
+              const open = doorIsOpen(blockType);
+              // edge index 0=-Z,1=+X,2=+Z,3=-X. Closed sits on `orient`; open rotates to
+              // the next edge counter-clockwise.
+              const edge = open ? (orient + 3) % 4 : orient;
+              if (edge === 0)      emitBox(x0, y0, z0, 1.0, 1.0, T, blockType);             // -Z
+              else if (edge === 1) emitBox(x0 + 1 - T, y0, z0, T, 1.0, 1.0, blockType);     // +X
+              else if (edge === 2) emitBox(x0, y0, z0 + 1 - T, 1.0, 1.0, T, blockType);     // +Z
+              else                 emitBox(x0, y0, z0, T, 1.0, 1.0, blockType);             // -X
+            } else if (TRAPDOOR_BLOCK_IDS.has(blockType)) {
+              // Wave G2b — trapdoor: closed = a 0.1875 flap flat on the floor; open = the
+              // same flap stood vertical against the hinge wall (orient 0=-Z..3=-X).
+              const T = 0.1875;
+              const orient = trapdoorOrient(blockType);
+              if (!trapdoorIsOpen(blockType)) {
+                emitBox(x0, y0, z0, 1.0, T, 1.0, blockType); // floor flap
+              } else if (orient === 0) emitBox(x0, y0, z0, 1.0, 1.0, T, blockType);          // -Z wall
+              else if (orient === 1)   emitBox(x0 + 1 - T, y0, z0, T, 1.0, 1.0, blockType);  // +X wall
+              else if (orient === 2)   emitBox(x0, y0, z0 + 1 - T, 1.0, 1.0, T, blockType);  // +Z wall
+              else                     emitBox(x0, y0, z0, T, 1.0, 1.0, blockType);          // -X wall
             } else {
               // Stair: bottom slab (y0..y0+0.5) + upper step on back half (y0+0.5..y0+1.0).
               // Orientation encodes which side is the "back" (step side):
@@ -2703,6 +2888,7 @@ export class VoxelWorld {
     this._lastGetCx = NaN;
     this._lastGetCz = NaN;
     this._lastGetChunk = null;
+    this.structureChests.clear(); // Wave G4 — re-derived as chunks regenerate
     this.surfaceHeightCache.clear();
     this.treeInfoCache.clear();
     this.surfaceOreNodeCache.clear();

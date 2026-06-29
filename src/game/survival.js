@@ -30,6 +30,14 @@ export const TOOL_MAX_DURABILITY = {
   diamond_axe:     1562,
   diamond_shovel:  1562,
   diamond_sword:   1562,
+  // Wave G1 — hoes (used for tilling; durability per use)
+  wood_hoe:  60,
+  stone_hoe: 132,
+  iron_hoe:  251,
+  // Wave G3 — bow loses 1 durability per shot
+  bow: 220,
+  // Wave G4 — shears
+  shears: 238,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +64,10 @@ export const TOOL_TIER = {
   diamond_axe:         5,
   diamond_shovel:      5,
   diamond_sword:       5,
+  // Wave G1 — hoes (tier only gates ore drops; harmless for hoes)
+  wood_hoe:  1,
+  stone_hoe: 2,
+  iron_hoe:  4,
 };
 
 /**
@@ -136,6 +148,29 @@ export const ITEM_DEFS = {
   flower:      { id: "flower",      name: "Flower",      placeBlockType: 24 },
   sapling:     { id: "sapling",     name: "Sapling",     placeBlockType: 25 },
   seeds:       { id: "seeds",       name: "Seeds" },
+  // Wave G1 — farming. seeds plant ONLY on farmland (handled in placeBlock, so NO
+  // placeBlockType here — that prevents planting floating wheat on arbitrary cells).
+  wheat:       { id: "wheat",       name: "Wheat" },
+  bread:       { id: "bread",       name: "Bread", food: { hunger: 5, saturation: 6.0 } },
+  wood_hoe:    { id: "wood_hoe",    name: "Wood Hoe",  toolKind: "hoe", toolPower: 1.0 },
+  stone_hoe:   { id: "stone_hoe",   name: "Stone Hoe", toolKind: "hoe", toolPower: 1.0 },
+  iron_hoe:    { id: "iron_hoe",    name: "Iron Hoe",  toolKind: "hoe", toolPower: 1.0 },
+  // Wave G2a — building blocks. ladder/door/trapdoor pick an orientation id from yaw at
+  // placement (special-cased in placeBlock), so placeBlockType is just the base id.
+  fence:       { id: "fence",       name: "Fence",      placeBlockType: 52 },
+  glass_pane:  { id: "glass_pane",  name: "Glass Pane", placeBlockType: 53 },
+  ladder:      { id: "ladder",      name: "Ladder",     placeBlockType: 54 },
+  // Wave G2b — door (places a 2-tall pair, orient from yaw) + trapdoor (orient from yaw).
+  door:        { id: "door",        name: "Door",       placeBlockType: 58 },
+  trapdoor:    { id: "trapdoor",    name: "Trapdoor",   placeBlockType: 74 },
+  // Wave G3 — ranged combat. bow draws on right-click; arrow is ammo; flint/string materials.
+  bow:         { id: "bow",         name: "Bow",        bow: true },
+  arrow:       { id: "arrow",       name: "Arrow" },
+  flint:       { id: "flint",       name: "Flint" },
+  string:      { id: "string",      name: "String" },
+  // Wave G4 — shears (shear sheep + fast-break wool/leaves) + craftable wool block.
+  shears:      { id: "shears",      name: "Shears",     toolKind: "shears", shearPower: 6.0 },
+  wool_block:  { id: "wool_block",  name: "Wool Block", placeBlockType: 82 },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -301,6 +336,15 @@ export const BLOCK_DROPS = {
   30: "snow_block",  // snow block → snow block item
   // Wave F7 — bed: breaking returns the bed item
   46: "bed",
+  // Wave G1 — farmland reverts to a dirt item when broken; crops 47-50 use a custom
+  // drop in breakBlock (mature → wheat + seeds, immature → seeds), so they are NOT here.
+  51: "dirt",
+  // Wave G2a — building blocks (all ladder orientations drop the single ladder item).
+  52: "fence",
+  53: "glass_pane",
+  54: "ladder", 55: "ladder", 56: "ladder", 57: "ladder",
+  // Wave G4 — wool block
+  82: "wool",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -321,6 +365,8 @@ export const BLOCK_EXTRA_DROPS = {
   5:  [{ itemId: "apple", chance: 0.125 }],
   27: [{ itemId: "apple", chance: 0.125 }], // birch leaf — same apple chance
   29: [{ itemId: "apple", chance: 0.10  }], // spruce leaf — slightly lower
+  // Wave G3 — gravel sometimes yields flint (Minecraft behaviour) for arrow crafting.
+  12: [{ itemId: "flint", chance: 0.25 }],
 };
 
 /**
@@ -387,6 +433,14 @@ const BLOCK_HARDNESS = {
   28: 1.6,   // spruce log — same as oak
   29: 0.8,   // spruce leaf — same as oak leaf
   30: 0.5,   // snow — soft, shovel preferred
+  // Wave G1 — farming: crops break instantly; farmland is dirt-soft (shovel)
+  47: 0.05, 48: 0.05, 49: 0.05, 50: 0.05,
+  51: 0.6,
+  // Wave G2a — fence/ladder are wood (axe); glass pane is glass-soft
+  52: 1.5, 53: 0.4,
+  54: 0.4, 55: 0.4, 56: 0.4, 57: 0.4,
+  // Wave G4 — wool (soft; shears break it instantly via shearPower)
+  82: 0.8,
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -415,6 +469,10 @@ const BLOCK_PREFERRED_TOOL = {
   // 14 glass: no preferred tool (any breaks it equally)
   // Wave 10
   22: "axe",   // chest
+  // Wave G1 — farmland mines like dirt
+  51: "shovel",
+  // Wave G2a — fence + ladder mine fastest with an axe (wood)
+  52: "axe", 54: "axe", 55: "axe", 56: "axe", 57: "axe",
   // Wave 8 — all ores need a pickaxe
   16: "pickaxe", // coal ore
   17: "pickaxe", // iron ore
@@ -422,6 +480,11 @@ const BLOCK_PREFERRED_TOOL = {
   19: "pickaxe", // diamond ore
   20: "pickaxe", // redstone ore
 };
+
+// Wave G2b — doors (58-73) drop the door item, trapdoors (74-81) the trapdoor item; both
+// are oak (axe-preferred, plank-soft). Populated via loops to avoid 24 literal lines.
+for (let i = 58; i <= 73; i += 1) { BLOCK_DROPS[i] = "door"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
+for (let i = 74; i <= 81; i += 1) { BLOCK_DROPS[i] = "trapdoor"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
 
 // ---------------------------------------------------------------------------
 // Recipe matching helpers — shared by the crafting grid and applyRecipe.
@@ -1091,6 +1154,126 @@ export const RECIPES = [
     output: { itemId: "empty_bucket", count: 1 },
     requiresWorkbench: true,
   },
+  // Wave G1 — hoes (2 material + 2 sticks, axe/pickaxe shape) + bread (3 wheat in a row).
+  {
+    id: "wood_hoe",
+    name: "Wood Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "plank", S: "stick" },
+    inputs: [{ itemId: "plank", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "wood_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "stone_hoe",
+    name: "Stone Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "stone", S: "stick" },
+    inputs: [{ itemId: "stone", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "stone_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_hoe",
+    name: "Iron Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
+    inputs: [{ itemId: "iron_ingot", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "iron_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "bread",
+    name: "Bread",
+    pattern: ["___", "___", "WWW"],
+    key: { W: "wheat" },
+    inputs: [{ itemId: "wheat", count: 3 }],
+    output: { itemId: "bread", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave G2a — building blocks.
+  {
+    id: "fence",
+    name: "Fence x3",
+    pattern: ["XSX", "XSX", "___"],
+    key: { X: "plank", S: "stick" },
+    inputs: [{ itemId: "plank", count: 4 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "fence", count: 3 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "glass_pane",
+    name: "Glass Pane x16",
+    pattern: ["___", "XXX", "XXX"],
+    key: { X: "glass" },
+    inputs: [{ itemId: "glass", count: 6 }],
+    output: { itemId: "glass_pane", count: 16 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "ladder",
+    name: "Ladder x3",
+    pattern: ["S_S", "SSS", "S_S"],
+    key: { S: "stick" },
+    inputs: [{ itemId: "stick", count: 7 }],
+    output: { itemId: "ladder", count: 3 },
+    requiresWorkbench: true,
+  },
+  // Wave G2b — door (6 plank → 1) + trapdoor (6 plank → 2).
+  {
+    id: "door",
+    name: "Door",
+    pattern: ["XX_", "XX_", "XX_"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 6 }],
+    output: { itemId: "door", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "trapdoor",
+    name: "Trapdoor x2",
+    pattern: ["XXX", "XXX", "___"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 6 }],
+    output: { itemId: "trapdoor", count: 2 },
+    requiresWorkbench: true,
+  },
+  // Wave G3 — bow (3 stick + 3 string) + arrows (flint + stick + feather → 4).
+  {
+    id: "bow",
+    name: "Bow",
+    pattern: ["_SX", "S_X", "_SX"],
+    key: { S: "stick", X: "string" },
+    inputs: [{ itemId: "stick", count: 3 }, { itemId: "string", count: 3 }],
+    output: { itemId: "bow", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "arrow",
+    name: "Arrows x4",
+    pattern: ["_F_", "_S_", "_E_"],
+    key: { F: "flint", S: "stick", E: "feather" },
+    inputs: [{ itemId: "flint", count: 1 }, { itemId: "stick", count: 1 }, { itemId: "feather", count: 1 }],
+    output: { itemId: "arrow", count: 4 },
+    requiresWorkbench: true,
+  },
+  // Wave G4 — shears (2 iron, diagonal) + wool block (4 wool, shapeless).
+  {
+    id: "shears",
+    name: "Shears",
+    pattern: ["_X_", "X__", "___"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 2 }],
+    output: { itemId: "shears", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "wool_block",
+    name: "Wool Block",
+    inputs: [{ itemId: "wool", count: 4 }],
+    output: { itemId: "wool_block", count: 1 },
+    requiresWorkbench: false,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -1382,6 +1565,21 @@ export function getBreakPower(itemId, blockType) {
     return item.toolPower;
   }
   return 1.0;
+}
+
+// Wave G1 — true if the held item is a hoe (used by placeBlock to till dirt → farmland).
+export function isHoe(itemId) {
+  return ITEM_DEFS[itemId]?.toolKind === "hoe";
+}
+
+// Wave G3 — true if the held item is a bow (right-click draws instead of placing).
+export function isBow(itemId) {
+  return ITEM_DEFS[itemId]?.bow === true;
+}
+
+// Wave G4 — true if the held item is shears (shear sheep + fast-break wool/leaves).
+export function isShears(itemId) {
+  return ITEM_DEFS[itemId]?.toolKind === "shears";
 }
 
 export function getMobDamage(itemId, baseDamage = 1) {

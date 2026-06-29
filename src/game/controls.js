@@ -20,6 +20,7 @@ export function setupControls({
   closeChestPanel,
   breakBlockAt,
   placeBlockAt,
+  onRightRelease,
   toNdc,
   toggleF3Overlay,
   onThrowItem,
@@ -208,6 +209,13 @@ export function setupControls({
     }
   };
 
+  // Wave G3 — releasing right-click fires a drawn bow (no-op for any other held item).
+  const onMouseUp = (event) => {
+    if (event.button === 2 && typeof onRightRelease === "function") {
+      onRightRelease();
+    }
+  };
+
   const onStartClick = () => {
     startGame();
   };
@@ -219,6 +227,7 @@ export function setupControls({
   documentObj.addEventListener("pointerlockchange", onPointerLockChange);
   renderer.domElement.addEventListener("contextmenu", onContextMenu);
   renderer.domElement.addEventListener("mousedown", onMouseDown);
+  windowObj.addEventListener("mouseup", onMouseUp);
   startButton.addEventListener("click", onStartClick);
 
   return () => {
@@ -229,6 +238,7 @@ export function setupControls({
     documentObj.removeEventListener("pointerlockchange", onPointerLockChange);
     renderer.domElement.removeEventListener("contextmenu", onContextMenu);
     renderer.domElement.removeEventListener("mousedown", onMouseDown);
+    windowObj.removeEventListener("mouseup", onMouseUp);
     startButton.removeEventListener("click", onStartClick);
   };
 }
