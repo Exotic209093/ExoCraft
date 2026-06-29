@@ -115,6 +115,8 @@ const DEFAULT_GAME_CONFIG = {
       { id: 79, name: "Trapdoor E (open)", color: 0xc8a060, transparent: true },
       { id: 80, name: "Trapdoor S (open)", color: 0xc8a060, transparent: true },
       { id: 81, name: "Trapdoor W (open)", color: 0xc8a060, transparent: true },
+      // Wave G4 — wool block (sheared/crafted from wool; a plain opaque cube).
+      { id: 82, name: "Wool", color: 0xe8e8e8 },
     ],
     generation: {
       seed: 1337,

@@ -55,6 +55,8 @@ import {
   isHoe,
   // Wave G3 — ranged
   isBow,
+  // Wave G4 — shears
+  isShears,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
@@ -171,6 +173,11 @@ const BED_MOB_CHECK_RADIUS = 8;        // hostile-mob proximity radius (blocks)
 const WHEAT_STAGE_MIN = 47;
 const WHEAT_STAGE_MAX = 50; // mature, harvestable
 const FARMLAND_BLOCK_TYPE = 51;
+// Wave G4 — wool block + tuning.
+const WOOL_BLOCK_TYPE = 82;
+const WOOL_REGROW_MS = 120000;            // sheared sheep regrows wool after ~2 min on grass
+const HOSTILE_HARD_DESPAWN_DIST = 44;     // hostiles beyond this from the player vanish
+const HOSTILE_PER_TYPE_CAP = 4;           // at most this many of each hostile type at once
 const FALLING_BLOCK_TYPES = new Set([SAND_BLOCK_TYPE, GRAVEL_BLOCK_TYPE]);
 const FURNACE_INTERACT_RADIUS = 6;
 const OBJECTIVE_WAYPOINT_RESCAN_MS = 250;
@@ -2622,8 +2629,37 @@ function getChestState(key, createIfMissing = true) {
   if (!chest && createIfMissing) {
     chest = createDefaultChestInventory();
     chestStates.set(key, chest);
+    // Wave G4 — a structure (hut) chest fills with deterministic loot the first time it's
+    // created; afterwards it persists as a normal chest, so it never re-fills.
+    if (world.structureChests && world.structureChests.has(key)) {
+      fillStructureChestLoot(chest, key);
+    }
   }
   return chest || null;
+}
+
+// Wave G4 — deterministic loot keyed by the chest's world position (no Math.random, so a
+// reload/regen before opening produces identical loot).
+function fillStructureChestLoot(chest, key) {
+  const [x, y, z] = key.split(",").map(Number);
+  let seed = ((Math.imul(x, 73856093) ^ Math.imul(y, 19349663) ^ Math.imul(z, 83492791)) >>> 0) || 1;
+  const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  const pool = [
+    { itemId: "bread", min: 1, max: 3 },
+    { itemId: "arrow", min: 2, max: 6 },
+    { itemId: "iron_ingot", min: 1, max: 2 },
+    { itemId: "coal", min: 1, max: 4 },
+    { itemId: "apple", min: 1, max: 2 },
+    { itemId: "wheat", min: 1, max: 3 },
+  ];
+  const stacks = 3 + Math.floor(rnd() * 3); // 3-5 stacks
+  for (let i = 0; i < stacks; i += 1) {
+    const item = pool[Math.floor(rnd() * pool.length)];
+    const count = item.min + Math.floor(rnd() * (item.max - item.min + 1));
+    const slot = Math.floor(rnd() * chest.length);
+    if (!chest[slot]) chest[slot] = { itemId: item.itemId, count };
+    else chest[slot].count = Math.min(64, chest[slot].count + count);
+  }
 }
 
 function serializeChests() {
@@ -2936,6 +2972,13 @@ function maybeSpawnHostileMob() {
   if (hostileMobs.length >= maxCount) {
     return;
   }
+  // Wave G4 — per-type spawn cap so one mob type can't monopolise the active set.
+  const typeCounts = {};
+  for (const mob of hostileMobs) typeCounts[mob.mobType] = (typeCounts[mob.mobType] || 0) + 1;
+  const allowedTypes = Object.keys(MOB_TYPES).filter((t) => (typeCounts[t] || 0) < HOSTILE_PER_TYPE_CAP);
+  if (allowedTypes.length === 0) {
+    return;
+  }
   const threshold = Number.isFinite(hostileMobConfig.spawnDayFactorThreshold)
     ? hostileMobConfig.spawnDayFactorThreshold
     : 0.56;
@@ -2977,7 +3020,9 @@ function maybeSpawnHostileMob() {
     if (tooClose) {
       continue;
     }
-    createHostileMob({ x, y, z });
+    // Force a type that is still under its per-type cap (Wave G4).
+    const forcedType = allowedTypes[Math.floor(Math.random() * allowedTypes.length)];
+    createHostileMob({ x, y, z }, null, forcedType);
     state.recentAction = "Hostile mob spawned";
     return;
   }
@@ -3532,9 +3577,16 @@ function createPassiveMob(position, saved = null, forcedType = null) {
     babyGrowMsRemaining: Number.isFinite(saved?.babyGrowMsRemaining) ? Math.max(0, saved.babyGrowMsRemaining) : 0,
     breedCooldownMs: Number.isFinite(saved?.breedCooldownMs) ? Math.max(0, saved.breedCooldownMs) : 0,
     loveTimerMs: 0, // transient (never persisted)
+    // Wave G4 — sheared state (sheep only).
+    sheared: saved?.sheared === true,
+    woolRegrowMs: Number.isFinite(saved?.woolRegrowMs) ? Math.max(0, saved.woolRegrowMs) : 0,
   };
   if (mob.isBaby) {
     mesh.scale.setScalar(0.5);
+  }
+  if (mob.sheared) {
+    const bodyPart = mesh.userData?.parts?.body;
+    if (bodyPart) bodyPart.visible = false;
   }
   mesh.traverse((child) => { if (child.isMesh) child.userData.passiveMobId = id; });
   mesh.userData.passiveMobId = id;
@@ -3584,6 +3636,9 @@ function serializePassiveMobs() {
       isBaby: mob.isBaby === true,
       babyGrowMsRemaining: Math.floor(mob.babyGrowMsRemaining || 0),
       breedCooldownMs: Math.floor(mob.breedCooldownMs || 0),
+      // Wave G4 — sheared state.
+      sheared: mob.sheared === true,
+      woolRegrowMs: Math.floor(mob.woolRegrowMs || 0),
     });
   }
   return result;
@@ -3674,6 +3729,16 @@ function updatePassiveMobs(deltaMs) {
       if (mob.babyGrowMsRemaining <= 0) {
         mob.isBaby = false;
         mob.mesh.scale.setScalar(1);
+      }
+    }
+    // Wave G4 — a sheared sheep regrows its wool, faster while standing on grass.
+    if (mob.sheared) {
+      const onGrass = world.get(Math.floor(mob.pos.x), Math.floor(mob.pos.y) - 1, Math.floor(mob.pos.z)) === 1;
+      mob.woolRegrowMs = Math.max(0, mob.woolRegrowMs - deltaMs * (onGrass ? 2 : 1));
+      if (mob.woolRegrowMs <= 0) {
+        mob.sheared = false;
+        const bodyPart = mob.mesh.userData?.parts?.body;
+        if (bodyPart) bodyPart.visible = true;
       }
     }
 
@@ -3793,6 +3858,37 @@ function tryFeedPassiveMob(ndcX = 0, ndcY = 0) {
   state.recentAction = `Fed the ${mob.mobType}`;
   markInventoryPanelDirty();
   markCraftPanelDirty();
+  return true;
+}
+
+// Wave G4 — right-click a sheep with shears → drop wool + hide the wool body until it
+// regrows. Mirrors tryFeedPassiveMob's raycast against the mob group.
+function tryShearSheep(ndcX = 0, ndcY = 0) {
+  if (passiveMobs.length === 0) return false;
+  if (!isShears(getSelectedItemId())) return false;
+  raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
+  const hits = raycaster.intersectObjects(passiveMobGroup.children, true);
+  if (hits.length === 0) return false;
+  const maxReach = Number.isFinite(worldConfig.maxReach) ? worldConfig.maxReach : 6;
+  const hit = hits.find((e) => e.distance <= maxReach);
+  if (!hit) return false;
+  const passiveMobId = hit.object?.userData?.passiveMobId;
+  if (!Number.isFinite(passiveMobId)) return false;
+  const mob = passiveMobs.find((m) => m.id === passiveMobId);
+  if (!mob || isMobDying(mob)) return false;
+  if (mob.mobType !== "sheep") { state.recentAction = "Only sheep can be sheared"; return false; }
+  if (mob.sheared) { state.recentAction = "Already sheared"; return false; }
+  // 1-3 wool, deterministic from the sheep id (no Math.random in the loot count).
+  const woolCount = 1 + Math.floor(seededXpFloat((mob.id * 2654435761) >>> 0) * 3);
+  itemEntities.spawnItemEntity("wool", woolCount, mob.pos.x, mob.pos.y + 0.6, mob.pos.z);
+  mob.sheared = true;
+  mob.woolRegrowMs = WOOL_REGROW_MS;
+  const bodyPart = mob.mesh.userData?.parts?.body;
+  if (bodyPart) bodyPart.visible = false;
+  decrementDurability(state.inventory, state.selectedSlot, 1);
+  viewmodel.triggerSwing();
+  state.recentAction = `Sheared the sheep (+${woolCount} wool)`;
+  markInventoryPanelDirty();
   return true;
 }
 
@@ -3919,6 +4015,13 @@ function updateHostileMobs(deltaMs) {
     const toPlayerZ = state.playerPos.z - mob.pos.z;
     const planarDistance = Math.hypot(toPlayerX, toPlayerZ);
     mob.attackCooldownMs = Math.max(0, mob.attackCooldownMs - deltaMs);
+
+    // Wave G4 — hard despawn hostiles that wander too far from the player (Minecraft-style),
+    // keeping the active mob set bounded near the player.
+    if (planarDistance > HOSTILE_HARD_DESPAWN_DIST) {
+      removeHostileMobAt(i);
+      continue;
+    }
 
     if (state.mode !== "playing") {
       mob.mesh.position.copy(mob.pos);
@@ -6432,6 +6535,11 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     return false;
   }
 
+  // Wave G4 — shear a sheep (right-click with shears).
+  if (isShears(slot.itemId) && tryShearSheep(ndcX, ndcY)) {
+    return true;
+  }
+
   // Wave G1 — feed an animal to breed it (wheat → cow/sheep, seeds → chicken/pig). Checked
   // before tilling/planting so right-clicking a chicken with seeds feeds it, not the ground.
   if ((slot.itemId === "wheat" || slot.itemId === "seeds") && tryFeedPassiveMob(ndcX, ndcY)) {
@@ -7823,6 +7931,7 @@ window.render_game_to_text = () => {
         isBaby: mob.isBaby === true,
         inLove: (mob.loveTimerMs || 0) > 0,
         breedCooldownMs: Math.floor(mob.breedCooldownMs || 0),
+        sheared: mob.sheared === true,
       })),
     },
     arrowProjectiles: {
@@ -7980,6 +8089,51 @@ window.__exoCraftDebug = {
     return { id: world.get(bx, by, bz) };
   },
   onLadder: () => state.onLadder === true,
+  // Wave G4 — shear a sheep by id (test helper); returns its sheared/wool state.
+  shearSheepById: (id) => {
+    const mob = passiveMobs.find((m) => m.id === id);
+    if (!mob) return { ok: false, reason: "no mob" };
+    if (mob.mobType !== "sheep") return { ok: false, reason: "not a sheep" };
+    if (mob.sheared) return { ok: false, reason: "already sheared" };
+    const woolCount = 1 + Math.floor(seededXpFloat((mob.id * 2654435761) >>> 0) * 3);
+    itemEntities.spawnItemEntity("wool", woolCount, mob.pos.x, mob.pos.y + 0.6, mob.pos.z);
+    mob.sheared = true; mob.woolRegrowMs = WOOL_REGROW_MS;
+    const bp = mob.mesh.userData?.parts?.body; if (bp) bp.visible = false;
+    return { ok: true, woolCount, sheared: true };
+  },
+  regrowSheepById: (id) => {
+    const mob = passiveMobs.find((m) => m.id === id);
+    if (!mob) return { ok: false };
+    mob.woolRegrowMs = 1; // next tick clears it
+    return { ok: true };
+  },
+  hostileTypeCounts: () => {
+    const c = {}; for (const m of hostileMobs) c[m.mobType] = (c[m.mobType] || 0) + 1; return c;
+  },
+  // Wave G4 — generate chunks in a radius (chunks) and return the nearest hut loot chest.
+  findNearestHut: (radiusChunks = 12) => {
+    const S = worldConfig.chunk.size;
+    const pcx = Math.floor(state.playerPos.x / S), pcz = Math.floor(state.playerPos.z / S);
+    const r = Math.max(1, Math.min(20, Math.floor(radiusChunks)));
+    for (let dz = -r; dz <= r; dz += 1) for (let dx = -r; dx <= r; dx += 1) {
+      world.ensureChunk(pcx + dx, pcz + dz);
+    }
+    let best = null, bestD = Infinity;
+    for (const k of world.structureChests) {
+      const [x, y, z] = k.split(",").map(Number);
+      const d = (x - state.playerPos.x) ** 2 + (z - state.playerPos.z) ** 2;
+      if (d < bestD) { bestD = d; best = { x, y, z, key: k, block: world.get(x, y, z) }; }
+    }
+    return { count: world.structureChests.size, nearest: best };
+  },
+  // Wave G4 — open (or fill) the chest at a position and return its non-empty stacks.
+  peekChestLoot: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (world.get(bx, by, bz) !== CHEST_BLOCK_TYPE) return { ok: false, reason: "no chest", block: world.get(bx, by, bz) };
+    const chest = getChestState(toChestKey(bx, by, bz), true);
+    const items = (chest || []).filter(Boolean).map((s) => ({ itemId: s.itemId, count: s.count }));
+    return { ok: true, items, total: items.reduce((a, s) => a + s.count, 0) };
+  },
   // Wave G3 bow debug hooks ------------------------------------------------------
   drawBow: () => { startBowDraw(); return { drawing: state.bowDrawing }; },
   // setBowCharge(c) back-dates the draw start so currentBowCharge() == c without relying

@@ -67,6 +67,8 @@ const TILE = {
   // Wave G2b — door + trapdoor tiles
   door_oak:        [3, 6],
   trapdoor_oak:    [4, 6],
+  // Wave G4 — wool
+  wool:            [5, 6],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -164,6 +166,8 @@ export const BLOCK_FACE_TILES = {
     { px: "door_oak", nx: "door_oak", py: "door_oak", ny: "door_oak", pz: "door_oak", nz: "door_oak" }])),
   ...Object.fromEntries(Array.from({ length: 8 }, (_, i) => [74 + i,
     { px: "trapdoor_oak", nx: "trapdoor_oak", py: "trapdoor_oak", ny: "trapdoor_oak", pz: "trapdoor_oak", nz: "trapdoor_oak" }])),
+  // Wave G4 — wool (opaque cube).
+  82: { px: "wool", nx: "wool", py: "wool", ny: "wool", pz: "wool", nz: "wool" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1069,6 +1073,20 @@ function paintTrapdoorOak(ctx, col, row) {
   }
 }
 
+// Wave G4 — wool: soft off-white with subtle fluffy noise.
+function paintWool(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 514);
+      let v = 232;
+      if (n < 0.25) v -= 18;
+      else if (n > 0.85) v += 10;
+      shade(ctx, ox + x, oy + y, rgb(v, v, Math.min(255, v + 4)));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -1128,6 +1146,8 @@ function paintAtlas(ctx) {
   // Wave G2b — door + trapdoor
   paintDoorOak(ctx, ...TILE.door_oak);
   paintTrapdoorOak(ctx, ...TILE.trapdoor_oak);
+  // Wave G4 — wool
+  paintWool(ctx, ...TILE.wool);
 }
 
 export function createAtlasTexture() {
@@ -1320,6 +1340,18 @@ function getAtlasCanvas() {
 
 // Palette of distinct colors for non-block items (tools/resources).
 const ITEM_CHIP_COLORS = {
+  // Wave G1/G2/G3/G4 — item chip colors for non-block items.
+  wheat:              "#d8c24a",
+  bread:              "#c8924a",
+  wood_hoe:           "#c8a060",
+  stone_hoe:          "#9098a0",
+  iron_hoe:           "#d8d8e0",
+  bow:                "#b08040",
+  arrow:              "#d8d8d8",
+  flint:              "#404048",
+  string:             "#e8e8e8",
+  shears:             "#b8c4cc",
+  wool_block:         "#e8e8e8",
   plank:              "#c8a060",
   stick:              "#a07040",
   bone_shard:         "#e0dcc8",

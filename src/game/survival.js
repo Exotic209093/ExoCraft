@@ -36,6 +36,8 @@ export const TOOL_MAX_DURABILITY = {
   iron_hoe:  251,
   // Wave G3 — bow loses 1 durability per shot
   bow: 220,
+  // Wave G4 — shears
+  shears: 238,
 };
 
 // ---------------------------------------------------------------------------
@@ -166,6 +168,9 @@ export const ITEM_DEFS = {
   arrow:       { id: "arrow",       name: "Arrow" },
   flint:       { id: "flint",       name: "Flint" },
   string:      { id: "string",      name: "String" },
+  // Wave G4 — shears (shear sheep + fast-break wool/leaves) + craftable wool block.
+  shears:      { id: "shears",      name: "Shears",     toolKind: "shears", shearPower: 6.0 },
+  wool_block:  { id: "wool_block",  name: "Wool Block", placeBlockType: 82 },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -338,6 +343,8 @@ export const BLOCK_DROPS = {
   52: "fence",
   53: "glass_pane",
   54: "ladder", 55: "ladder", 56: "ladder", 57: "ladder",
+  // Wave G4 — wool block
+  82: "wool",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -432,6 +439,8 @@ const BLOCK_HARDNESS = {
   // Wave G2a — fence/ladder are wood (axe); glass pane is glass-soft
   52: 1.5, 53: 0.4,
   54: 0.4, 55: 0.4, 56: 0.4, 57: 0.4,
+  // Wave G4 — wool (soft; shears break it instantly via shearPower)
+  82: 0.8,
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -1248,6 +1257,23 @@ export const RECIPES = [
     output: { itemId: "arrow", count: 4 },
     requiresWorkbench: true,
   },
+  // Wave G4 — shears (2 iron, diagonal) + wool block (4 wool, shapeless).
+  {
+    id: "shears",
+    name: "Shears",
+    pattern: ["_X_", "X__", "___"],
+    key: { X: "iron_ingot" },
+    inputs: [{ itemId: "iron_ingot", count: 2 }],
+    output: { itemId: "shears", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "wool_block",
+    name: "Wool Block",
+    inputs: [{ itemId: "wool", count: 4 }],
+    output: { itemId: "wool_block", count: 1 },
+    requiresWorkbench: false,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -1549,6 +1575,11 @@ export function isHoe(itemId) {
 // Wave G3 — true if the held item is a bow (right-click draws instead of placing).
 export function isBow(itemId) {
   return ITEM_DEFS[itemId]?.bow === true;
+}
+
+// Wave G4 — true if the held item is shears (shear sheep + fast-break wool/leaves).
+export function isShears(itemId) {
+  return ITEM_DEFS[itemId]?.toolKind === "shears";
 }
 
 export function getMobDamage(itemId, baseDamage = 1) {

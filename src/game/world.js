@@ -651,6 +651,11 @@ export class VoxelWorld {
     // target-block raycast skip when neither the camera nor the world changed.
     this.editVersion = 0;
 
+    // Wave G4 — world positions ("x,y,z") of structure (hut) loot chests. Re-derived
+    // deterministically whenever a chunk is (re)generated; consumed once by main.js to
+    // fill the chest with loot on first open (then it persists as a normal chest).
+    this.structureChests = new Set();
+
     this.surfaceHeightCache = new Map();
     this.treeInfoCache = new Map();
     this.surfaceOreNodeCache = new Map();
@@ -1286,6 +1291,58 @@ export class VoxelWorld {
     return 0;
   }
 
+  // Wave G4 — deterministically stamp a small cobblestone hut with a loot chest into a
+  // rare chunk. Fully contained within one chunk (footprint local 5..9) so it never spans a
+  // seam. Pure function of (cx,cz)+seed via hashLattice2, so it regenerates identically on
+  // eviction/reload. Records the chest world-position in structureChests for main.js to fill.
+  maybeStampHut(cx, cz, blocks, emitters) {
+    if (this.hashLattice2(cx * 131 + 7, cz * 197 + 13) >= 0.06) return; // ~6% of chunks
+    const S = this.chunkSize;
+    const seaLevel = this.generation.seaLevel || 38;
+    // Surface scan of the 5x5 footprint (local 5..9): require flat, grass-topped, dry ground.
+    let minSurf = Infinity, maxSurf = -Infinity, ok = true;
+    for (let lz = 5; lz <= 9 && ok; lz += 1) {
+      for (let lx = 5; lx <= 9; lx += 1) {
+        let sy = -1;
+        for (let y = this.height - 1; y >= 0; y -= 1) {
+          const b = blocks[this.index(lx, y, lz)];
+          if (b !== 0) { sy = y; break; }
+        }
+        if (sy < 0 || blocks[this.index(lx, sy, lz)] !== 1) { ok = false; break; } // must be grass-topped
+        if (sy <= seaLevel || sy >= this.height - 6) { ok = false; break; }
+        if (sy < minSurf) minSurf = sy;
+        if (sy > maxSurf) maxSurf = sy;
+      }
+    }
+    if (!ok || maxSurf - minSurf > 1) return; // skip on uneven ground (still deterministic)
+
+    const sy = minSurf;
+    const put = (lx, ly, lz, id) => {
+      if (lx < 0 || lx >= S || lz < 0 || lz >= S || ly < 0 || ly >= this.height) return;
+      const idx = this.index(lx, ly, lz);
+      blocks[idx] = id;
+      const emit = BLOCK_LIGHT_EMIT[id] || 0;
+      if (emit > 0) emitters.set(idx, emit); else emitters.delete(idx);
+    };
+    // Floor (cobblestone), interior cleared, cobblestone walls, wood roof.
+    for (let lz = 5; lz <= 9; lz += 1) for (let lx = 5; lx <= 9; lx += 1) {
+      put(lx, sy, lz, 10);           // floor
+      put(lx, sy + 4, lz, 4);        // roof (wood)
+      for (let h = 1; h <= 3; h += 1) {
+        const edge = (lx === 5 || lx === 9 || lz === 5 || lz === 9);
+        put(lx, sy + h, lz, edge ? 10 : 0); // walls vs hollow interior
+      }
+    }
+    // Doorway on the +Z wall (centre): clear + place a 2-tall door (lower 58 / upper 66, N).
+    put(7, sy + 1, 9, 58);
+    put(7, sy + 2, 9, 66);
+    // A torch on an interior wall for light.
+    put(6, sy + 2, 5, 8);
+    // A loot chest in the back corner; register it for deterministic fill on first open.
+    put(8, sy + 1, 6, 22);
+    this.structureChests.add(`${cx * S + 8},${sy + 1},${cz * S + 6}`);
+  }
+
   createChunk(cx, cz) {
     const key = toChunkKey(cx, cz);
     const blocks = new Uint8Array(this.chunkSize * this.chunkSize * this.height);
@@ -1315,6 +1372,10 @@ export class VoxelWorld {
         }
       }
     }
+
+    // Wave G4 — stamp a rare hut+chest BEFORE applying player edits, so a player who
+    // breaks the hut (recorded as edits) overrides it on regen.
+    this.maybeStampHut(cx, cz, blocks, emitters);
 
     const edits = this.chunkEdits.get(key);
     if (edits) {
@@ -2827,6 +2888,7 @@ export class VoxelWorld {
     this._lastGetCx = NaN;
     this._lastGetCz = NaN;
     this._lastGetChunk = null;
+    this.structureChests.clear(); // Wave G4 — re-derived as chunks regenerate
     this.surfaceHeightCache.clear();
     this.treeInfoCache.clear();
     this.surfaceOreNodeCache.clear();
