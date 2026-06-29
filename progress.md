@@ -793,3 +793,48 @@ FIXES (all on `claude/busy-hopper-o55t75`; build green, 36 modules):
 VERIFIED — (A) a Node harness (esbuild-bundled VoxelWorld) compared `computeChunkLight` output NEW vs git-stashed OLD across a 5×5 region: **byte-identical on all 25 chunks** (frontier seed + direct reads + emitter index + Uint8 are exact). (B) Marking sufficiency over 11 representative edits (interior/edge/corner × break/stone/torch/water/glass): every chunk whose TRUE post-edit light changed within the 1-ring was marked — **0 misses** (no new staleness vs the old all-8 marking; beyond-1-ring is a pre-existing limitation equally missed by old). (C) Live headless run (real start + movement + a left-click BREAK with pointerLocked + 6 debug edits across interior/seam/corner cells): ZERO JS errors, solidBlocks tracked every edit, targetBlock resolved (Leaf @6,45,9), screenshot shows correct skylight gradient + leaf AO shadows + target outline + full HUD, no missing faces.
 
 DEFERRED (documented, not shipped — out of scope for the stutter): reusable typed-array scratch mesh buffers in `buildChunkMesh` (rank 8 — biggest remaining GC win but an L-effort rewrite of the whole ~45-array emit path with real mesh-corruption risk; the slice-not-subarray rule is load-bearing); the breakBlock mob-occlusion raycast share (rare 3-cast case only when a mob is occluded under the crosshair); web workers / greedy meshing / BVH raycasting (larger architectural future work).
+
+# === MINECRAFT-FIDELITY PHASE (G1-G4) — closer to actual Minecraft ===
+Four feature waves on `claude/busy-hopper-o55t75` (PR #2), each build- + headless-verified
+(Playwright + debug hooks + render_game_to_text) and committed separately. Block ids 47-82
+added; save schema bumped v10→v11 (all new fields forward-default, old saves load unchanged).
+
+## Wave G1 — Farming & breeding
+Hoe tier (wood/stone/iron) tills grass/dirt → farmland (51). Wheat crop = 4 distinct ids
+(47-50) through the existing flora cross-quad mesher, height-scaled per stage + golden when
+mature; grows on a bounded deterministic random-tick (seeded LCG, persisted) on farmland in
+light. Seeds drop from tall grass; harvesting mature wheat → wheat + 1-3 seeds; bread from 3
+wheat. Breeding: feed two adults (wheat→cow/sheep, seeds→chicken/pig) → a half-scale baby
+that grows up in 5 min, with per-animal cooldowns. VERIFIED: full 47→48→49→50 growth across a
+25-cell field; a bred baby cow grew to adult.
+
+## Wave G2 — Building blocks (two sub-commits)
+G2a: fence (52, post+connecting rails), glass pane (53, thin connecting plane in the glass
+buffer), ladder (54-57, flat alpha-cutout quad with a real climb — forward/Space up, back/
+sneak down, else cling — as a velocity override guarded fly>water>ladder>land). G2b: doors
+(58-73, 2-tall, open/close+facing encoded in the id, atomic 2-cell place, right-click toggles
+both halves) + trapdoors (74-81, closed thin floor via getBlockTopY, open vertical flap).
+Physics stayed surgery-free (open ids passable, closed door full-cube, closed trapdoor thin
+floor). VERIFIED: fence connects across a chunk seam, climb raised the player y44→46, door
+toggled 58/66→62/70→58/66, trapdoor 74→78.
+
+## Wave G3 — Bow + arrows
+Bow (durability 220) right-click-draws (charge over 1s, controls.js mouseup → release), charge
+scales speed (14→40) + damage (2→9). A SEPARATE player-arrow array flies a gravity arc with
+sub-stepping (no tunnelling) and damages mobs (never the player) reusing the death/loot/XP
+path. Arrow/flint/string items; recipes; flint = 25% gravel extra-drop, string from spiders.
+VERIFIED: charge 0.2 vs 1.0 → 3 vs 9 damage; arrow vy decreases (gravity); six aimed arrows
+killed a zombie (XP dropped).
+
+## Wave G4 — Shears + sheep wool, mob despawn/cap, generated hut
+Shears (2 iron, durability 238) shear a sheep → 1-3 wool + hides the wool body until regrow
+(~2 min, faster on grass); wool block (82) craftable+placeable. Hostiles hard-despawn beyond
+44 blocks; natural spawns capped at 4 per type. A rare (~6%/chunk) deterministic cobblestone+
+wood hut with a door, torch, and a loot chest is stamped during chunk gen (contained in one
+chunk, regenerates identically); the chest fills with position-seeded loot on first open.
+VERIFIED: shear→wool+sheared→regrow; a hostile despawned past 44 blocks (1→0); a hut chest
+filled with 13 deterministic loot items; hut renders as cobblestone+wood on grass.
+
+DEFERRED (follow-ups): fence 1.5-tall anti-jump collision + thin pane collision (currently
+full-cube); door light-sampling in fully-enclosed doorways reads dark (shares the slab/stair
+"sample above" limitation); bow viewmodel pull-back animation.
