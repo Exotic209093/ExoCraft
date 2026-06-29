@@ -838,3 +838,19 @@ filled with 13 deterministic loot items; hut renders as cobblestone+wood on gras
 DEFERRED (follow-ups): fence 1.5-tall anti-jump collision + thin pane collision (currently
 full-cube); door light-sampling in fully-enclosed doorways reads dark (shares the slab/stair
 "sample above" limitation); bow viewmodel pull-back animation.
+
+## Wave UI/TX — Minecraft look (UI restyle + texture polish)
+UI (style.css + index.html): swapped Segoe-UI for pixel fonts (VT323 body, Press Start 2P for
+the title + buttons, with a monospace fallback). Converted the rounded gradient chrome to
+authentic Minecraft GUI — dark beveled menu with a stone Start button; F3-style stats; dark
+beveled objective panel; light-grey (#c6c6c6) container GUIs (inventory/craft/chest/furnace)
+with sunken #8b8b8b slots, dark uppercase section titles, and outline-highlighted selected/
+transfer slots; stone-styled save-controls + recipe/furnace buttons; crosshair now uses
+mix-blend-mode:difference so it inverts against the scene. The hotbar was already MC-styled and
+kept. Textures (textures.js): added cellNoise (coherent 2px value-noise) + idNoise helpers and
+rewrote the four weakest terrain tiles — stone (calm cool-grey blobs, not white-noise streaks),
+dirt (muted clumpy brown + sparse pebbles, grass_side dirt band realigned to match), gravel
+(chunky grey/brown pebbles), and cobblestone (jittered-Voronoi rounded stones with dark mortar
+seams — the big win; the prior sine-grid read as static). VERIFIED: atlas rendered at 18x
+before/after; full-page UI screenshots of menu/HUD/inventory/crafting; vite build clean (36
+modules); no console/page errors in headless run.
