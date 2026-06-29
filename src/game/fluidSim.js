@@ -48,6 +48,9 @@ export class FluidSim {
     // Keyed by fluidId so water ticks never consume lava cells and vice versa.
     // Insertion-ordered (JS Set preserves insertion order) — FIFO consumption = deterministic.
     this._active = { [WATER_ID]: new Set(), [LAVA_ID]: new Set() };
+    // Precomputed [{id, def}] in ascending-id order (water=15 then lava=21) so tick() avoids
+    // allocating an Object.entries() pair-array (and Number()-coercing the key) every frame.
+    this._fluidList = Object.entries(FLUID_DEFS).map(([k, def]) => ({ id: Number(k), def }));
   }
 
   // ---------------------------------------------------------------------------
@@ -59,8 +62,8 @@ export class FluidSim {
    * Called from updateSimulation with deltaMs.
    */
   tick(dtMs) {
-    for (const [fluidId, def] of Object.entries(FLUID_DEFS)) {
-      const id = Number(fluidId);
+    for (let i = 0; i < this._fluidList.length; i += 1) {
+      const { id, def } = this._fluidList[i];
       this._accMs[id] += dtMs;
       while (this._accMs[id] >= def.tickMs) {
         this._accMs[id] -= def.tickMs;

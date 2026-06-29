@@ -780,6 +780,10 @@ const SMELT_XP = {
 // Automation runs should advance only through window.advanceTime().
 const isAutomationSession = typeof window.__drainVirtualTimePending === "function";
 let useExternalTimeStep = isAutomationSession;
+// Real play spreads the deferred (over-marked) neighbour remeshes from a block edit across
+// a few frames so a click never synchronously rebuilds up to 9 chunks at once. Automation
+// drains fully every call so post-edit text/screenshot snapshots stay deterministic.
+const REMESH_DRAIN_BUDGET = isAutomationSession ? Infinity : 2;
 const SAVE_SLOT = "primary";
 let saveInFlight = false;
 let saveStatusTimer = null;
@@ -838,7 +842,9 @@ function refreshHud() {
   updateHud({ state, world, statsEl, hotbarEl });
   // Wave 11 — F3 debug overlay (no-op when f3Visible=false, cheap signature guard inside).
   // Wave 12 — pass current biome so F3 displays it without a redundant biomeAt call inside hud.
-  const _f3Biome = typeof world.biomeAt === "function"
+  // Only look the biome up when the overlay is actually visible — updateF3Overlay early-returns
+  // when hidden, so this saves a biomeAt() (string key alloc) every frame in the common case.
+  const _f3Biome = (state.f3Visible && typeof world.biomeAt === "function")
     ? world.biomeAt(Math.floor(state.playerPos.x), Math.floor(state.playerPos.z))
     : null;
   updateF3Overlay({ state, world, fps: _fpsEma, chunkSize: worldConfig.chunk.size, biome: _f3Biome });
@@ -1008,8 +1014,11 @@ function getWorldNormal(hit) {
   return worldNormal;
 }
 
+const _toBlockCoordsScratch = new THREE.Vector3();
 function toBlockCoords(point, normal, sign) {
-  const adjusted = point.clone().addScaledVector(normal, sign * 0.01);
+  // Reuse a module scratch instead of point.clone() — the scratch is read into plain
+  // numbers and never escapes, so it's safe even when called twice in one expression.
+  const adjusted = _toBlockCoordsScratch.copy(point).addScaledVector(normal, sign * 0.01);
   return {
     x: Math.floor(adjusted.x),
     y: Math.floor(adjusted.y),
@@ -3049,12 +3058,6 @@ function updateFallingBlocks() {
     if (!chunk) {
       continue;
     }
-    const { cx, cz } = (() => {
-      const parts = key.split(",");
-      return { cx: Number(parts[0]), cz: Number(parts[1]) };
-    })();
-    const baseX = cx * world.chunkSize;
-    const baseZ = cz * world.chunkSize;
 
     // Seed the flag on first visit (chunk newly generated or loaded from save).
     // This one-time scan per chunk avoids re-scanning every subsequent frame.
@@ -3070,10 +3073,17 @@ function updateFallingBlocks() {
     }
 
     // Skip chunks that contain no falling blocks — avoids scanning 153k cells/frame
-    // when nothing is falling.
+    // when nothing is falling. Checked BEFORE any per-chunk allocation below so the
+    // all-settled common case is zero-garbage.
     if (!chunk.hasFallingBlocks) {
       continue;
     }
+
+    // chunk.cx/cz are stored on the chunk by createChunk — no key.split()/IIFE per frame.
+    const cx = chunk.cx;
+    const cz = chunk.cz;
+    const baseX = cx * world.chunkSize;
+    const baseZ = cz * world.chunkSize;
 
     // Scan bottom-up so a column can cascade multiple steps across ticks naturally.
     // Read from chunk.blocks[] via world.index() to avoid toChunkPosition+Map.get
@@ -5695,11 +5705,14 @@ async function loadGame() {
   }
 }
 
+const _hitNdc = { x: 0, y: 0 };
 function hitTest(ndcX = 0, ndcY = 0, maxDistance = worldConfig.maxReach) {
-  raycaster.setFromCamera({ x: ndcX, y: ndcY }, camera);
-  // Exclude water and lava from raycast — neither can be targeted/broken by the player.
-  const solidMeshes = world.meshGroup.children.filter(m => !m.userData.isWater && !m.userData.isLava);
-  const hits = raycaster.intersectObjects(solidMeshes, false);
+  _hitNdc.x = ndcX;
+  _hitNdc.y = ndcY;
+  raycaster.setFromCamera(_hitNdc, camera);
+  // Water/lava chunk meshes carry a no-op raycast() (set in buildChunkMesh) so they are
+  // skipped here without allocating a filtered children array every call.
+  const hits = raycaster.intersectObjects(world.meshGroup.children, false);
   for (const hit of hits) {
     if (hit.distance <= maxDistance) {
       return hit;
@@ -5708,7 +5721,38 @@ function hitTest(ndcX = 0, ndcY = 0, maxDistance = worldConfig.maxReach) {
   return null;
 }
 
-function updateTargetBlockFromCenter() {
+// Throttle state for the per-frame center raycast. The cast is a full intersectObjects
+// over every active chunk mesh, so when invoked with throttle=true (the per-frame callers)
+// it re-runs only when the camera ray changed (player moved/looked) or the world changed
+// near it (a block edit bumps world.editVersion). Event-driven callers (load/break/place/
+// debug) use the default throttle=false and always recompute, so the readout — and the
+// automation text snapshot — is never stale after an edit.
+let _targetCamYaw = NaN;
+let _targetCamPitch = NaN;
+let _targetCamX = NaN;
+let _targetCamY = NaN;
+let _targetCamZ = NaN;
+let _targetEditVersion = -1;
+function updateTargetBlockFromCenter(throttle = false) {
+  const editV = world.editVersion;
+  if (throttle) {
+    const EPS = 1e-4;
+    if (editV === _targetEditVersion
+      && Math.abs(state.yaw - _targetCamYaw) < EPS
+      && Math.abs(state.pitch - _targetCamPitch) < EPS
+      && Math.abs(state.playerPos.x - _targetCamX) < EPS
+      && Math.abs(state.playerPos.y - _targetCamY) < EPS
+      && Math.abs(state.playerPos.z - _targetCamZ) < EPS) {
+      return; // nothing that moves the center ray changed since last compute
+    }
+  }
+  _targetCamYaw = state.yaw;
+  _targetCamPitch = state.pitch;
+  _targetCamX = state.playerPos.x;
+  _targetCamY = state.playerPos.y;
+  _targetCamZ = state.playerPos.z;
+  _targetEditVersion = editV;
+
   const hit = hitTest(0, 0);
   if (!hit) {
     state.targetBlock = null;
@@ -5859,7 +5903,11 @@ function breakBlock(ndcX = 0, ndcY = 0) {
     }
     markChestPanelDirty();
   }
-  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+  // Rebuild the broken block's chunk (and any seam neighbour whose face exposure changed)
+  // synchronously so the block disappears this frame; let the budgeted drain pick up the
+  // conservatively-over-marked light neighbours over the next few frames (no click hitch).
+  world.rebuildEditedChunksNow(coords.x, coords.z);
+  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
   if (type === TORCH_BLOCK_TYPE) {
     markTorchLightsDirty();
   }
@@ -6007,35 +6055,26 @@ function trySleeepInBed(bedX, bedY, bedZ, force = false) {
 
 function placeBlock(ndcX = 0, ndcY = 0) {
   if (state.chestOpen) return false;
+  // One raycast for the whole right-click. solidCoords = the targeted solid cell (used by
+  // bed/chest interactions); placeCoords = the adjacent empty cell (bucket fill + block
+  // placement). Nothing mutates the world or camera between here and use, so this is
+  // bit-identical to the previous up-to-4 separate casts.
+  const placeHit = hitTest(ndcX, ndcY);
+  const placeHitNormal = placeHit ? getWorldNormal(placeHit) : null;
+  const solidCoords = placeHitNormal ? toBlockCoords(placeHit.point, placeHitNormal, -1) : null;
+  const placeCoords = placeHitNormal ? toBlockCoords(placeHit.point, placeHitNormal, 1) : null;
+
   // Wave F7 — check if right-clicking a bed block before chest/item logic.
-  {
-    const bedHit = hitTest(ndcX, ndcY);
-    if (bedHit) {
-      const normal = getWorldNormal(bedHit);
-      if (normal) {
-        const coords = toBlockCoords(bedHit.point, normal, -1);
-        if (world.get(coords.x, coords.y, coords.z) === BED_BLOCK_TYPE) {
-          trySleeepInBed(coords.x, coords.y, coords.z);
-          return true;
-        }
-      }
-    }
+  if (solidCoords && world.get(solidCoords.x, solidCoords.y, solidCoords.z) === BED_BLOCK_TYPE) {
+    trySleeepInBed(solidCoords.x, solidCoords.y, solidCoords.z);
+    return true;
   }
   // Wave 10 — check if player is right-clicking a chest block (before item logic)
-  {
-    const chestHit = hitTest(ndcX, ndcY);
-    if (chestHit) {
-      const normal = getWorldNormal(chestHit);
-      if (normal) {
-        const coords = toBlockCoords(chestHit.point, normal, -1);
-        if (world.get(coords.x, coords.y, coords.z) === CHEST_BLOCK_TYPE) {
-          const key = toChestKey(coords.x, coords.y, coords.z);
-          if (isChestAccessible(key)) {
-            openChestPanel(key);
-            return true;
-          }
-        }
-      }
+  if (solidCoords && world.get(solidCoords.x, solidCoords.y, solidCoords.z) === CHEST_BLOCK_TYPE) {
+    const key = toChestKey(solidCoords.x, solidCoords.y, solidCoords.z);
+    if (isChestAccessible(key)) {
+      openChestPanel(key);
+      return true;
     }
   }
 
@@ -6054,11 +6093,8 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   // water_bucket → places water (id 15), lava_bucket → places lava (id 21).
   if (slot.itemId === "water_bucket" || slot.itemId === "lava_bucket") {
     const bucketFluidId = slot.itemId === "water_bucket" ? WATER_BLOCK_TYPE : LAVA_BLOCK_TYPE;
-    const bucketHit = hitTest(ndcX, ndcY);
-    if (!bucketHit) return false;
-    const bucketNormal = getWorldNormal(bucketHit);
-    if (!bucketNormal) return false;
-    const bucketCoords = toBlockCoords(bucketHit.point, bucketNormal, 1);
+    if (!placeCoords) return false;
+    const bucketCoords = placeCoords;
     if (!world.inBounds(bucketCoords.x, bucketCoords.y, bucketCoords.z)) return false;
     if (world.get(bucketCoords.x, bucketCoords.y, bucketCoords.z) !== 0) return false;
     if (playerInsideBlock(bucketCoords.x, bucketCoords.y, bucketCoords.z)) return false;
@@ -6110,15 +6146,10 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     placeType = stairBase + orient;
   }
 
-  const hit = hitTest(ndcX, ndcY);
-  if (!hit) {
+  if (!placeCoords) {
     return false;
   }
-  const normal = getWorldNormal(hit);
-  if (!normal) {
-    return false;
-  }
-  const coords = toBlockCoords(hit.point, normal, 1);
+  const coords = placeCoords;
   if (!world.inBounds(coords.x, coords.y, coords.z)) {
     return false;
   }
@@ -6148,7 +6179,10 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     markChestPanelDirty();
   }
   consumeFromSlot(state.inventory, state.selectedSlot, 1);
-  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+  // Rebuild the placed block's chunk (+ seam neighbours) now; defer the over-marked
+  // light neighbours to the budgeted drain so placing never spikes a 9-chunk rebuild.
+  world.rebuildEditedChunksNow(coords.x, coords.z);
+  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
   if (placeType === TORCH_BLOCK_TYPE) {
     markTorchLightsDirty();
     if (isTorchPlacementInCave(coords.x, coords.y, coords.z)) {
@@ -6499,7 +6533,7 @@ function collectNearbyBlocks() {
 }
 
 function updateSimulation(dtSeconds) {
-  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
   const deltaMs = dtSeconds * 1000;
 
   // Wave F5: advance fluid sim with milliseconds (fix #2/#11 — must be deltaMs, NOT dtSeconds).
@@ -6528,7 +6562,7 @@ function updateSimulation(dtSeconds) {
     updateTorchLights(deltaMs);
     updateObjectives(deltaMs);
     updateCameraTransform();
-    updateTargetBlockFromCenter();
+    updateTargetBlockFromCenter(true);
     refreshHud();
     updateFurnacePanel();
     updateChestPanel();
@@ -6899,7 +6933,7 @@ function updateSimulation(dtSeconds) {
   }
 
   clampPlayer();
-  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
+  world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
   updateFurnaceSimulation(deltaMs);
   updateHostileMobs(deltaMs);
   updatePassiveMobs(deltaMs);
@@ -6943,7 +6977,7 @@ function updateSimulation(dtSeconds) {
   updateBranchEncounterState();
   updateObjectives(deltaMs);
   updateCameraTransform();
-  updateTargetBlockFromCenter();
+  updateTargetBlockFromCenter(true);
   // Graphics-B: weather system — biome-driven rain/snow particle system.
   {
     const _wxBiome = typeof world.biomeAt === "function"

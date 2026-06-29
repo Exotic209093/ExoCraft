@@ -1,15 +1,25 @@
 import { SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
 
 export function playerAABBAt(position, playerRadius, playerHeight) {
-  return {
-    minX: position.x - playerRadius,
-    maxX: position.x + playerRadius,
-    minY: position.y,
-    maxY: position.y + playerHeight,
-    minZ: position.z - playerRadius,
-    maxZ: position.z + playerRadius,
-  };
+  return playerAABBInto({}, position, playerRadius, playerHeight);
 }
+
+// Mutating variant — writes the AABB into `out` and returns it, so hot paths can reuse a
+// scratch object instead of allocating one per call.
+export function playerAABBInto(out, position, playerRadius, playerHeight) {
+  out.minX = position.x - playerRadius;
+  out.maxX = position.x + playerRadius;
+  out.minY = position.y;
+  out.maxY = position.y + playerHeight;
+  out.minZ = position.z - playerRadius;
+  out.maxZ = position.z + playerRadius;
+  return out;
+}
+
+// Reused only inside resolveAxis (single-threaded, non-reentrant) for the per-frame
+// position AABB. Step-up probes keep their own fresh allocation (occasional, and the
+// probe result can become `aabb` and must not alias this scratch).
+const _resolveAabb = {};
 
 export function aabbIntersectsBlock(aabb, x, y, z) {
   return (
@@ -157,7 +167,7 @@ export function resolveAxis({
   }
 
   state.playerPos[axis] += delta;
-  let aabb = playerAABBAt(state.playerPos, playerRadius, playerHeight);
+  let aabb = playerAABBInto(_resolveAabb, state.playerPos, playerRadius, playerHeight);
 
   const minX = Math.floor(aabb.minX);
   const maxX = Math.floor(aabb.maxX - epsilon);
@@ -235,7 +245,7 @@ export function resolveAxis({
           }
           state.playerVel.z = 0;
         }
-        aabb = playerAABBAt(state.playerPos, playerRadius, playerHeight);
+        aabb = playerAABBInto(_resolveAabb, state.playerPos, playerRadius, playerHeight);
       }
     }
   }
