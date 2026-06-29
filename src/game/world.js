@@ -10,6 +10,10 @@ const CARDINAL_DIRECTIONS = [
   [0, 0, -1],
 ];
 
+// Assigned to water/lava chunk meshes so THREE.Raycaster skips them with zero per-call
+// filtering — they are never player-targetable. Shared no-op (one function, all meshes).
+function NOOP_RAYCAST() {}
+
 // Face index constants matching CARDINAL_DIRECTIONS order
 const FACE_PX = 0; // +X
 const FACE_NX = 1; // -X
@@ -632,6 +636,16 @@ export class VoxelWorld {
     this.activeChunkKeys = new Set();
     this.dirtyActiveChunkKeys = new Set();
     this.lastCenterChunk = null;
+
+    // Last-chunk cache for the allocation-free get() fast path. NaN so the first
+    // lookup (cx/cz can legitimately be 0) always misses. Invalidated in clearChunkRuntime.
+    this._lastGetCx = NaN;
+    this._lastGetCz = NaN;
+    this._lastGetChunk = null;
+
+    // Bumped on every block mutation (the single set() chokepoint). Lets the per-frame
+    // target-block raycast skip when neither the camera nor the world changed.
+    this.editVersion = 0;
 
     this.surfaceHeightCache = new Map();
     this.treeInfoCache = new Map();
@@ -1274,6 +1288,9 @@ export class VoxelWorld {
     let solidCount = 0;
     const baseX = cx * this.chunkSize;
     const baseZ = cz * this.chunkSize;
+    // Per-chunk emitter index: localIndex -> emit level. Lets computeChunkLight seed
+    // blocklight from O(emitters) instead of scanning all chunkSize²·height voxels.
+    const emitters = new Map();
 
     for (let localZ = 0; localZ < this.chunkSize; localZ += 1) {
       for (let localX = 0; localX < this.chunkSize; localX += 1) {
@@ -1284,8 +1301,13 @@ export class VoxelWorld {
           if (type === 0) {
             continue;
           }
-          blocks[this.index(localX, y, localZ)] = type;
+          const idx = this.index(localX, y, localZ);
+          blocks[idx] = type;
           solidCount += 1;
+          const emit = BLOCK_LIGHT_EMIT[type] || 0;
+          if (emit > 0) {
+            emitters.set(idx, emit);
+          }
         }
       }
     }
@@ -1302,6 +1324,12 @@ export class VoxelWorld {
           solidCount += 1;
         }
         blocks[idx] = normalizedType;
+        const emit = BLOCK_LIGHT_EMIT[normalizedType] || 0;
+        if (emit > 0) {
+          emitters.set(idx, emit);
+        } else {
+          emitters.delete(idx);
+        }
       }
     }
 
@@ -1311,7 +1339,12 @@ export class VoxelWorld {
       cz,
       blocks,
       solidCount,
+      emitters,
+      // dirtyLight gates the (expensive) skylight/blocklight BFS. A remesh that does
+      // NOT change light passability/emission (e.g. re-entering the active ring) reuses
+      // the cached chunk.skylight/blocklight buffers instead of recomputing them.
       dirtyMesh: true,
+      dirtyLight: true,
       meshes: [],
     };
   }
@@ -1326,18 +1359,41 @@ export class VoxelWorld {
       const regenerated = this.createChunk(cx, cz);
       chunk.blocks = regenerated.blocks;
       chunk.solidCount = regenerated.solidCount;
+      chunk.emitters = regenerated.emitters;
       chunk.dirtyMesh = true;
+      chunk.dirtyLight = true;
     }
     return chunk;
   }
 
   get(worldX, y, worldZ) {
-    if (!this.isWithinVerticalBounds(y)) {
+    if (y < 0 || y >= this.height) {
       return 0;
     }
-    const pos = this.toChunkPosition(worldX, worldZ);
-    const chunk = this.ensureChunk(pos.cx, pos.cz);
-    return chunk.blocks[this.index(pos.localX, y, pos.localZ)];
+    // Allocation-free hot path: get() is called 50-200+ times/frame (physics sweeps,
+    // light BFS, AI, eye/foot samples). The old path allocated a toChunkPosition object
+    // + chunk key string every call. Inline the coord math and cache the last chunk so
+    // clustered reads in the same chunk are zero-allocation.
+    const S = this.chunkSize;
+    const ix = Math.floor(worldX);
+    const iz = Math.floor(worldZ);
+    const cx = Math.floor(ix / S);
+    const cz = Math.floor(iz / S);
+    let chunk;
+    if (cx === this._lastGetCx && cz === this._lastGetCz && this._lastGetChunk && this._lastGetChunk.blocks) {
+      chunk = this._lastGetChunk;
+    } else {
+      chunk = this.chunks.get(cx + "," + cz);
+      if (!chunk || !chunk.blocks) {
+        chunk = this.ensureChunk(cx, cz);
+      }
+      this._lastGetCx = cx;
+      this._lastGetCz = cz;
+      this._lastGetChunk = chunk;
+    }
+    const localX = ((ix % S) + S) % S;
+    const localZ = ((iz % S) + S) % S;
+    return chunk.blocks[localX + S * (localZ + S * y)];
   }
 
   set(worldX, y, worldZ, type, markDirty = true, trackEdit = true) {
@@ -1354,11 +1410,23 @@ export class VoxelWorld {
     }
 
     chunk.blocks[idx] = nextType;
+    this.editVersion += 1;
     if (previous > 0) {
       chunk.solidCount -= 1;
     }
     if (nextType > 0) {
       chunk.solidCount += 1;
+    }
+
+    // Maintain the per-chunk emitter index (driven solely by nextType, so it covers
+    // place / remove / emitter-swap). computeChunkLight seeds blocklight from this.
+    if (chunk.emitters) {
+      const emit = BLOCK_LIGHT_EMIT[nextType] || 0;
+      if (emit > 0) {
+        chunk.emitters.set(idx, emit);
+      } else {
+        chunk.emitters.delete(idx);
+      }
     }
 
     if (trackEdit) {
@@ -1381,9 +1449,56 @@ export class VoxelWorld {
     }
 
     if (markDirty) {
-      this.markChunkDirty(pos.cx, pos.cz, true);
+      this.markDirtyForEdit(pos.cx, pos.cz, pos.localX, pos.localZ, previous, nextType);
     }
     return true;
+  }
+
+  // Mark exactly the chunks whose mesh/light a single block edit can affect, instead of
+  // blanket-marking the target + all 8 neighbours every time. For a deep-interior break
+  // this drops a 9-chunk dirty set to 1, which is what makes the budgeted deferral
+  // (rebuildEditedChunksNow + budgeted drain) able to keep the click on the target chunk.
+  //
+  // Correctness rule (the load-bearing part): skylight AND blocklight propagate up to 15
+  // blocks, which for a 16-wide chunk can reach EVERY cardinal and diagonal neighbour from
+  // any in-chunk cell. So ANY edit that changes light passability or emission must mark all
+  // 8 neighbours (identical to the old behaviour). Only edits that change geometry/exposure
+  // but NOT light may be gated to the literal seam/corner the edit touches.
+  markDirtyForEdit(cx, cz, localX, localZ, previous, nextType) {
+    this.markOneDirty(cx, cz);
+
+    const wasPassable = previous === 0 || LIGHT_PASSABLE.has(previous);
+    const nowPassable = nextType === 0 || LIGHT_PASSABLE.has(nextType);
+    const passabilityChanged = wasPassable !== nowPassable;
+    const emitterChanged = (BLOCK_LIGHT_EMIT[previous] || 0) !== (BLOCK_LIGHT_EMIT[nextType] || 0);
+    const lightChanged = passabilityChanged || emitterChanged;
+    const exposureChanged = (previous > 0) !== (nextType > 0)
+      || (BLOCK_TRANSPARENCY_CLASS[previous] || 0) !== (BLOCK_TRANSPARENCY_CLASS[nextType] || 0);
+
+    if (!lightChanged && !exposureChanged) {
+      // Pure same-class, same-solidity, same-light retexture — neighbours are unaffected.
+      return;
+    }
+
+    const S = this.chunkSize;
+    const atMinX = localX === 0;
+    const atMaxX = localX === S - 1;
+    const atMinZ = localZ === 0;
+    const atMaxZ = localZ === S - 1;
+
+    // Cardinals: any light change reaches all four; an exposure-only change only affects
+    // the neighbour across the seam the edited cell actually sits on.
+    if (lightChanged || (exposureChanged && atMinX)) this.markOneDirty(cx - 1, cz);
+    if (lightChanged || (exposureChanged && atMaxX)) this.markOneDirty(cx + 1, cz);
+    if (lightChanged || (exposureChanged && atMinZ)) this.markOneDirty(cx, cz - 1);
+    if (lightChanged || (exposureChanged && atMaxZ)) this.markOneDirty(cx, cz + 1);
+
+    // Diagonals: any light change can reach them; an exposure/AO-only change only affects a
+    // diagonal when the edited cell is in the literal corner cell adjacent to it.
+    if (lightChanged || (exposureChanged && atMinX && atMinZ)) this.markOneDirty(cx - 1, cz - 1);
+    if (lightChanged || (exposureChanged && atMinX && atMaxZ)) this.markOneDirty(cx - 1, cz + 1);
+    if (lightChanged || (exposureChanged && atMaxX && atMinZ)) this.markOneDirty(cx + 1, cz - 1);
+    if (lightChanged || (exposureChanged && atMaxX && atMaxZ)) this.markOneDirty(cx + 1, cz + 1);
   }
 
   // ---------------------------------------------------------------------------
@@ -1493,8 +1608,10 @@ export class VoxelWorld {
     const S = this.chunkSize;
     const H = this.height;
     const volume = S * S * H;
-    const skylight = new Float32Array(volume);   // 0..15
-    const blocklight = new Float32Array(volume); // 0..15
+    // Light values are integers 0..15; Uint8Array is 4x smaller than Float32Array and the
+    // mesher's /15.0 packing + neighbour reads are unaffected.
+    const skylight = new Uint8Array(volume);   // 0..15
+    const blocklight = new Uint8Array(volume); // 0..15
 
     // Light index: local coords within the extended sampling region.
     // We compute light in the chunk's own S*S*H volume, but BFS reads neighbours
@@ -1504,21 +1621,25 @@ export class VoxelWorld {
 
     const lIndex = (lx, ly, lz) => lx + S * (lz + S * ly);
 
+    // Own block array — every in-chunk read below goes direct instead of through get()
+    // (which would allocate a coord object + key string for tens of thousands of reads).
+    const ownChunk = this.ensureChunk(cx, cz);
+    const ownBlocks = ownChunk.blocks;
+
     // ---------- SKYLIGHT ----------
     // Phase 1: flood straight down from the top (full 15 for open sky columns).
     // A column is "open" if every voxel above it (going down from height-1) is air.
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
-        const wx = baseX + lx;
-        const wz = baseZ + lz;
         let open = true;
         for (let y = H - 1; y >= 0; y -= 1) {
-          const block = this.get(wx, y, wz);
+          const lidx = lIndex(lx, y, lz);
+          const block = ownBlocks[lidx];
           if (block !== 0 && !LIGHT_PASSABLE.has(block)) {
             open = false;
           }
           if (open) {
-            skylight[lIndex(lx, y, lz)] = 15;
+            skylight[lidx] = 15;
           }
         }
       }
@@ -1544,12 +1665,32 @@ export class VoxelWorld {
       }
     };
 
-    // Seed from already-computed column values (in-chunk skylight we set above)
+    // Seed the BFS only from FRONTIER voxels — lit cells that have at least one in-chunk
+    // neighbour the BFS could still relax (level-1 > neighbour). Phase 1 already wrote the
+    // final value for every fully-lit interior cell, so seeding all of them (~14k for an
+    // open chunk) just enqueues work that dequeues and early-outs. The frontier test is
+    // exactly the BFS relax condition, so the final buffer is byte-identical. The y
+    // (up/down) neighbours are included — overhangs/cave-mouths can have their only darker
+    // neighbour below, not lateral.
     for (let lz = 0; lz < S; lz += 1) {
       for (let lx = 0; lx < S; lx += 1) {
         for (let y = 0; y < H; y += 1) {
           const level = skylight[lIndex(lx, y, lz)];
-          if (level > 0) {
+          if (level <= 1) continue; // nextLevel 0 can never relax a neighbour
+          const nextLevel = level - 1;
+          let frontier = false;
+          for (let d = 0; d < 6; d += 1) {
+            const dir = CARDINAL_DIRECTIONS[d];
+            const nlx = lx + dir[0];
+            const ny = y + dir[1];
+            const nlz = lz + dir[2];
+            if (ny < 0 || ny >= H || nlx < 0 || nlx >= S || nlz < 0 || nlz >= S) continue;
+            if (nextLevel > skylight[lIndex(nlx, ny, nlz)]) {
+              frontier = true;
+              break;
+            }
+          }
+          if (frontier) {
             queue.push(baseX + lx, y, baseZ + lz, level);
           }
         }
@@ -1629,8 +1770,9 @@ export class VoxelWorld {
         if (nlx < 0 || nlx >= S || nlz < 0 || nlz >= S) continue;
         const nidx = lIndex(nlx, ny, nlz);
         if (nextLevel <= skylight[nidx]) continue;
-        // Only propagate through air or light-passable blocks (water etc.)
-        const block = this.get(nx, ny, nz);
+        // Only propagate through air or light-passable blocks (water etc.). The bounds
+        // guards above mean this is always an own-chunk read — go direct, no get() alloc.
+        const block = ownBlocks[nidx];
         if (block !== 0 && !LIGHT_PASSABLE.has(block)) continue;
         skylight[nidx] = nextLevel;
         queue.push(nx, ny, nz, nextLevel);
@@ -1639,19 +1781,18 @@ export class VoxelWorld {
 
     // ---------- BLOCKLIGHT ----------
     const blQueue = [];
-    // Seed from emissive blocks inside the chunk
-    for (let lz = 0; lz < S; lz += 1) {
-      for (let lx = 0; lx < S; lx += 1) {
-        for (let y = 0; y < H; y += 1) {
-          const block = this.get(baseX + lx, y, baseZ + lz);
-          const emit = BLOCK_LIGHT_EMIT[block] || 0;
-          if (emit > 0) {
-            const idx = lIndex(lx, y, lz);
-            if (emit > blocklight[idx]) {
-              blocklight[idx] = emit;
-              blQueue.push(baseX + lx, y, baseZ + lz, emit);
-            }
-          }
+    // Seed from emissive blocks inside the chunk. Iterate the per-chunk emitter index
+    // (O(emitters)) instead of scanning all S²·H voxels — emitters (torch/copper/lava) are
+    // rare or absent in most chunks. Index layout matches lIndex/index() exactly.
+    if (ownChunk.emitters) {
+      for (const [idx, emit] of ownChunk.emitters) {
+        if (emit > blocklight[idx]) {
+          blocklight[idx] = emit;
+          const y = (idx / (S * S)) | 0;
+          const rem = idx - y * S * S;
+          const lz = (rem / S) | 0;
+          const lx = rem - lz * S;
+          blQueue.push(baseX + lx, y, baseZ + lz, emit);
         }
       }
     }
@@ -1730,7 +1871,8 @@ export class VoxelWorld {
         if (nlx < 0 || nlx >= S || nlz < 0 || nlz >= S) continue;
         const nidx = lIndex(nlx, ny, nlz);
         if (nextLevel <= blocklight[nidx]) continue;
-        const block = this.get(nx, ny, nz);
+        // Bounds-guarded above → always an own-chunk read; go direct, no get() alloc.
+        const block = ownBlocks[nidx];
         if (block !== 0 && !LIGHT_PASSABLE.has(block)) continue;
         blocklight[nidx] = nextLevel;
         blQueue.push(nx, ny, nz, nextLevel);
@@ -1793,8 +1935,19 @@ export class VoxelWorld {
     const baseX = cx * S;
     const baseZ = cz * S;
 
-    // Compute lighting for this chunk
-    const { skylight, blocklight } = this.computeChunkLight(cx, cz);
+    // Compute lighting for this chunk — but only when it actually changed. A remesh
+    // triggered purely by geometry/exposure (re-entering the active ring, a seam face
+    // change, eviction-regen) reuses the cached skylight/blocklight buffers and skips the
+    // expensive BFS entirely. dirtyLight is set at every mark-dirty site, so the cached
+    // buffers are only reused when no light-relevant edit occurred.
+    let skylight, blocklight;
+    if (chunk.dirtyLight || !chunk.skylight || !chunk.blocklight) {
+      ({ skylight, blocklight } = this.computeChunkLight(cx, cz));
+      chunk.dirtyLight = false;
+    } else {
+      skylight = chunk.skylight;
+      blocklight = chunk.blocklight;
+    }
     const lIndex = (lx, ly, lz) => lx + S * (lz + S * ly);
 
     // Geometry buffers for opaque and transparent faces.
@@ -2347,6 +2500,9 @@ export class VoxelWorld {
       const mesh = new THREE.Mesh(waterGeo, mats.water);
       mesh.renderOrder = 3;
       mesh.userData.isWater = true;
+      // Water can't be targeted/broken — self-skip raycasting so hitTest can iterate
+      // meshGroup.children directly instead of allocating a filtered array every call.
+      mesh.raycast = NOOP_RAYCAST;
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }
@@ -2357,6 +2513,7 @@ export class VoxelWorld {
       const mesh = new THREE.Mesh(lavaGeo, mats.lava);
       mesh.renderOrder = 4;
       mesh.userData.isLava = true;
+      mesh.raycast = NOOP_RAYCAST; // lava is not targetable either (see water above)
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }
@@ -2385,39 +2542,78 @@ export class VoxelWorld {
     this.dirtyActiveChunkKeys.delete(chunk.key);
   }
 
-  markChunkDirty(cx, cz, includeNeighbors = false) {
-    const markOne = (chunkX, chunkZ) => {
-      const key = toChunkKey(chunkX, chunkZ);
-      const chunk = this.chunks.get(key);
-      if (!chunk) {
-        return;
-      }
-      chunk.dirtyMesh = true;
-      if (this.activeChunkKeys.has(key)) {
-        this.dirtyActiveChunkKeys.add(key);
-      }
-    };
+  // Mark a single chunk's mesh AND light dirty. dirtyLight reach is kept identical to
+  // dirtyMesh reach (every mark-dirty site sets both) so a chunk never reuses stale light.
+  markOneDirty(chunkX, chunkZ) {
+    const key = toChunkKey(chunkX, chunkZ);
+    const chunk = this.chunks.get(key);
+    if (!chunk) {
+      return;
+    }
+    chunk.dirtyMesh = true;
+    chunk.dirtyLight = true;
+    if (this.activeChunkKeys.has(key)) {
+      this.dirtyActiveChunkKeys.add(key);
+    }
+  }
 
-    markOne(cx, cz);
+  markChunkDirty(cx, cz, includeNeighbors = false) {
+    this.markOneDirty(cx, cz);
     if (!includeNeighbors) {
       return;
     }
     // Cardinal neighbours
-    markOne(cx + 1, cz);
-    markOne(cx - 1, cz);
-    markOne(cx, cz + 1);
-    markOne(cx, cz - 1);
+    this.markOneDirty(cx + 1, cz);
+    this.markOneDirty(cx - 1, cz);
+    this.markOneDirty(cx, cz + 1);
+    this.markOneDirty(cx, cz - 1);
     // Diagonal neighbours: required for torches near chunk corners (emit=14,
     // radius can reach 13 blocks, easily crossing into a diagonal chunk).
     // Without these, blocklight from a placed/broken torch persists or fails to
     // appear in the diagonal neighbour after cross-seam propagation is corrected.
-    markOne(cx + 1, cz + 1);
-    markOne(cx + 1, cz - 1);
-    markOne(cx - 1, cz + 1);
-    markOne(cx - 1, cz - 1);
+    this.markOneDirty(cx + 1, cz + 1);
+    this.markOneDirty(cx + 1, cz - 1);
+    this.markOneDirty(cx - 1, cz + 1);
+    this.markOneDirty(cx - 1, cz - 1);
   }
 
-  ensureActiveChunksAround(worldX, worldZ) {
+  // Rebuild the edited chunk — plus any dirty neighbour that shares the seam/corner the
+  // edit actually touched — synchronously, so cross-seam face exposure is never visibly
+  // stale for a frame. Over-marked light-only neighbours (an interior break conservatively
+  // dirties all 8) are left in dirtyActiveChunkKeys for the budgeted per-frame drain.
+  // Call this from break/place right after world.set(); pair it with a budgeted
+  // ensureActiveChunksAround so the remaining neighbours remesh over the next few frames.
+  rebuildEditedChunksNow(worldX, worldZ) {
+    const pos = this.toChunkPosition(worldX, worldZ);
+    const S = this.chunkSize;
+    const { cx, cz, localX, localZ } = pos;
+    this.buildChunkMesh(cx, cz);
+
+    const atMinX = localX === 0;
+    const atMaxX = localX === S - 1;
+    const atMinZ = localZ === 0;
+    const atMaxZ = localZ === S - 1;
+    const rebuildIfDirty = (ncx, ncz) => {
+      if (this.dirtyActiveChunkKeys.has(toChunkKey(ncx, ncz))) {
+        this.buildChunkMesh(ncx, ncz);
+      }
+    };
+    if (atMinX) rebuildIfDirty(cx - 1, cz);
+    if (atMaxX) rebuildIfDirty(cx + 1, cz);
+    if (atMinZ) rebuildIfDirty(cx, cz - 1);
+    if (atMaxZ) rebuildIfDirty(cx, cz + 1);
+    if (atMinX && atMinZ) rebuildIfDirty(cx - 1, cz - 1);
+    if (atMinX && atMaxZ) rebuildIfDirty(cx - 1, cz + 1);
+    if (atMaxX && atMinZ) rebuildIfDirty(cx + 1, cz - 1);
+    if (atMaxX && atMaxZ) rebuildIfDirty(cx + 1, cz + 1);
+  }
+
+  // budget caps how many EDIT-dirtied chunks are remeshed per call so a backlog of
+  // deferred neighbours spreads across frames instead of spiking one. budget=Infinity
+  // (the default, and what spawn/teleport/load/automation pass) drains fully. When the
+  // player crosses a chunk boundary the streaming pass always drains fully so new terrain
+  // appears promptly — only the standing-still edit backlog is budgeted.
+  ensureActiveChunksAround(worldX, worldZ, budget = Infinity) {
     const pos = this.toChunkPosition(worldX, worldZ);
     const centerKey = toChunkKey(pos.cx, pos.cz);
     const centerChanged = !this.lastCenterChunk || this.lastCenterChunk !== centerKey;
@@ -2458,20 +2654,33 @@ export class VoxelWorld {
         if (dist > this.evictRadius) {
           chunk.blocks = null;
           chunk.solidCount = 0;
+          chunk.emitters = null;
           chunk.dirtyMesh = true;
+          chunk.dirtyLight = true;
         }
       }
 
       this.lastCenterChunk = centerKey;
     }
 
+    if (this.dirtyActiveChunkKeys.size === 0) {
+      return;
+    }
+    // A boundary-cross (centerChanged) just streamed in new active chunks; drain fully so
+    // terrain never lags behind the player. Otherwise honour the caller's budget.
+    const effectiveBudget = centerChanged ? Infinity : budget;
+    let built = 0;
     for (const key of Array.from(this.dirtyActiveChunkKeys)) {
+      if (built >= effectiveBudget) {
+        break;
+      }
       if (!this.activeChunkKeys.has(key)) {
         this.dirtyActiveChunkKeys.delete(key);
         continue;
       }
       const { cx, cz } = fromChunkKey(key);
       this.buildChunkMesh(cx, cz);
+      built += 1;
     }
   }
 
@@ -2490,6 +2699,10 @@ export class VoxelWorld {
     this.activeChunkKeys.clear();
     this.dirtyActiveChunkKeys.clear();
     this.lastCenterChunk = null;
+    // The get() last-chunk cache references chunk objects we just cleared.
+    this._lastGetCx = NaN;
+    this._lastGetCz = NaN;
+    this._lastGetChunk = null;
     this.surfaceHeightCache.clear();
     this.treeInfoCache.clear();
     this.surfaceOreNodeCache.clear();

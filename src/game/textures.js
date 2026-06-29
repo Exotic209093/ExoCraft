@@ -989,7 +989,17 @@ export function createAtlasTexture() {
 
 // Returns the [u, v] rect for a named tile in atlas UV space (V=0 at bottom).
 // Insets by TILE_GUTTER pixels on each edge so mipmaps sample only within the tile.
+//
+// Memoized: the atlas is static, so a given tileName always maps to the same rect. The
+// mesher calls this once per exposed face — thousands per chunk rebuild — so caching turns
+// per-face object+division churn into ~one object per distinct tile for the app lifetime.
+// The returned rect is SHARED and must be treated as immutable (all consumers only read).
+const _tileUvRectCache = new Map();
 export function tileUvRect(tileName) {
+  const cached = _tileUvRectCache.get(tileName);
+  if (cached) {
+    return cached;
+  }
   const slot = TILE[tileName];
   const stride = TILE_PX + TILE_GUTTER * 2; // pixel stride per slot
   const [col, rowFromTop] = slot || [0, 0];
@@ -1003,7 +1013,10 @@ export function tileUvRect(tileName) {
   // Canvas Y=0 is top; UV V=1 is top → invert.
   const vMin = 1 - pxBottom / ATLAS_PX;
   const vMax = 1 - pxTop    / ATLAS_PX;
-  return { uMin, uMax, vMin, vMax };
+  // NOTE: this object is shared across all callers for this tile — do not mutate it.
+  const rect = { uMin, uMax, vMin, vMax };
+  _tileUvRectCache.set(tileName, rect);
+  return rect;
 }
 
 export const ATLAS_TILE_PX = TILE_PX;
