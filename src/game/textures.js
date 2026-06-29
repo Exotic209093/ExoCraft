@@ -176,6 +176,18 @@ function pixelNoise(x, y, salt) {
   return v - Math.floor(v);
 }
 
+// Coherent value-noise: every pixel inside the same `cell`×`cell` block shares one
+// value, so painted tiles read as chunky Minecraft pixels rather than per-pixel static.
+function cellNoise(x, y, salt, cell = 2) {
+  return pixelNoise(Math.floor(x / cell), Math.floor(y / cell), salt);
+}
+
+// Stable per-id hash in [0,1) — used to give each cobblestone "stone" its own grey.
+function idNoise(id) {
+  const v = Math.sin(id * 12.9898) * 43758.5453;
+  return v - Math.floor(v);
+}
+
 function shade(ctx, x, y, color) {
   ctx.fillStyle = color;
   ctx.fillRect(x, y, 1, 1);
@@ -232,9 +244,9 @@ function paintGrassSide(ctx, col, row) {
         g = 192;
         b = 67;
       } else {
-        r = 150 + (n < 0.3 ? -20 : 0);
-        g = 108 + (n > 0.6 ? 14 : -10);
-        b = 76 + (n < 0.3 ? -16 : 0);
+        r = 138 + (n < 0.3 ? -20 : 0);
+        g = 100 + (n > 0.6 ? 12 : -10);
+        b = 70 + (n < 0.3 ? -14 : 0);
       }
       shade(ctx, ox + x, oy + y, rgb(r, g, b));
     }
@@ -245,14 +257,16 @@ function paintDirt(ctx, col, row) {
   const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
-      const n = pixelNoise(x, y, 3);
-      // Base ≈ rgb(150, 108, 76).
-      let r = 150;
-      let g = 108;
-      let b = 76;
-      if (n < 0.18) { r -= 28; g -= 22; b -= 16; }
-      else if (n < 0.4) { r -= 12; g -= 10; b -= 6; }
-      else if (n > 0.85) { r += 18; g += 14; b += 10; }
+      // Muted earthy brown with chunky 2px clumps and a few scattered dark pebbles.
+      const blob = cellNoise(x, y, 3, 2);
+      const speck = pixelNoise(x, y, 31);
+      let r = 138;
+      let g = 100;
+      let b = 70;
+      if (blob < 0.22) { r -= 22; g -= 18; b -= 12; }
+      else if (blob < 0.45) { r -= 10; g -= 8; b -= 5; }
+      else if (blob > 0.82) { r += 14; g += 12; b += 9; }
+      if (speck < 0.07) { r -= 18; g -= 14; b -= 9; }
       shade(ctx, ox + x, oy + y, rgb(r, g, b));
     }
   }
@@ -262,13 +276,18 @@ function paintStone(ctx, col, row) {
   const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
-      const n = pixelNoise(x, y, 4);
-      // Base ≈ rgb(150, 150, 156).
-      let v = 150;
-      if (n < 0.18) v = 116;
-      else if (n < 0.45) v = 138;
-      else if (n > 0.85) v = 168;
-      shade(ctx, ox + x, oy + y, rgb(v, v + 2, v + 6));
+      // Calm, slightly-cool grey with chunky 2px shading blobs + a faint per-pixel grain,
+      // matching vanilla stone instead of the old streaky white-noise look.
+      const blob = cellNoise(x, y, 4, 2);
+      const grain = pixelNoise(x, y, 41);
+      let v = 140;
+      if (blob < 0.16) v = 122;
+      else if (blob < 0.42) v = 132;
+      else if (blob > 0.86) v = 152;
+      else if (blob > 0.62) v = 146;
+      if (grain < 0.08) v -= 6;
+      else if (grain > 0.94) v += 5;
+      shade(ctx, ox + x, oy + y, rgb(v, v + 1, v + 5));
     }
   }
 }
@@ -472,20 +491,52 @@ function paintCopperOre(ctx, col, row) {
   }
 }
 
+// Cobblestone via a jittered Voronoi: each seed is one rounded stone; pixels that
+// sit near-equidistant between the two closest seeds become the dark mortar seam.
+// This reads unmistakably as mortared cobble instead of grey static.
+function buildCobbleSeeds() {
+  const GRID = 3;                 // ~3x3 stones across the 16px tile
+  const step = TILE_PX / GRID;
+  const seeds = [];
+  for (let gy = -1; gy <= GRID; gy += 1) {
+    for (let gx = -1; gx <= GRID; gx += 1) {
+      const jx = pixelNoise(gx, gy, 62);
+      const jy = pixelNoise(gx, gy, 63);
+      seeds.push({
+        x: (gx + 0.5 + (jx - 0.5) * 0.85) * step,
+        y: (gy + 0.5 + (jy - 0.5) * 0.85) * step,
+        grey: 104 + Math.floor(idNoise(gx * 73 + gy * 19 + 5) * 56), // 104..160
+      });
+    }
+  }
+  return seeds;
+}
+const _cobbleSeeds = buildCobbleSeeds();
+
 function paintCobblestone(ctx, col, row) {
   const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
-      const n = pixelNoise(x, y, 20);
-      // Cobblestone: mid-grey base with darker cracks forming irregular "stones".
-      // Crack pattern: sine-based grid offset per row gives irregular mortar lines.
-      const crackX = (x + Math.floor(Math.sin(y * 1.3 + 0.7) * 2)) % 5 === 0;
-      const crackY = (y + Math.floor(Math.sin(x * 1.7 + 1.1) * 2)) % 5 === 0;
+      let d1 = 1e9;
+      let d2 = 1e9;
+      let best = _cobbleSeeds[0];
+      for (let i = 0; i < _cobbleSeeds.length; i += 1) {
+        const s = _cobbleSeeds[i];
+        const dx = x + 0.5 - s.x;
+        const dy = y + 0.5 - s.y;
+        const d = dx * dx + dy * dy;
+        if (d < d1) { d2 = d1; d1 = d; best = s; }
+        else if (d < d2) { d2 = d; }
+      }
+      const edge = Math.sqrt(d2) - Math.sqrt(d1);
       let v;
-      if (crackX || crackY) {
-        v = 72 + (n < 0.4 ? -10 : 0);
+      if (edge < 1.1) {
+        v = 60; // dark mortar
       } else {
-        v = 128 + (n < 0.18 ? -22 : n > 0.82 ? 18 : n < 0.45 ? -10 : 0);
+        v = best.grey;
+        const grain = pixelNoise(x, y, 64);
+        if (grain < 0.14) v -= 12;
+        else if (grain > 0.88) v += 8;
       }
       shade(ctx, ox + x, oy + y, rgb(v, v, v + 2));
     }
@@ -514,23 +565,19 @@ function paintGravel(ctx, col, row) {
   const { ox, oy } = tileOrigin(col, row);
   for (let y = 0; y < TILE_PX; y += 1) {
     for (let x = 0; x < TILE_PX; x += 1) {
-      const n = pixelNoise(x, y, 23);
-      const n2 = pixelNoise(x * 2 + 1, y * 2 + 3, 24);
-      // Grey-brown gravel: speckled pebbles on a dark grey base.
+      // Chunky 2px pebbles in greys with the odd brown one and a dark crevice.
+      const blob = cellNoise(x, y, 23, 2);
+      const tone = cellNoise(x + 7, y + 3, 24, 2);
       let r;
       let g;
       let b;
-      if (n2 > 0.72) {
-        // Light pebble highlight
-        r = 170; g = 166; b = 162;
-      } else if (n2 < 0.18) {
-        // Dark crevice between pebbles
-        r = 92; g = 88; b = 84;
-      } else {
-        r = 130 + (n < 0.3 ? -18 : n > 0.75 ? 14 : 0);
-        g = 122 + (n < 0.3 ? -16 : n > 0.75 ? 12 : 0);
-        b = 114 + (n < 0.3 ? -14 : n > 0.75 ? 10 : 0);
-      }
+      if (blob < 0.16) { r = 80; g = 77; b = 74; }       // dark crevice
+      else if (blob < 0.44) { r = 110; g = 106; b = 100; }
+      else if (blob > 0.85) { r = 162; g = 158; b = 150; } // light pebble
+      else { r = 132; g = 127; b = 120; }
+      if (tone < 0.2) { r += 12; g -= 2; b -= 12; }        // occasional brown pebble
+      const grain = pixelNoise(x, y, 25);
+      if (grain < 0.1) { r -= 10; g -= 10; b -= 10; }
       shade(ctx, ox + x, oy + y, rgb(r, g, b));
     }
   }
