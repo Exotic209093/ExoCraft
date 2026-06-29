@@ -306,6 +306,8 @@ export const MOB_TYPES = {
     spawnWeight: 3,
     drops: [
       { itemId: "bone_shard", minCount: 0, maxCount: 1, chance: 0.5 },
+      // Wave G3 — spiders drop string (bow crafting).
+      { itemId: "string", minCount: 1, maxCount: 2, chance: 0.85 },
     ],
   },
 };

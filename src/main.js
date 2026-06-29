@@ -53,6 +53,8 @@ import {
   NON_STACKABLE,
   // Wave G1 — farming
   isHoe,
+  // Wave G3 — ranged
+  isBow,
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
@@ -3322,6 +3324,136 @@ function updateArrowProjectiles(deltaMs) {
 }
 
 // ---------------------------------------------------------------------------
+// Wave G3 — player bow + arrows. A SEPARATE projectile array from the skeleton
+// arrows above: these fly a gravity arc and damage MOBS (never the player).
+// ---------------------------------------------------------------------------
+const playerArrows = []; // { mesh, pos:Vec3, vel:{x,y,z}, damage, lifeMs, stuck }
+const BOW_DRAW_MS = 1000;       // full draw time (wall-clock for live play)
+const BOW_MIN_CHARGE = 0.15;    // below this the shot is too weak to fire
+const PA_MIN_SPEED = 14, PA_MAX_SPEED = 40;   // blocks/sec at min/full charge
+const PA_MIN_DAMAGE = 2, PA_MAX_DAMAGE = 9;
+const PA_GRAVITY = -10.0;       // blocks/sec²
+const PA_LIFE_MS = 6000;
+const PA_HIT_R2 = 0.65 * 0.65;
+
+function damageMobWithArrow(mob, amount, fromPos, hostile) {
+  if (!mob || isMobDying(mob)) return false;
+  mob.health -= Math.max(1, Math.floor(amount));
+  // light knockback away from the arrow
+  const kx = mob.pos.x - fromPos.x, kz = mob.pos.z - fromPos.z;
+  const kl = Math.hypot(kx, kz);
+  if (kl > 0.001) { mob.vel = mob.vel || new THREE.Vector3(); mob.vel.x = (kx / kl) * 5; mob.vel.y = 3.0; mob.vel.z = (kz / kl) * 5; }
+  if (mob.health <= 0) {
+    const mobTypeId = mob.mobType || (hostile ? "zombie" : "cow");
+    const dp = { x: mob.pos.x, y: mob.pos.y + (hostile ? 0 : 0.5), z: mob.pos.z };
+    if (hostile) {
+      rewardHostileMobDefeat(getSelectedItemId(), mobTypeId, dp);
+    } else {
+      for (const drop of rollPassiveMobDrops(mobTypeId)) itemEntities.spawnItemEntity(drop.itemId, drop.count, dp.x, dp.y, dp.z);
+      xpOrbs.spawnXp(1 + Math.floor(seededXpFloat(++_xpBreakCounter) * 3), dp.x, dp.y, dp.z);
+    }
+    markCraftPanelDirty(); markInventoryPanelDirty();
+    startMobDeath(mob);
+  } else {
+    triggerHurtFlash(mob);
+  }
+  return true;
+}
+
+function spawnPlayerArrow(charge) {
+  const c = Math.max(0, Math.min(1, charge));
+  const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+  const speed = PA_MIN_SPEED + (PA_MAX_SPEED - PA_MIN_SPEED) * c;
+  const damage = Math.round(PA_MIN_DAMAGE + (PA_MAX_DAMAGE - PA_MIN_DAMAGE) * c);
+  const ox = state.playerPos.x + dir.x * 0.5;
+  const oy = state.playerPos.y + playerConfig.eyeHeight + dir.y * 0.5;
+  const oz = state.playerPos.z + dir.z * 0.5;
+  const mesh = createArrowMesh();
+  mesh.position.set(ox, oy, oz);
+  scene.add(mesh);
+  playerArrows.push({
+    mesh,
+    pos: new THREE.Vector3(ox, oy, oz),
+    vel: { x: dir.x * speed, y: dir.y * speed, z: dir.z * speed },
+    damage, lifeMs: PA_LIFE_MS, stuck: false,
+  });
+}
+
+function updatePlayerArrows(deltaMs) {
+  const dt = deltaMs / 1000;
+  for (let i = playerArrows.length - 1; i >= 0; i -= 1) {
+    const a = playerArrows[i];
+    a.lifeMs -= deltaMs;
+    if (a.lifeMs <= 0) { scene.remove(a.mesh); playerArrows.splice(i, 1); continue; }
+    if (a.stuck) continue;
+    a.vel.y += PA_GRAVITY * dt;
+    // Sub-step so a fast arrow can't tunnel through a mob or wall in one tick.
+    const dist = Math.hypot(a.vel.x, a.vel.y, a.vel.z) * dt;
+    const steps = Math.max(1, Math.ceil(dist / 0.4));
+    const sdt = dt / steps;
+    let consumed = false;
+    for (let s = 0; s < steps && !consumed; s += 1) {
+      a.pos.x += a.vel.x * sdt; a.pos.y += a.vel.y * sdt; a.pos.z += a.vel.z * sdt;
+      for (const m of hostileMobs) {
+        if (isMobDying(m)) continue;
+        const dx = a.pos.x - m.pos.x, dy = a.pos.y - (m.pos.y + 0.9), dz = a.pos.z - m.pos.z;
+        if (dx * dx + dy * dy + dz * dz <= PA_HIT_R2) { damageMobWithArrow(m, a.damage, a.pos, true); consumed = true; break; }
+      }
+      if (consumed) break;
+      for (const m of passiveMobs) {
+        if (isMobDying(m)) continue;
+        const dx = a.pos.x - m.pos.x, dy = a.pos.y - (m.pos.y + 0.5), dz = a.pos.z - m.pos.z;
+        if (dx * dx + dy * dy + dz * dz <= PA_HIT_R2) { damageMobWithArrow(m, a.damage, a.pos, false); consumed = true; break; }
+      }
+      if (consumed) break;
+      const bx = Math.floor(a.pos.x), by = Math.floor(a.pos.y), bz = Math.floor(a.pos.z);
+      const bt = world.get(bx, by, bz);
+      if (bt !== 0 && !PASSABLE_BLOCKS.has(bt)) { a.stuck = true; a.lifeMs = Math.min(a.lifeMs, 1500); break; }
+    }
+    if (consumed) { scene.remove(a.mesh); playerArrows.splice(i, 1); continue; }
+    a.mesh.position.copy(a.pos);
+    a.mesh.rotation.y = Math.atan2(a.vel.x, a.vel.z);
+    const horiz = Math.hypot(a.vel.x, a.vel.z);
+    a.mesh.rotation.x = Math.atan2(a.vel.y, horiz);
+  }
+}
+
+function clearPlayerArrows() {
+  for (const a of playerArrows) scene.remove(a.mesh);
+  playerArrows.length = 0;
+  state.bowDrawing = false;
+}
+
+function currentBowCharge() {
+  if (!state.bowDrawing) return 0;
+  const elapsed = performance.now() - state.bowDrawStartMs;
+  return Math.max(0, Math.min(1, elapsed / BOW_DRAW_MS));
+}
+
+function startBowDraw() {
+  state.bowDrawing = true;
+  state.bowDrawStartMs = performance.now();
+}
+
+function releaseBowShot() {
+  if (!state.bowDrawing) return false;
+  const charge = currentBowCharge();
+  state.bowDrawing = false;
+  if (charge < BOW_MIN_CHARGE) return false;
+  // Need an arrow in inventory (consume 1). Bow with no arrows just relaxes.
+  if (!consumeItemFromInventory(state.inventory, "arrow", 1)) {
+    state.recentAction = "Out of arrows";
+    return false;
+  }
+  spawnPlayerArrow(charge);
+  decrementDurability(state.inventory, state.selectedSlot, 1);
+  viewmodel.triggerSwing();
+  state.recentAction = "Loosed an arrow";
+  markInventoryPanelDirty();
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Wave 9 — Creeper explosion
 // ---------------------------------------------------------------------------
 
@@ -4077,6 +4209,7 @@ function updateHostileMobs(deltaMs) {
 
   // --- Update arrow projectiles ---
   updateArrowProjectiles(deltaMs);
+  updatePlayerArrows(deltaMs);
 
   syncHostileMobCount();
 }
@@ -5793,6 +5926,7 @@ async function loadGame() {
     loadChests(snapshot.chests);
     loadHostileMobs(snapshot.mobs);
     loadPassiveMobs(snapshot.passiveMobs);
+    clearPlayerArrows(); // Wave G3 — no arrows in flight after a load
     // Wave F1: restore item entities; v<=5 saves have no itemEntities field → clear
     itemEntities.restore(snapshot.itemEntities ?? null);
     // Wave F5: restore flowing fluid cells; null snapshot = no flowing cells (clears map)
@@ -6242,6 +6376,12 @@ function trySleeepInBed(bedX, bedY, bedZ, force = false) {
 
 function placeBlock(ndcX = 0, ndcY = 0) {
   if (state.chestOpen) return false;
+  // Wave G3 — holding a bow: right-click begins drawing; the shot fires on release
+  // (controls.js mouseup → onRightRelease → releaseBowShot). Short-circuits placement.
+  if (isBow(getSelectedItemId())) {
+    startBowDraw();
+    return true;
+  }
   // One raycast for the whole right-click. solidCoords = the targeted solid cell (used by
   // bed/chest interactions); placeCoords = the adjacent empty cell (bucket fill + block
   // placement). Nothing mutates the world or camera between here and use, so this is
@@ -6736,6 +6876,7 @@ function regenerateWorld() {
   clearHostileMobs();
   clearPassiveMobs();
   cropGrowthAccumMs = 0; state._cropTickSeed = 0; // Wave G1 — re-derive growth RNG from new seed
+  clearPlayerArrows(); // Wave G3 — flush in-flight arrows on world reset
   itemEntities.clear();
   xpOrbs.clear();
   state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
@@ -6771,6 +6912,7 @@ async function createNewWorld() {
   clearHostileMobs();
   clearPassiveMobs();
   cropGrowthAccumMs = 0; state._cropTickSeed = 0; // Wave G1 — re-derive growth RNG from new seed
+  clearPlayerArrows(); // Wave G3 — flush in-flight arrows on world reset
   itemEntities.clear();
   xpOrbs.clear();
   state.xpLevel = 0; state.xpWithinLevel = 0; state._furnaceXpAccum = 0; initXpToNext();
@@ -7417,6 +7559,7 @@ setupControls({
   closeChestPanel,
   breakBlockAt: breakBlock,
   placeBlockAt: placeBlock,
+  onRightRelease: releaseBowShot,
   toNdc,
   toggleF3Overlay: () => {
     state.f3Visible = !state.f3Visible;
@@ -7685,6 +7828,15 @@ window.render_game_to_text = () => {
     arrowProjectiles: {
       count: arrowProjectiles.length,
     },
+    playerArrows: {
+      count: playerArrows.length,
+      charging: state.bowDrawing === true,
+      charge: Number(currentBowCharge().toFixed(3)),
+      entries: playerArrows.slice(0, 8).map((a) => ({
+        x: Number(a.pos.x.toFixed(2)), y: Number(a.pos.y.toFixed(2)), z: Number(a.pos.z.toFixed(2)),
+        vy: Number(a.vel.y.toFixed(2)), stuck: a.stuck, damage: a.damage,
+      })),
+    },
     farming: {
       tilledNearby: nearbyBlocks.filter((e) => e.type === FARMLAND_BLOCK_TYPE).length,
       cropsNearby: nearbyBlocks.filter((e) => e.type >= WHEAT_STAGE_MIN && e.type <= WHEAT_STAGE_MAX).length,
@@ -7828,6 +7980,29 @@ window.__exoCraftDebug = {
     return { id: world.get(bx, by, bz) };
   },
   onLadder: () => state.onLadder === true,
+  // Wave G3 bow debug hooks ------------------------------------------------------
+  drawBow: () => { startBowDraw(); return { drawing: state.bowDrawing }; },
+  // setBowCharge(c) back-dates the draw start so currentBowCharge() == c without relying
+  // on wall-clock (performance.now doesn't advance under headless advanceTime).
+  setBowCharge: (c = 1) => {
+    const cc = Math.max(0, Math.min(1, Number(c) || 0));
+    state.bowDrawing = true;
+    state.bowDrawStartMs = performance.now() - cc * BOW_DRAW_MS;
+    return { charge: currentBowCharge() };
+  },
+  fireBow: () => { const ok = releaseBowShot(); return { fired: ok, arrows: playerArrows.length }; },
+  playerArrowCount: () => playerArrows.length,
+  // aimAt(x,y,z) — point the camera yaw+pitch at a world point (for deterministic bow tests).
+  aimAt: (x, y, z) => {
+    const dx = x - state.playerPos.x;
+    const dy = y - (state.playerPos.y + playerConfig.eyeHeight);
+    const dz = z - state.playerPos.z;
+    const h = Math.hypot(dx, dz);
+    state.yaw = Math.atan2(-dx, -dz);
+    state.pitch = Math.atan2(dy, h);
+    updateCameraTransform();
+    return { yaw: state.yaw, pitch: state.pitch };
+  },
   // Wave G1 farming debug hooks -------------------------------------------------
   till: (x, y, z) => {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);

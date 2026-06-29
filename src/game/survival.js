@@ -34,6 +34,8 @@ export const TOOL_MAX_DURABILITY = {
   wood_hoe:  60,
   stone_hoe: 132,
   iron_hoe:  251,
+  // Wave G3 — bow loses 1 durability per shot
+  bow: 220,
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,11 @@ export const ITEM_DEFS = {
   // Wave G2b — door (places a 2-tall pair, orient from yaw) + trapdoor (orient from yaw).
   door:        { id: "door",        name: "Door",       placeBlockType: 58 },
   trapdoor:    { id: "trapdoor",    name: "Trapdoor",   placeBlockType: 74 },
+  // Wave G3 — ranged combat. bow draws on right-click; arrow is ammo; flint/string materials.
+  bow:         { id: "bow",         name: "Bow",        bow: true },
+  arrow:       { id: "arrow",       name: "Arrow" },
+  flint:       { id: "flint",       name: "Flint" },
+  string:      { id: "string",      name: "String" },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -351,6 +358,8 @@ export const BLOCK_EXTRA_DROPS = {
   5:  [{ itemId: "apple", chance: 0.125 }],
   27: [{ itemId: "apple", chance: 0.125 }], // birch leaf — same apple chance
   29: [{ itemId: "apple", chance: 0.10  }], // spruce leaf — slightly lower
+  // Wave G3 — gravel sometimes yields flint (Minecraft behaviour) for arrow crafting.
+  12: [{ itemId: "flint", chance: 0.25 }],
 };
 
 /**
@@ -1220,6 +1229,25 @@ export const RECIPES = [
     output: { itemId: "trapdoor", count: 2 },
     requiresWorkbench: true,
   },
+  // Wave G3 — bow (3 stick + 3 string) + arrows (flint + stick + feather → 4).
+  {
+    id: "bow",
+    name: "Bow",
+    pattern: ["_SX", "S_X", "_SX"],
+    key: { S: "stick", X: "string" },
+    inputs: [{ itemId: "stick", count: 3 }, { itemId: "string", count: 3 }],
+    output: { itemId: "bow", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "arrow",
+    name: "Arrows x4",
+    pattern: ["_F_", "_S_", "_E_"],
+    key: { F: "flint", S: "stick", E: "feather" },
+    inputs: [{ itemId: "flint", count: 1 }, { itemId: "stick", count: 1 }, { itemId: "feather", count: 1 }],
+    output: { itemId: "arrow", count: 4 },
+    requiresWorkbench: true,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -1516,6 +1544,11 @@ export function getBreakPower(itemId, blockType) {
 // Wave G1 — true if the held item is a hoe (used by placeBlock to till dirt → farmland).
 export function isHoe(itemId) {
   return ITEM_DEFS[itemId]?.toolKind === "hoe";
+}
+
+// Wave G3 — true if the held item is a bow (right-click draws instead of placing).
+export function isBow(itemId) {
+  return ITEM_DEFS[itemId]?.bow === true;
 }
 
 export function getMobDamage(itemId, baseDamage = 1) {
