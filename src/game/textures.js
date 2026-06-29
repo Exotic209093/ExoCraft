@@ -64,6 +64,9 @@ const TILE = {
   // Wave G2a — building tiles (glass pane reuses the existing 'glass' tile)
   fence_oak:       [1, 6],
   ladder:          [2, 6],  // rails + rungs on transparent (alpha-cutout)
+  // Wave G2b — door + trapdoor tiles
+  door_oak:        [3, 6],
+  trapdoor_oak:    [4, 6],
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -156,6 +159,11 @@ export const BLOCK_FACE_TILES = {
   55: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
   56: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
   57: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
+  // Wave G2b — doors (58-73) all use door_oak; trapdoors (74-81) use trapdoor_oak.
+  ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [58 + i,
+    { px: "door_oak", nx: "door_oak", py: "door_oak", ny: "door_oak", pz: "door_oak", nz: "door_oak" }])),
+  ...Object.fromEntries(Array.from({ length: 8 }, (_, i) => [74 + i,
+    { px: "trapdoor_oak", nx: "trapdoor_oak", py: "trapdoor_oak", ny: "trapdoor_oak", pz: "trapdoor_oak", nz: "trapdoor_oak" }])),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1030,6 +1038,37 @@ function paintLadder(ctx, col, row) {
   }
 }
 
+// Wave G2b — oak door: plank panel with a vertical edge seam + a handle dot.
+function paintDoorOak(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 512);
+      let r = 198, g = 158, b = 96;
+      if (x <= 1 || x >= TILE_PX - 2) { r -= 30; g -= 26; b -= 18; } // edge frame
+      if (y === 5 || y === 10) { r -= 22; g -= 18; b -= 12; }        // panel seams
+      if (n < 0.2) { r -= 14; g -= 12; b -= 8; } else if (n > 0.85) { r += 12; g += 10; b += 6; }
+      // handle dot
+      if (x >= 11 && x <= 12 && y >= 7 && y <= 8) { r = 70; g = 60; b = 44; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave G2b — oak trapdoor: horizontal plank slats with gaps.
+function paintTrapdoorOak(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 513);
+      let r = 190, g = 150, b = 90;
+      if (y % 4 === 3) { r -= 34; g -= 28; b -= 20; } // horizontal slat gaps
+      if (n < 0.2) { r -= 14; g -= 12; b -= 8; } else if (n > 0.85) { r += 12; g += 10; b += 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -1086,6 +1125,9 @@ function paintAtlas(ctx) {
   // Wave G2a — building
   paintFenceOak(ctx, ...TILE.fence_oak);
   paintLadder(ctx, ...TILE.ladder);
+  // Wave G2b — door + trapdoor
+  paintDoorOak(ctx, ...TILE.door_oak);
+  paintTrapdoorOak(ctx, ...TILE.trapdoor_oak);
 }
 
 export function createAtlasTexture() {
@@ -1175,6 +1217,8 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   52: 5,
   53: 2,
   54: 4, 55: 4, 56: 4, 57: 4,
+  // Wave G2b — doors + trapdoors are all partial-geometry (class 5).
+  ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [58 + i, 5])),
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1230,9 +1274,35 @@ export const PANE_BLOCK_IDS = new Set([53]);    // thin connecting glass plane
 export const LADDER_BLOCK_IDS = new Set([54, 55, 56, 57]);
 export function ladderFacing(id) { return id - 54; } // 0=+Z,1=-Z,2=+X,3=-X
 
-// Combined set for fast mesher dispatch (fence joins the partial path; panes & ladders
-// get their own mesher branches).
-export const PARTIAL_BLOCK_IDS = new Set([...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS]);
+// Wave G2b — doors: 16 ids. Lower 58-65 (closed 58-61 N/E/S/W, open 62-65); upper 66-73
+// (closed 66-69, open 70-73). Toggling open↔closed is +4/-4 within each half.
+export const DOOR_LOWER_IDS = new Set([58, 59, 60, 61, 62, 63, 64, 65]);
+export const DOOR_UPPER_IDS = new Set([66, 67, 68, 69, 70, 71, 72, 73]);
+export const DOOR_BLOCK_IDS = new Set([...DOOR_LOWER_IDS, ...DOOR_UPPER_IDS]);
+export const DOOR_OPEN_IDS = new Set([62, 63, 64, 65, 70, 71, 72, 73]);
+export function doorIsUpper(id) { return DOOR_UPPER_IDS.has(id); }
+export function doorIsOpen(id) { return DOOR_OPEN_IDS.has(id); }
+export function doorOrient(id) {
+  if (id >= 58 && id <= 61) return id - 58;
+  if (id >= 62 && id <= 65) return id - 62;
+  if (id >= 66 && id <= 69) return id - 66;
+  return id - 70; // 70-73
+}
+export function doorToggle(id) { return doorIsOpen(id) ? id - 4 : id + 4; }
+
+// Wave G2b — trapdoors: 8 ids. Closed 74-77 (N/E/S/W), open 78-81. Toggle is +4/-4.
+export const TRAPDOOR_BLOCK_IDS = new Set([74, 75, 76, 77, 78, 79, 80, 81]);
+export const TRAPDOOR_CLOSED_IDS = new Set([74, 75, 76, 77]);
+export const TRAPDOOR_OPEN_IDS = new Set([78, 79, 80, 81]);
+export function trapdoorIsOpen(id) { return TRAPDOOR_OPEN_IDS.has(id); }
+export function trapdoorOrient(id) { return trapdoorIsOpen(id) ? id - 78 : id - 74; }
+export function trapdoorToggle(id) { return trapdoorIsOpen(id) ? id - 4 : id + 4; }
+
+// Combined set for fast mesher dispatch (fence + doors + trapdoors join the partial path;
+// panes & ladders get their own mesher branches).
+export const PARTIAL_BLOCK_IDS = new Set([
+  ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
+]);
 
 // ----- Item icon canvases -----
 // Returns a lazily-painted atlas canvas (shared, painted once).

@@ -156,6 +156,9 @@ export const ITEM_DEFS = {
   fence:       { id: "fence",       name: "Fence",      placeBlockType: 52 },
   glass_pane:  { id: "glass_pane",  name: "Glass Pane", placeBlockType: 53 },
   ladder:      { id: "ladder",      name: "Ladder",     placeBlockType: 54 },
+  // Wave G2b — door (places a 2-tall pair, orient from yaw) + trapdoor (orient from yaw).
+  door:        { id: "door",        name: "Door",       placeBlockType: 58 },
+  trapdoor:    { id: "trapdoor",    name: "Trapdoor",   placeBlockType: 74 },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -459,6 +462,11 @@ const BLOCK_PREFERRED_TOOL = {
   19: "pickaxe", // diamond ore
   20: "pickaxe", // redstone ore
 };
+
+// Wave G2b — doors (58-73) drop the door item, trapdoors (74-81) the trapdoor item; both
+// are oak (axe-preferred, plank-soft). Populated via loops to avoid 24 literal lines.
+for (let i = 58; i <= 73; i += 1) { BLOCK_DROPS[i] = "door"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
+for (let i = 74; i <= 81; i += 1) { BLOCK_DROPS[i] = "trapdoor"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
 
 // ---------------------------------------------------------------------------
 // Recipe matching helpers — shared by the crafting grid and applyRecipe.
@@ -1191,6 +1199,25 @@ export const RECIPES = [
     key: { S: "stick" },
     inputs: [{ itemId: "stick", count: 7 }],
     output: { itemId: "ladder", count: 3 },
+    requiresWorkbench: true,
+  },
+  // Wave G2b — door (6 plank → 1) + trapdoor (6 plank → 2).
+  {
+    id: "door",
+    name: "Door",
+    pattern: ["XX_", "XX_", "XX_"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 6 }],
+    output: { itemId: "door", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "trapdoor",
+    name: "Trapdoor x2",
+    pattern: ["XXX", "XXX", "___"],
+    key: { X: "plank" },
+    inputs: [{ itemId: "plank", count: 6 }],
+    output: { itemId: "trapdoor", count: 2 },
     requiresWorkbench: true,
   },
 ];

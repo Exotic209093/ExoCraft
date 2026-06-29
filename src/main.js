@@ -99,6 +99,15 @@ import {
   FENCE_BLOCK_IDS,
   PANE_BLOCK_IDS,
   LADDER_BLOCK_IDS,
+  // Wave G2b — doors + trapdoors
+  DOOR_BLOCK_IDS,
+  DOOR_LOWER_IDS,
+  DOOR_UPPER_IDS,
+  doorOrient,
+  doorIsOpen,
+  doorToggle,
+  TRAPDOOR_BLOCK_IDS,
+  trapdoorToggle,
 } from "./game/textures";
 import {
   ensureAudio as _ensureAudioModule,
@@ -6032,6 +6041,14 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   const minedDeepCopper = type === COPPER_ORE_BLOCK_TYPE && isTorchPlacementInCave(coords.x, coords.y, coords.z);
   world.set(coords.x, coords.y, coords.z, 0);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid flow into dug space
+  // Wave G2b — a door is 2 cells: breaking one half clears the other (which drops nothing,
+  // so exactly one door item drops via the broken half's BLOCK_DROPS entry).
+  if (DOOR_BLOCK_IDS.has(type)) {
+    const otherY = DOOR_LOWER_IDS.has(type) ? coords.y + 1 : coords.y - 1;
+    if (DOOR_BLOCK_IDS.has(world.get(coords.x, otherY, coords.z))) {
+      world.set(coords.x, otherY, coords.z, 0);
+    }
+  }
   if (type === FURNACE_BLOCK_TYPE) {
     furnaceStates.delete(targetKey);
     if (state.activeFurnaceKey === targetKey) {
@@ -6247,6 +6264,27 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       return true;
     }
   }
+  // Wave G2b — right-click toggles a door (both halves) or trapdoor open/closed.
+  if (solidCoords) {
+    const sb = world.get(solidCoords.x, solidCoords.y, solidCoords.z);
+    if (DOOR_BLOCK_IDS.has(sb)) {
+      const otherY = DOOR_LOWER_IDS.has(sb) ? solidCoords.y + 1 : solidCoords.y - 1;
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z, doorToggle(sb));
+      const ob = world.get(solidCoords.x, otherY, solidCoords.z);
+      if (DOOR_BLOCK_IDS.has(ob)) world.set(solidCoords.x, otherY, solidCoords.z, doorToggle(ob));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = doorIsOpen(sb) ? "Closed door" : "Opened door";
+      viewmodel.triggerSwing();
+      return true;
+    }
+    if (TRAPDOOR_BLOCK_IDS.has(sb)) {
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z, trapdoorToggle(sb));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = "Toggled trapdoor";
+      viewmodel.triggerSwing();
+      return true;
+    }
+  }
 
   const slot = getSelectedInventorySlot();
   if (!slot) {
@@ -6366,6 +6404,22 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     placeType = [54, 57, 55, 56][orient];
   }
 
+  // Wave G2b — door + trapdoor orientation from yaw (door is placed as a 2-cell pair below;
+  // trapdoor is single-cell and rides the generic placement path).
+  let doorLowerId = null;
+  if (placeType === 58 || placeType === 74) {
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    const deg = (normYaw / Math.PI) * 180;
+    let orient;
+    if (deg < 45 || deg >= 315) orient = 0;
+    else if (deg < 135) orient = 3;
+    else if (deg < 225) orient = 2;
+    else orient = 1;
+    if (placeType === 58) doorLowerId = 58 + orient;
+    else placeType = 74 + orient;
+  }
+
   if (!placeCoords) {
     return false;
   }
@@ -6378,6 +6432,27 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   }
   if (playerInsideBlock(coords.x, coords.y, coords.z)) {
     return false;
+  }
+  // Wave G2b — a door needs this cell AND the one above it empty (placed atomically).
+  if (doorLowerId !== null) {
+    if (!world.inBounds(coords.x, coords.y + 1, coords.z)
+      || world.get(coords.x, coords.y + 1, coords.z) !== 0
+      || playerInsideBlock(coords.x, coords.y + 1, coords.z)) {
+      state.recentAction = "No room for the door";
+      return false;
+    }
+    const orient = doorLowerId - 58;
+    world.set(coords.x, coords.y, coords.z, doorLowerId);     // lower closed
+    world.set(coords.x, coords.y + 1, coords.z, 66 + orient); // upper closed
+    world.rebuildEditedChunksNow(coords.x, coords.z);
+    world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
+    consumeFromSlot(state.inventory, state.selectedSlot, 1);
+    viewmodel.triggerSwing();
+    state.recentAction = "Placed door";
+    markInventoryPanelDirty();
+    markCraftPanelDirty();
+    playPlaceSound(doorLowerId);
+    return true;
   }
   world.set(coords.x, coords.y, coords.z, placeType);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid react to placed block
@@ -7717,10 +7792,36 @@ window.__exoCraftDebug = {
     if (kind === "fence") id = 52;
     else if (kind === "pane") id = 53;
     else if (kind === "ladder") id = 54 + o;
+    else if (kind === "trapdoor") id = 74 + o;
+    else if (kind === "door") {
+      // doors are 2 cells: lower closed (58+o) + upper closed (66+o)
+      world.set(bx, by, bz, 58 + o);
+      world.set(bx, by + 1, bz, 66 + o);
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, lower: world.get(bx, by, bz), upper: world.get(bx, by + 1, bz) };
+    }
     if (id === null) return { ok: false, reason: "unknown kind" };
     const ok = world.set(bx, by, bz, id);
     if (ok) world.rebuildEditedChunksNow(bx, bz);
     return { ok, block: world.get(bx, by, bz) };
+  },
+  toggleDoorAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const sb = world.get(bx, by, bz);
+    if (DOOR_BLOCK_IDS.has(sb)) {
+      const otherY = DOOR_LOWER_IDS.has(sb) ? by + 1 : by - 1;
+      world.set(bx, by, bz, doorToggle(sb));
+      const ob = world.get(bx, otherY, bz);
+      if (DOOR_BLOCK_IDS.has(ob)) world.set(bx, otherY, bz, doorToggle(ob));
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, lower: world.get(bx, DOOR_LOWER_IDS.has(sb) ? by : otherY, bz) };
+    }
+    if (TRAPDOOR_BLOCK_IDS.has(sb)) {
+      world.set(bx, by, bz, trapdoorToggle(sb));
+      world.rebuildEditedChunksNow(bx, bz);
+      return { ok: true, block: world.get(bx, by, bz) };
+    }
+    return { ok: false, reason: "not a door/trapdoor", block: sb };
   },
   getBlockAt: (x, y, z) => {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);

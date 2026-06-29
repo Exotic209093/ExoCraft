@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -2270,6 +2270,30 @@ export class VoxelWorld {
               if (fenceConnect(this.get(worldX - 1, y, worldZ))) rail(x0, z0 + 0.4375, 0.4375, 0.125);
               if (fenceConnect(this.get(worldX, y, worldZ + 1))) rail(x0 + 0.4375, z0 + 0.5625, 0.125, 0.4375);
               if (fenceConnect(this.get(worldX, y, worldZ - 1))) rail(x0 + 0.4375, z0, 0.125, 0.4375);
+            } else if (DOOR_BLOCK_IDS.has(blockType)) {
+              // Wave G2b — door: a 0.1875-thick full-height slab on one cell edge. orient =
+              // which edge when closed; opening rotates it 90° to the perpendicular edge.
+              const T = 0.1875;
+              const orient = doorOrient(blockType);
+              const open = doorIsOpen(blockType);
+              // edge index 0=-Z,1=+X,2=+Z,3=-X. Closed sits on `orient`; open rotates to
+              // the next edge counter-clockwise.
+              const edge = open ? (orient + 3) % 4 : orient;
+              if (edge === 0)      emitBox(x0, y0, z0, 1.0, 1.0, T, blockType);             // -Z
+              else if (edge === 1) emitBox(x0 + 1 - T, y0, z0, T, 1.0, 1.0, blockType);     // +X
+              else if (edge === 2) emitBox(x0, y0, z0 + 1 - T, 1.0, 1.0, T, blockType);     // +Z
+              else                 emitBox(x0, y0, z0, T, 1.0, 1.0, blockType);             // -X
+            } else if (TRAPDOOR_BLOCK_IDS.has(blockType)) {
+              // Wave G2b — trapdoor: closed = a 0.1875 flap flat on the floor; open = the
+              // same flap stood vertical against the hinge wall (orient 0=-Z..3=-X).
+              const T = 0.1875;
+              const orient = trapdoorOrient(blockType);
+              if (!trapdoorIsOpen(blockType)) {
+                emitBox(x0, y0, z0, 1.0, T, 1.0, blockType); // floor flap
+              } else if (orient === 0) emitBox(x0, y0, z0, 1.0, 1.0, T, blockType);          // -Z wall
+              else if (orient === 1)   emitBox(x0 + 1 - T, y0, z0, T, 1.0, 1.0, blockType);  // +X wall
+              else if (orient === 2)   emitBox(x0, y0, z0 + 1 - T, 1.0, 1.0, T, blockType);  // +Z wall
+              else                     emitBox(x0, y0, z0, T, 1.0, 1.0, blockType);          // -X wall
             } else {
               // Stair: bottom slab (y0..y0+0.5) + upper step on back half (y0+0.5..y0+1.0).
               // Orientation encodes which side is the "back" (step side):
