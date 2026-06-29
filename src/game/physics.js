@@ -121,6 +121,10 @@ export const PASSABLE_BLOCKS = new Set([
   25, // sapling (Wave 11)
   // Wave G1 — wheat crop stages: non-colliding flora (farmland 51 is a solid full cube)
   47, 48, 49, 50,
+  // Wave G2a — ladders (54-57): non-colliding; vertical climb is handled in updateSimulation.
+  // Fence (52) + glass pane (53) deliberately collide as full cubes (block movement; you can
+  // also stand on top — a minor v1 simplification vs Minecraft's 1.5-tall / thin boxes).
+  54, 55, 56, 57,
 ]);
 
 function isPassable(blockType) {

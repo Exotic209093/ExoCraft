@@ -82,6 +82,13 @@ const DEFAULT_GAME_CONFIG = {
       { id: 49, name: "Wheat (Stage 2)", color: 0x9bb040, transparent: true },
       { id: 50, name: "Wheat (Stage 3)", color: 0xd8c24a, transparent: true },
       { id: 51, name: "Farmland", color: 0x5a3e22 },
+      // Wave G2a — building: fence, glass pane, ladder (4 facings).
+      { id: 52, name: "Fence", color: 0xb08a55, transparent: true },
+      { id: 53, name: "Glass Pane", color: 0xb4dcf8, transparent: true },
+      { id: 54, name: "Ladder (+Z)", color: 0x9a6a3b, transparent: true },
+      { id: 55, name: "Ladder (-Z)", color: 0x9a6a3b, transparent: true },
+      { id: 56, name: "Ladder (+X)", color: 0x9a6a3b, transparent: true },
+      { id: 57, name: "Ladder (-X)", color: 0x9a6a3b, transparent: true },
     ],
     generation: {
       seed: 1337,

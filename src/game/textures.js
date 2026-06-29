@@ -61,6 +61,9 @@ const TILE = {
   wheat_stage1:    [6, 5],
   wheat_stage2:    [7, 5],
   wheat_stage3:    [0, 6],  // golden mature wheat
+  // Wave G2a — building tiles (glass pane reuses the existing 'glass' tile)
+  fence_oak:       [1, 6],
+  ladder:          [2, 6],  // rails + rungs on transparent (alpha-cutout)
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -146,6 +149,13 @@ export const BLOCK_FACE_TILES = {
   50: { px: "wheat_stage3", nx: "wheat_stage3", py: "wheat_stage3", ny: "wheat_stage3", pz: "wheat_stage3", nz: "wheat_stage3" },
   // Wave G1 — farmland (51): tilled soil on every face (dirt underside).
   51: { px: "farmland", nx: "farmland", py: "farmland", ny: "dirt", pz: "farmland", nz: "farmland" },
+  // Wave G2a — fence/pane/ladder all use one tile per block on every face.
+  52: { px: "fence_oak", nx: "fence_oak", py: "fence_oak", ny: "fence_oak", pz: "fence_oak", nz: "fence_oak" },
+  53: { px: "glass", nx: "glass", py: "glass", ny: "glass", pz: "glass", nz: "glass" },
+  54: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
+  55: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
+  56: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
+  57: { px: "ladder", nx: "ladder", py: "ladder", ny: "ladder", pz: "ladder", nz: "ladder" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -987,6 +997,39 @@ function paintWheatStage(ctx, col, row, heightFrac, mature) {
   }
 }
 
+// Wave G2a — oak fence: warm plank brown with vertical grain streaks.
+function paintFenceOak(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 510);
+      let r = 176, g = 138, b = 85;
+      if (x % 5 === 0) { r -= 26; g -= 22; b -= 16; } // vertical plank seam
+      if (n < 0.2) { r -= 16; g -= 14; b -= 10; }
+      else if (n > 0.85) { r += 14; g += 12; b += 8; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave G2a — ladder: two vertical rails + horizontal rungs on a transparent background
+// (alpha-cutout, like leaves — unpainted pixels are discarded).
+function paintLadder(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const isRail = x <= 2 || x >= TILE_PX - 3;
+      const isRung = (y % 5 === 1 || y % 5 === 2);
+      if (!isRail && !isRung) continue; // transparent gap
+      const n = pixelNoise(x, y, 511);
+      let r = 150, g = 102, b = 56;
+      if (n < 0.3) { r -= 22; g -= 16; b -= 10; }
+      else if (n > 0.8) { r += 12; g += 8; b += 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -1040,6 +1083,9 @@ function paintAtlas(ctx) {
   paintWheatStage(ctx, ...TILE.wheat_stage1, 0.55, false);
   paintWheatStage(ctx, ...TILE.wheat_stage2, 0.80, false);
   paintWheatStage(ctx, ...TILE.wheat_stage3, 1.00, true);
+  // Wave G2a — building
+  paintFenceOak(ctx, ...TILE.fence_oak);
+  paintLadder(ctx, ...TILE.ladder);
 }
 
 export function createAtlasTexture() {
@@ -1124,6 +1170,11 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   46: 5,
   // Wave G1 — wheat crop stages: cross-quad flora (class 4). Farmland (51) is opaque (omit).
   47: 4, 48: 4, 49: 4, 50: 4,
+  // Wave G2a — fence (5=partial-opaque), glass pane (2=full-transparent, merges with glass),
+  // ladders (4=isolated cross-quad-like, never cull neighbours).
+  52: 5,
+  53: 2,
+  54: 4, 55: 4, 56: 4, 57: 4,
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1168,8 +1219,20 @@ export const STAIR_BASE_IDS = {
   plank:       42,
 };
 
-// Combined set for fast mesher dispatch.
-export const PARTIAL_BLOCK_IDS = new Set([...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS]);
+// ---------------------------------------------------------------------------
+// Wave G2a — building block id sets + pure id↔state helpers (single source of
+// truth, mirrored by world.js mesher, physics.js collision, and main.js logic).
+// ---------------------------------------------------------------------------
+export const FENCE_BLOCK_IDS = new Set([52]);   // post + connecting rails
+export const PANE_BLOCK_IDS = new Set([53]);    // thin connecting glass plane
+// Ladder: 4 ids by the WALL DIRECTION the ladder is mounted against / faces away from.
+//   54 = +Z, 55 = -Z, 56 = +X, 57 = -X (the open face the player climbs).
+export const LADDER_BLOCK_IDS = new Set([54, 55, 56, 57]);
+export function ladderFacing(id) { return id - 54; } // 0=+Z,1=-Z,2=+X,3=-X
+
+// Combined set for fast mesher dispatch (fence joins the partial path; panes & ladders
+// get their own mesher branches).
+export const PARTIAL_BLOCK_IDS = new Set([...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS]);
 
 // ----- Item icon canvases -----
 // Returns a lazily-painted atlas canvas (shared, painted once).

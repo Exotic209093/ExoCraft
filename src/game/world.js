@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -153,6 +153,8 @@ const LIGHT_PASSABLE = new Set([
   23, 24, 25,
   // Wave G1 — wheat crop stages: cross-quad, pass light like tall grass (farmland 51 is opaque)
   47, 48, 49, 50,
+  // Wave G2a — glass pane (53) + ladders (54-57): thin, pass light (fence 52 blocks like wood)
+  53, 54, 55, 56, 57,
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2089,6 +2091,81 @@ export class VoxelWorld {
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
             }
             continue; // skip the cube-face loop for flora
+          } else if (LADDER_BLOCK_IDS.has(blockType)) {
+            // --- Wave G2a: ladder — a single flat alpha-cutout quad flush to one wall,
+            // emitted into the flora buffer (DoubleSide alpha-cutout, no wind sway). ---
+            const lSky = skylight[lIndex(lx, y, lz)];
+            const lBlk = blocklight[lIndex(lx, y, lz)];
+            const lr = lSky / 15.0, lg = lBlk / 15.0;
+            const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, FACE_PY);
+            const facing = ladderFacing(blockType); // 0=+Z,1=-Z,2=+X,3=-X
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const EPS = 0.05;
+            let lverts;
+            if (facing === 0) {        // +Z: plane near the -Z wall
+              const zc = z0 + EPS;
+              lverts = [[x0, y0, zc], [x0 + 1, y0, zc], [x0, y0 + 1, zc], [x0 + 1, y0 + 1, zc]];
+            } else if (facing === 1) { // -Z: plane near the +Z wall
+              const zc = z0 + 1 - EPS;
+              lverts = [[x0 + 1, y0, zc], [x0, y0, zc], [x0 + 1, y0 + 1, zc], [x0, y0 + 1, zc]];
+            } else if (facing === 2) { // +X: plane near the -X wall
+              const xc = x0 + EPS;
+              lverts = [[xc, y0, z0 + 1], [xc, y0, z0], [xc, y0 + 1, z0 + 1], [xc, y0 + 1, z0]];
+            } else {                   // -X: plane near the +X wall
+              const xc = x0 + 1 - EPS;
+              lverts = [[xc, y0, z0], [xc, y0, z0 + 1], [xc, y0 + 1, z0], [xc, y0 + 1, z0 + 1]];
+            }
+            const lbase = floraPos.length / 3;
+            for (let v = 0; v < 4; v += 1) {
+              floraPos.push(...lverts[v]);
+              floraNorm.push(0, 0, 1);
+              const [ut, vt] = FACE_UV_INDICES[v];
+              floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+              floraCol.push(lr, lg, 1.0);
+              floraTint.push(1.0, 1.0, 1.0);
+              floraSway.push(0.0); // ladders never wave
+            }
+            floraIdx.push(lbase, lbase + 1, lbase + 2, lbase + 1, lbase + 3, lbase + 2);
+            continue;
+          } else if (PANE_BLOCK_IDS.has(blockType)) {
+            // --- Wave G2a: glass pane — central post + arms to connected cardinal
+            // neighbours (solid OR pane/glass), emitted into the glass buffer. ---
+            const pSky = skylight[lIndex(lx, y, lz)];
+            const pBlk = blocklight[lIndex(lx, y, lz)];
+            const pr = pSky / 15.0, pg = pBlk / 15.0;
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const emitGlassBox = (ox, oy, oz, sx, sy, sz) => {
+              const faces = [
+                [[[ox+sx,oy,oz+sz],[ox+sx,oy,oz],[ox+sx,oy+sy,oz+sz],[ox+sx,oy+sy,oz]], 1,0,0, FACE_PX],
+                [[[ox,oy,oz],[ox,oy,oz+sz],[ox,oy+sy,oz],[ox,oy+sy,oz+sz]], -1,0,0, FACE_NX],
+                [[[ox,oy+sy,oz],[ox+sx,oy+sy,oz],[ox,oy+sy,oz+sz],[ox+sx,oy+sy,oz+sz]], 0,1,0, FACE_PY],
+                [[[ox,oy,oz+sz],[ox+sx,oy,oz+sz],[ox,oy,oz],[ox+sx,oy,oz]], 0,-1,0, FACE_NY],
+                [[[ox,oy,oz+sz],[ox+sx,oy,oz+sz],[ox,oy+sy,oz+sz],[ox+sx,oy+sy,oz+sz]], 0,0,1, FACE_PZ],
+                [[[ox+sx,oy,oz],[ox,oy,oz],[ox+sx,oy+sy,oz],[ox,oy+sy,oz]], 0,0,-1, FACE_NZ],
+              ];
+              for (const [verts, nx, ny, nz, faceIdx] of faces) {
+                const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, faceIdx);
+                const base = glassPos.length / 3;
+                for (let v = 0; v < 4; v += 1) {
+                  glassPos.push(...verts[v]);
+                  glassNorm.push(nx, ny, nz);
+                  const [ut, vt] = FACE_UV_INDICES[v];
+                  glassUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+                  glassCol.push(pr, pg, 1.0);
+                  glassTint.push(1.0, 1.0, 1.0);
+                }
+                if (ny !== 0) glassIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+                else glassIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
+              }
+            };
+            const paneConnect = (nb) => nb !== 0 && (PANE_BLOCK_IDS.has(nb) || nb === 14 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 0 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 5);
+            const t = 0.0625; // half-thickness 1/16 → post is 0.125 wide
+            emitGlassBox(x0 + 0.5 - t, y0, z0 + 0.5 - t, 2 * t, 1.0, 2 * t); // central post
+            if (paneConnect(this.get(worldX + 1, y, worldZ))) emitGlassBox(x0 + 0.5 + t, y0, z0 + 0.5 - t, 0.5 - t, 1.0, 2 * t);
+            if (paneConnect(this.get(worldX - 1, y, worldZ))) emitGlassBox(x0, y0, z0 + 0.5 - t, 0.5 - t, 1.0, 2 * t);
+            if (paneConnect(this.get(worldX, y, worldZ + 1))) emitGlassBox(x0 + 0.5 - t, y0, z0 + 0.5 + t, 2 * t, 1.0, 0.5 - t);
+            if (paneConnect(this.get(worldX, y, worldZ - 1))) emitGlassBox(x0 + 0.5 - t, y0, z0, 2 * t, 1.0, 0.5 - t);
+            continue;
           } else if (PARTIAL_BLOCK_IDS.has(blockType)) {
             // --- Wave F4: partial-geometry emitter (slabs and stairs) ---
             // Sample light from the voxel above (open sky side), same pattern as flora.
@@ -2179,6 +2256,20 @@ export class VoxelWorld {
             if (SLAB_BLOCK_IDS.has(blockType)) {
               // Slab: full-footprint bottom half (y0..y0+0.5).
               emitBox(x0, y0, z0, 1.0, 0.5, 1.0, blockType);
+            } else if (FENCE_BLOCK_IDS.has(blockType)) {
+              // Wave G2a — fence: a central post + 2 rails toward each connected cardinal
+              // neighbour (another fence or any solid-opaque block).
+              const fenceConnect = (nb) => FENCE_BLOCK_IDS.has(nb)
+                || (nb !== 0 && ((BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 0 || (BLOCK_TRANSPARENCY_CLASS[nb] || 0) === 5) && !FLORA_BLOCK_IDS.has(nb));
+              emitBox(x0 + 0.375, y0, z0 + 0.375, 0.25, 1.0, 0.25, blockType); // post
+              const rail = (ox, oz, sx, sz) => {
+                emitBox(ox, y0 + 0.375, oz, sx, 0.1875, sz, blockType); // lower rail
+                emitBox(ox, y0 + 0.75,  oz, sx, 0.1875, sz, blockType); // upper rail
+              };
+              if (fenceConnect(this.get(worldX + 1, y, worldZ))) rail(x0 + 0.5625, z0 + 0.4375, 0.4375, 0.125);
+              if (fenceConnect(this.get(worldX - 1, y, worldZ))) rail(x0, z0 + 0.4375, 0.4375, 0.125);
+              if (fenceConnect(this.get(worldX, y, worldZ + 1))) rail(x0 + 0.4375, z0 + 0.5625, 0.125, 0.4375);
+              if (fenceConnect(this.get(worldX, y, worldZ - 1))) rail(x0 + 0.4375, z0, 0.125, 0.4375);
             } else {
               // Stair: bottom slab (y0..y0+0.5) + upper step on back half (y0+0.5..y0+1.0).
               // Orientation encodes which side is the "back" (step side):

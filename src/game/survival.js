@@ -151,6 +151,11 @@ export const ITEM_DEFS = {
   wood_hoe:    { id: "wood_hoe",    name: "Wood Hoe",  toolKind: "hoe", toolPower: 1.0 },
   stone_hoe:   { id: "stone_hoe",   name: "Stone Hoe", toolKind: "hoe", toolPower: 1.0 },
   iron_hoe:    { id: "iron_hoe",    name: "Iron Hoe",  toolKind: "hoe", toolPower: 1.0 },
+  // Wave G2a — building blocks. ladder/door/trapdoor pick an orientation id from yaw at
+  // placement (special-cased in placeBlock), so placeBlockType is just the base id.
+  fence:       { id: "fence",       name: "Fence",      placeBlockType: 52 },
+  glass_pane:  { id: "glass_pane",  name: "Glass Pane", placeBlockType: 53 },
+  ladder:      { id: "ladder",      name: "Ladder",     placeBlockType: 54 },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -319,6 +324,10 @@ export const BLOCK_DROPS = {
   // Wave G1 — farmland reverts to a dirt item when broken; crops 47-50 use a custom
   // drop in breakBlock (mature → wheat + seeds, immature → seeds), so they are NOT here.
   51: "dirt",
+  // Wave G2a — building blocks (all ladder orientations drop the single ladder item).
+  52: "fence",
+  53: "glass_pane",
+  54: "ladder", 55: "ladder", 56: "ladder", 57: "ladder",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -408,6 +417,9 @@ const BLOCK_HARDNESS = {
   // Wave G1 — farming: crops break instantly; farmland is dirt-soft (shovel)
   47: 0.05, 48: 0.05, 49: 0.05, 50: 0.05,
   51: 0.6,
+  // Wave G2a — fence/ladder are wood (axe); glass pane is glass-soft
+  52: 1.5, 53: 0.4,
+  54: 0.4, 55: 0.4, 56: 0.4, 57: 0.4,
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -438,6 +450,8 @@ const BLOCK_PREFERRED_TOOL = {
   22: "axe",   // chest
   // Wave G1 — farmland mines like dirt
   51: "shovel",
+  // Wave G2a — fence + ladder mine fastest with an axe (wood)
+  52: "axe", 54: "axe", 55: "axe", 56: "axe", 57: "axe",
   // Wave 8 — all ores need a pickaxe
   16: "pickaxe", // coal ore
   17: "pickaxe", // iron ore
@@ -1149,6 +1163,34 @@ export const RECIPES = [
     key: { W: "wheat" },
     inputs: [{ itemId: "wheat", count: 3 }],
     output: { itemId: "bread", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave G2a — building blocks.
+  {
+    id: "fence",
+    name: "Fence x3",
+    pattern: ["XSX", "XSX", "___"],
+    key: { X: "plank", S: "stick" },
+    inputs: [{ itemId: "plank", count: 4 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "fence", count: 3 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "glass_pane",
+    name: "Glass Pane x16",
+    pattern: ["___", "XXX", "XXX"],
+    key: { X: "glass" },
+    inputs: [{ itemId: "glass", count: 6 }],
+    output: { itemId: "glass_pane", count: 16 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "ladder",
+    name: "Ladder x3",
+    pattern: ["S_S", "SSS", "S_S"],
+    key: { S: "stick" },
+    inputs: [{ itemId: "stick", count: 7 }],
+    output: { itemId: "ladder", count: 3 },
     requiresWorkbench: true,
   },
 ];

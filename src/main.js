@@ -95,6 +95,10 @@ import {
   STAIR_BLOCK_IDS,
   PARTIAL_BLOCK_IDS,
   STAIR_BASE_IDS,
+  // Wave G2a — building
+  FENCE_BLOCK_IDS,
+  PANE_BLOCK_IDS,
+  LADDER_BLOCK_IDS,
 } from "./game/textures";
 import {
   ensureAudio as _ensureAudioModule,
@@ -6348,6 +6352,20 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     placeType = stairBase + orient;
   }
 
+  // Wave G2a — ladder placement: pick the orientation id (54-57) so the climbable face
+  // points back toward the player (same 4-quadrant yaw logic as stairs).
+  if (placeType === 54) {
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    const deg = (normYaw / Math.PI) * 180;
+    let orient;
+    if (deg < 45 || deg >= 315) orient = 0;      // looks -Z → faces +Z
+    else if (deg < 135) orient = 3;              // looks -X → faces +X
+    else if (deg < 225) orient = 2;              // looks +Z → faces -Z
+    else orient = 1;                             // looks +X → faces -X
+    placeType = [54, 57, 55, 56][orient];
+  }
+
   if (!placeCoords) {
     return false;
   }
@@ -6832,6 +6850,9 @@ function updateSimulation(dtSeconds) {
   // Wave 8: lava submersion (body in lava = damage + slow; eye in lava = orange fog).
   state.inLava     = bodyBlock === LAVA_BLOCK_TYPE;
   state.eyeInLava  = eyeBlock  === LAVA_BLOCK_TYPE;
+  // Wave G2a: on a ladder if the player's feet OR body cell is a ladder block.
+  const feetBlock  = world.get(eyeTestX, Math.floor(state.playerPos.y + 0.1), eyeTestZ);
+  state.onLadder   = LADDER_BLOCK_IDS.has(bodyBlock) || LADDER_BLOCK_IDS.has(feetBlock);
 
   // Water movement constants
   const WATER_SWIM_SPEED        = moveSpeed * 0.55;
@@ -6935,6 +6956,24 @@ function updateSimulation(dtSeconds) {
     if (state.onGround && state.playerVel.y < 0) {
       state.playerVel.y = 0;
     }
+  } else if (state.onLadder) {
+    // --- ON A LADDER: gravity is overridden by climb input (guard order fly > water >
+    // ladder > land so vy is written exactly once). Hold forward / Space to climb up,
+    // back / Sneak to descend; otherwise cling and slide slowly. ---
+    const CLIMB_SPEED = 3.0;
+    state.playerVel.x = (forwardX * forwardInput + rightX * strafeInput) * moveSpeed;
+    state.playerVel.z = (forwardZ * forwardInput + rightZ * strafeInput) * moveSpeed;
+    const ascending = forwardInput > 0 || state.keys.has("Space") || state.jumpQueued;
+    const descending = forwardInput < 0 || state.isSneaking;
+    if (ascending && !descending) state.playerVel.y = CLIMB_SPEED;
+    else if (descending && !ascending) state.playerVel.y = -CLIMB_SPEED;
+    else state.playerVel.y = -1.0; // gentle cling-slide
+    state.jumpQueued = false;
+    state.onGround = false;
+    resolveAxis({ axis: "x", delta: state.playerVel.x * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    resolveAxis({ axis: "y", delta: state.playerVel.y * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    resolveAxis({ axis: "z", delta: state.playerVel.z * dtSeconds, state, world, playerRadius: playerConfig.radius, playerHeight: playerConfig.height, epsilon: simConfig.epsilon });
+    if (state.onGround && state.playerVel.y < 0) state.playerVel.y = 0;
   } else {
     // --- ON LAND (or in lava): original physics with lava slowdown ---
     // Wave 8: lava halves movement speed (same as Minecraft's lava drag).
@@ -7461,6 +7500,7 @@ window.render_game_to_text = () => {
       vy: Number(state.playerVel.y.toFixed(3)),
       vz: Number(state.playerVel.z.toFixed(3)),
       onGround: state.onGround,
+      onLadder: state.onLadder === true,
       sneaking: state.isSneaking,
       sprinting: state.isSprinting,
       flying: state.isFlying,
@@ -7668,6 +7708,25 @@ window.render_game_to_text = () => {
 
 window.__exoCraftDebug = {
   ...(window.__exoCraftDebug || {}),
+  // Wave G2a building debug hooks -----------------------------------------------
+  // placeBuildingBlock(kind, x, y, z, orient) — kind: "fence"|"pane"|"ladder".
+  placeBuildingBlock: (kind, x, y, z, orient = 0) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const o = Math.max(0, Math.min(3, Math.floor(orient)));
+    let id = null;
+    if (kind === "fence") id = 52;
+    else if (kind === "pane") id = 53;
+    else if (kind === "ladder") id = 54 + o;
+    if (id === null) return { ok: false, reason: "unknown kind" };
+    const ok = world.set(bx, by, bz, id);
+    if (ok) world.rebuildEditedChunksNow(bx, bz);
+    return { ok, block: world.get(bx, by, bz) };
+  },
+  getBlockAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    return { id: world.get(bx, by, bz) };
+  },
+  onLadder: () => state.onLadder === true,
   // Wave G1 farming debug hooks -------------------------------------------------
   till: (x, y, z) => {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
