@@ -119,6 +119,8 @@ export const PASSABLE_BLOCKS = new Set([
   23, // tall grass (Wave 11)
   24, // flower (Wave 11)
   25, // sapling (Wave 11)
+  // Wave G1 — wheat crop stages: non-colliding flora (farmland 51 is a solid full cube)
+  47, 48, 49, 50,
 ]);
 
 function isPassable(blockType) {

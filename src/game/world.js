@@ -151,6 +151,8 @@ const LIGHT_PASSABLE = new Set([
   21, // lava (Wave 8) — light propagates through lava itself
   // Wave 11 flora — cross-quad, no collision, light passes through freely
   23, 24, 25,
+  // Wave G1 — wheat crop stages: cross-quad, pass light like tall grass (farmland 51 is opaque)
+  47, 48, 49, 50,
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2045,23 +2047,30 @@ export class VoxelWorld {
             const AO_NEUTRAL = 1.0; // no AO for flora
             const lightR = floraSky / 15.0;
             const lightG = floraBlk / 15.0;
-            // Wave 12: tint flora with biome grass tint
-            const floraBiome = this.biomeAt(worldX, worldZ);
-            const [ftr, ftg, ftb] = floraBiome.grassTint;
+            // Wave G1 — wheat crops (47-50): shorter at early stages + NO biome grass tint
+            // (golden mature wheat must not be tinted green). Other flora keep the grass tint.
+            const isCrop = blockType >= 47 && blockType <= 50;
+            let ftr = 1.0, ftg = 1.0, ftb = 1.0;
+            if (!isCrop) {
+              const floraBiome = this.biomeAt(worldX, worldZ);
+              [ftr, ftg, ftb] = floraBiome.grassTint;
+            }
+            const cropTop = isCrop ? [0.35, 0.55, 0.8, 1.0][blockType - 47] : 1.0;
+            const yTop = y0 + cropTop;
             const quadDefs = [
               // Quad A verts: [bl, br, tl, tr] along SW–NE diagonal
               [
-                [x0 + 0.1, y0,     z0 + 0.9],
-                [x0 + 0.9, y0,     z0 + 0.1],
-                [x0 + 0.1, y0 + 1, z0 + 0.9],
-                [x0 + 0.9, y0 + 1, z0 + 0.1],
+                [x0 + 0.1, y0,    z0 + 0.9],
+                [x0 + 0.9, y0,    z0 + 0.1],
+                [x0 + 0.1, yTop,  z0 + 0.9],
+                [x0 + 0.9, yTop,  z0 + 0.1],
               ],
               // Quad B verts: [bl, br, tl, tr] along NW–SE diagonal
               [
-                [x0 + 0.9, y0,     z0 + 0.9],
-                [x0 + 0.1, y0,     z0 + 0.1],
-                [x0 + 0.9, y0 + 1, z0 + 0.9],
-                [x0 + 0.1, y0 + 1, z0 + 0.1],
+                [x0 + 0.9, y0,    z0 + 0.9],
+                [x0 + 0.1, y0,    z0 + 0.1],
+                [x0 + 0.9, yTop,  z0 + 0.9],
+                [x0 + 0.1, yTop,  z0 + 0.1],
               ],
             ];
             for (const qverts of quadDefs) {

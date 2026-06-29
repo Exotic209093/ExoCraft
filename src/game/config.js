@@ -76,6 +76,12 @@ const DEFAULT_GAME_CONFIG = {
       { id: 45, name: "Wood Stairs (W)", color: 0xc8a060 },
       // Wave F7 — bed
       { id: 46, name: "Bed", color: 0xcc3333 },
+      // Wave G1 — farming: wheat crop (4 growth stages) + tilled farmland.
+      { id: 47, name: "Wheat (Stage 0)", color: 0x6f9a3a, transparent: true },
+      { id: 48, name: "Wheat (Stage 1)", color: 0x7faa3a, transparent: true },
+      { id: 49, name: "Wheat (Stage 2)", color: 0x9bb040, transparent: true },
+      { id: 50, name: "Wheat (Stage 3)", color: 0xd8c24a, transparent: true },
+      { id: 51, name: "Farmland", color: 0x5a3e22 },
     ],
     generation: {
       seed: 1337,

@@ -30,6 +30,10 @@ export const TOOL_MAX_DURABILITY = {
   diamond_axe:     1562,
   diamond_shovel:  1562,
   diamond_sword:   1562,
+  // Wave G1 — hoes (used for tilling; durability per use)
+  wood_hoe:  60,
+  stone_hoe: 132,
+  iron_hoe:  251,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +60,10 @@ export const TOOL_TIER = {
   diamond_axe:         5,
   diamond_shovel:      5,
   diamond_sword:       5,
+  // Wave G1 — hoes (tier only gates ore drops; harmless for hoes)
+  wood_hoe:  1,
+  stone_hoe: 2,
+  iron_hoe:  4,
 };
 
 /**
@@ -136,6 +144,13 @@ export const ITEM_DEFS = {
   flower:      { id: "flower",      name: "Flower",      placeBlockType: 24 },
   sapling:     { id: "sapling",     name: "Sapling",     placeBlockType: 25 },
   seeds:       { id: "seeds",       name: "Seeds" },
+  // Wave G1 — farming. seeds plant ONLY on farmland (handled in placeBlock, so NO
+  // placeBlockType here — that prevents planting floating wheat on arbitrary cells).
+  wheat:       { id: "wheat",       name: "Wheat" },
+  bread:       { id: "bread",       name: "Bread", food: { hunger: 5, saturation: 6.0 } },
+  wood_hoe:    { id: "wood_hoe",    name: "Wood Hoe",  toolKind: "hoe", toolPower: 1.0 },
+  stone_hoe:   { id: "stone_hoe",   name: "Stone Hoe", toolKind: "hoe", toolPower: 1.0 },
+  iron_hoe:    { id: "iron_hoe",    name: "Iron Hoe",  toolKind: "hoe", toolPower: 1.0 },
   // Wave F4 — slab items (one item id per material; placement just sets the slab block)
   stone_slab:       { id: "stone_slab",       name: "Stone Slab",       placeBlockType: 31 },
   cobblestone_slab: { id: "cobblestone_slab", name: "Cobblestone Slab", placeBlockType: 32 },
@@ -301,6 +316,9 @@ export const BLOCK_DROPS = {
   30: "snow_block",  // snow block → snow block item
   // Wave F7 — bed: breaking returns the bed item
   46: "bed",
+  // Wave G1 — farmland reverts to a dirt item when broken; crops 47-50 use a custom
+  // drop in breakBlock (mature → wheat + seeds, immature → seeds), so they are NOT here.
+  51: "dirt",
   // Wave 8 — ore drops (harvest-level gating applied in breakBlock, not here)
   16: "coal",        // coal ore → coal directly (no smelting needed)
   17: "iron_ore",    // iron ore → iron ore item → smelt for ingot
@@ -387,6 +405,9 @@ const BLOCK_HARDNESS = {
   28: 1.6,   // spruce log — same as oak
   29: 0.8,   // spruce leaf — same as oak leaf
   30: 0.5,   // snow — soft, shovel preferred
+  // Wave G1 — farming: crops break instantly; farmland is dirt-soft (shovel)
+  47: 0.05, 48: 0.05, 49: 0.05, 50: 0.05,
+  51: 0.6,
 };
 
 const BLOCK_PREFERRED_TOOL = {
@@ -415,6 +436,8 @@ const BLOCK_PREFERRED_TOOL = {
   // 14 glass: no preferred tool (any breaks it equally)
   // Wave 10
   22: "axe",   // chest
+  // Wave G1 — farmland mines like dirt
+  51: "shovel",
   // Wave 8 — all ores need a pickaxe
   16: "pickaxe", // coal ore
   17: "pickaxe", // iron ore
@@ -1091,6 +1114,43 @@ export const RECIPES = [
     output: { itemId: "empty_bucket", count: 1 },
     requiresWorkbench: true,
   },
+  // Wave G1 — hoes (2 material + 2 sticks, axe/pickaxe shape) + bread (3 wheat in a row).
+  {
+    id: "wood_hoe",
+    name: "Wood Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "plank", S: "stick" },
+    inputs: [{ itemId: "plank", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "wood_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "stone_hoe",
+    name: "Stone Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "stone", S: "stick" },
+    inputs: [{ itemId: "stone", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "stone_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "iron_hoe",
+    name: "Iron Hoe",
+    pattern: ["XX_", "_S_", "_S_"],
+    key: { X: "iron_ingot", S: "stick" },
+    inputs: [{ itemId: "iron_ingot", count: 2 }, { itemId: "stick", count: 2 }],
+    output: { itemId: "iron_hoe", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "bread",
+    name: "Bread",
+    pattern: ["___", "___", "WWW"],
+    key: { W: "wheat" },
+    inputs: [{ itemId: "wheat", count: 3 }],
+    output: { itemId: "bread", count: 1 },
+    requiresWorkbench: true,
+  },
 ];
 
 export const FUEL_ITEM_MS = {
@@ -1382,6 +1442,11 @@ export function getBreakPower(itemId, blockType) {
     return item.toolPower;
   }
   return 1.0;
+}
+
+// Wave G1 — true if the held item is a hoe (used by placeBlock to till dirt → farmland).
+export function isHoe(itemId) {
+  return ITEM_DEFS[itemId]?.toolKind === "hoe";
 }
 
 export function getMobDamage(itemId, baseDamage = 1) {

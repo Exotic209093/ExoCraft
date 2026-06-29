@@ -55,6 +55,12 @@ const TILE = {
   // Wave F7 — bed tiles (row 5, cols 2-3)
   bed_top:         [2, 5],  // red mattress with white pillow band
   bed_side:        [3, 5],  // side panel (wood frame + red mattress)
+  // Wave G1 — farming tiles (row 5 cols 4-7, row 6 col 0)
+  farmland:        [4, 5],  // tilled dark soil with furrows
+  wheat_stage0:    [5, 5],  // sprouts (alpha-cutout cross-quad)
+  wheat_stage1:    [6, 5],
+  wheat_stage2:    [7, 5],
+  wheat_stage3:    [0, 6],  // golden mature wheat
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -133,6 +139,13 @@ export const BLOCK_FACE_TILES = {
   45: { px: "crafting_side",nx: "crafting_side",py: "crafting_top", ny: "crafting_side",pz: "crafting_side",nz: "crafting_side" },
   // Wave F7 — bed (ID 46): red mattress top + white pillow band; wood-framed sides.
   46: { px: "bed_side", nx: "bed_side", py: "bed_top", ny: "crafting_side", pz: "bed_side", nz: "bed_side" },
+  // Wave G1 — wheat crop stages (47-50: cross-quad flora, mesher reads the py tile).
+  47: { px: "wheat_stage0", nx: "wheat_stage0", py: "wheat_stage0", ny: "wheat_stage0", pz: "wheat_stage0", nz: "wheat_stage0" },
+  48: { px: "wheat_stage1", nx: "wheat_stage1", py: "wheat_stage1", ny: "wheat_stage1", pz: "wheat_stage1", nz: "wheat_stage1" },
+  49: { px: "wheat_stage2", nx: "wheat_stage2", py: "wheat_stage2", ny: "wheat_stage2", pz: "wheat_stage2", nz: "wheat_stage2" },
+  50: { px: "wheat_stage3", nx: "wheat_stage3", py: "wheat_stage3", ny: "wheat_stage3", pz: "wheat_stage3", nz: "wheat_stage3" },
+  // Wave G1 — farmland (51): tilled soil on every face (dirt underside).
+  51: { px: "farmland", nx: "farmland", py: "farmland", ny: "dirt", pz: "farmland", nz: "farmland" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -922,6 +935,58 @@ function paintBedSide(ctx, col, row) {
   }
 }
 
+// Wave G1 — tilled farmland: darker, wetter dirt with horizontal furrow rows.
+function paintFarmland(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 71);
+      // Base ≈ rgb(96, 66, 38) — damp tilled soil, darker than plain dirt.
+      let r = 96, g = 66, b = 38;
+      // Furrow rows every 5 px read as darker grooves.
+      if (y % 5 === 2) { r -= 30; g -= 22; b -= 14; }
+      if (n < 0.2) { r -= 16; g -= 12; b -= 8; }
+      else if (n > 0.85) { r += 14; g += 10; b += 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave G1 — wheat crop cross-quad sprite. Alpha-cutout: only stalk pixels are painted;
+// the rest stay transparent (discarded by the flora material's alphaTest). heightFrac
+// controls how far up the tile the stalks reach (taller = later growth stage); `mature`
+// switches the top to golden grain heads.
+function paintWheatStage(ctx, col, row, heightFrac, mature) {
+  const { ox, oy } = tileOrigin(col, row);
+  const topY = Math.round(TILE_PX * (1 - heightFrac)); // pixels above this stay empty
+  // 4 evenly-spaced vertical stalks.
+  const stalkXs = [2, 6, 9, 13];
+  for (let y = 0; y < TILE_PX; y += 1) {
+    if (y < topY) continue;
+    for (let x = 0; x < TILE_PX; x += 1) {
+      let onStalk = false;
+      for (const sx of stalkXs) {
+        if (x === sx || (mature && Math.abs(x - sx) === 1 && y < topY + 4)) { onStalk = true; break; }
+      }
+      if (!onStalk) continue;
+      const n = pixelNoise(x, y, 72);
+      let r, g, b;
+      if (mature && y < topY + 5) {
+        // Golden grain head near the top.
+        r = 216 + (n < 0.3 ? -28 : n > 0.8 ? 14 : 0);
+        g = 188 + (n < 0.3 ? -22 : 0);
+        b = 74  + (n < 0.3 ? -10 : 0);
+      } else {
+        // Green stalk.
+        r = 104 + (n < 0.3 ? -22 : 0);
+        g = 150 + (n < 0.3 ? -28 : n > 0.8 ? 14 : 0);
+        b = 58  + (n < 0.3 ? -12 : 0);
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -969,6 +1034,12 @@ function paintAtlas(ctx) {
   // Wave F7 — bed
   paintBedTop(ctx,  ...TILE.bed_top);
   paintBedSide(ctx, ...TILE.bed_side);
+  // Wave G1 — farming
+  paintFarmland(ctx, ...TILE.farmland);
+  paintWheatStage(ctx, ...TILE.wheat_stage0, 0.35, false);
+  paintWheatStage(ctx, ...TILE.wheat_stage1, 0.55, false);
+  paintWheatStage(ctx, ...TILE.wheat_stage2, 0.80, false);
+  paintWheatStage(ctx, ...TILE.wheat_stage3, 1.00, true);
 }
 
 export function createAtlasTexture() {
@@ -1051,11 +1122,14 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   42: 5, 43: 5, 44: 5, 45: 5,
   // Wave F7 — bed: partial geometry, same class.
   46: 5,
+  // Wave G1 — wheat crop stages: cross-quad flora (class 4). Farmland (51) is opaque (omit).
+  47: 4, 48: 4, 49: 4, 50: 4,
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
 // Only cross-quad (class 4) blocks are in this set; leaf blocks (class 1) are NOT.
-export const FLORA_BLOCK_IDS = new Set([23, 24, 25]);
+// Wave G1 — wheat crop stages 47-50 are cross-quad flora too.
+export const FLORA_BLOCK_IDS = new Set([23, 24, 25, 47, 48, 49, 50]);
 
 // Wave F4 — partial-geometry block id sets.
 // Slabs: one id per material (bottom-half box).
