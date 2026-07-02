@@ -202,6 +202,124 @@ canvas {
   gap: 4px;
 }
 
+/* Wave P1 — pause menu + settings: dark beveled center panels, MC-style. */
+#pause-menu,
+#settings-panel {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 55;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 320px;
+  padding: 22px 26px;
+  background: rgba(24, 24, 26, 0.92);
+  border: 2px solid #101010;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.12), inset -2px -2px 0 rgba(0, 0, 0, 0.55);
+}
+#pause-menu.hidden,
+#settings-panel.hidden { display: none; }
+#pause-menu h2,
+#settings-panel h2 {
+  font-family: "Press Start 2P", monospace;
+  font-size: 15px;
+  color: #ffffff;
+  text-shadow: 2px 2px 0 #3f3f3f;
+  text-align: center;
+  margin: 0 0 12px;
+}
+#pause-menu button,
+#settings-panel button {
+  font-family: "Press Start 2P", monospace;
+  font-size: 11px;
+  padding: 11px 18px;
+  color: #e8e8e8;
+  background: linear-gradient(#8a8a8a, #6e6e6e 45%, #5a5a5a);
+  border: 2px solid #1a1a1a;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.35), inset -2px -2px 0 rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+#pause-menu button:hover,
+#settings-panel button:hover { filter: brightness(1.15); }
+.setting-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: "VT323", monospace;
+  font-size: 19px;
+  color: #d8d8d8;
+}
+.setting-row.setting-checkbox {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+.setting-row input[type="range"] { width: 100%; accent-color: #7aa845; }
+.setting-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: #7aa845; }
+
+/* Wave P1 — death screen: red-tinted fullscreen overlay with respawn button. */
+#death-screen {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  background: rgba(96, 12, 8, 0.62);
+  text-align: center;
+}
+#death-screen.hidden { display: none; }
+#death-screen h1 {
+  font-family: "Press Start 2P", monospace;
+  font-size: 34px;
+  color: #ffffff;
+  text-shadow: 3px 3px 0 #3f1010;
+  margin: 0 0 10px;
+}
+#death-screen p {
+  font-family: "VT323", monospace;
+  font-size: 22px;
+  color: #f0d8d8;
+  text-shadow: 2px 2px 0 #3f1010;
+  margin: 0;
+}
+#respawn-btn {
+  margin-top: 16px;
+  font-family: "Press Start 2P", monospace;
+  font-size: 13px;
+  padding: 12px 34px;
+  color: #e8e8e8;
+  background: linear-gradient(#8a8a8a, #6e6e6e 45%, #5a5a5a);
+  border: 2px solid #1a1a1a;
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.35), inset -2px -2px 0 rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+#respawn-btn:hover { filter: brightness(1.15); }
+
+/* Wave P1 — selected-item name popup: hovers above the HUD stack, fades out. */
+#mc-item-name {
+  min-height: 20px;
+  font-family: "VT323", monospace;
+  font-size: 20px;
+  color: #ffffff;
+  text-shadow: 2px 2px 0 #3f3f3f;
+  opacity: 0;
+  pointer-events: none;
+}
+#mc-item-name.show {
+  animation: mc-item-name-fade 1.9s ease-out forwards;
+}
+@keyframes mc-item-name-fade {
+  0%   { opacity: 1; }
+  60%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
 /* Hearts row */
 #mc-hearts {
   display: flex;

@@ -13,6 +13,9 @@ let _hungerEl = null;
 let _hotbarWrapEl = null;
 // Wave 10 — armor bar
 let _armorEl = null;
+// Wave P1 — selected-item name popup
+let _itemNameEl = null;
+let _lastItemNameSig = null; // null = not initialised (no popup on first paint)
 // Wave F2 — XP bar
 let _xpBarRowEl = null;
 let _xpBarFillEl = null;
@@ -101,6 +104,12 @@ function buildHotbarDOM(hotbarEl) {
 
   // Insert before the slot row so ordering is: armor → status → xp → slots
   hotbarEl.insertBefore(_xpBarRowEl, _hotbarWrapEl);
+
+  // Wave P1 — selected-item name popup: floats above the status row, fades out
+  // via a CSS animation retriggered on each selection change.
+  _itemNameEl = document.createElement("div");
+  _itemNameEl.id = "mc-item-name";
+  hotbarEl.insertBefore(_itemNameEl, _armorEl);
 
   _slotsBuilt = true;
 }
@@ -574,6 +583,27 @@ export function updateHud({ state, world, statsEl, hotbarEl }) {
   if (hbSig !== lastHotbar) {
     rebuildHotbar(state.inventory, state.selectedSlot);
     lastHotbar = hbSig;
+  }
+
+  // Wave P1 — item name popup: fires when the selected slot OR the item under it
+  // changes (not on count changes). First paint initialises silently so the popup
+  // doesn't flash at game start.
+  const selItemId = state.inventory?.[state.selectedSlot]?.itemId ?? "";
+  const nameSig = `${state.selectedSlot}|${selItemId}`;
+  if (nameSig !== _lastItemNameSig) {
+    const first = _lastItemNameSig === null;
+    _lastItemNameSig = nameSig;
+    if (!first && _itemNameEl) {
+      if (selItemId && ITEM_DEFS[selItemId]) {
+        _itemNameEl.textContent = ITEM_DEFS[selItemId].name;
+        // Retrigger the fade animation (same reflow trick as the damage flash).
+        _itemNameEl.classList.remove("show");
+        void _itemNameEl.offsetWidth;
+        _itemNameEl.classList.add("show");
+      } else {
+        _itemNameEl.classList.remove("show");
+      }
+    }
   }
 }
 

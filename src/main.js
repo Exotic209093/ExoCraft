@@ -134,6 +134,7 @@ import {
   playLevelUpSound,
   updateAudio,
   setMusicEnabled,
+  setMasterVolume,
 } from "./game/audio";
 import { ItemEntityManager } from "./game/itemEntities";
 import { XpOrbManager } from "./game/xpOrbs";
@@ -760,6 +761,16 @@ const state = {
   playerKnockbackRemaining: 0,
   // Wave 11 — F3 debug overlay
   f3Visible: false,
+  // Wave P1 — pause menu + settings (transient, not persisted)
+  pauseOpen: false,
+  mouseSensitivity: 1,       // settings multiplier consumed by controls.js
+  _suppressAutoPause: false, // deliberate pointer-unlock shouldn't open the pause menu
+  // Wave P1 — camera feel (all transient): landing dip + directional hurt tilt
+  _landDip: 0,       // dip phase 1 → 0
+  _landDipPeak: 0,   // dip magnitude for the current landing
+  _hurtTilt: 0,      // roll direction (±1)
+  _hurtTiltT: 0,     // tilt phase 1 → 0
+  _hurtTiltFlip: false,
   // Wave F2 — XP system
   xpLevel:        0,   // current level
   xpWithinLevel:  0,   // XP accumulated toward next level
@@ -6868,13 +6879,22 @@ function updateCameraTransform() {
   const rightX = cosYaw;
   const rightZ = -sinYaw;
   const effectiveEyeHeight = playerConfig.eyeHeight - (state.isSneaking ? SNEAK_EYE_LOWER : 0);
+  // Wave P1 — landing dip: a quick eye drop after a hard landing (half-sine over
+  // the decay so it dips and returns smoothly).
+  const landDip = (state._landDip || 0) > 0.001
+    ? Math.sin(Math.min(1, state._landDip) * Math.PI) * 0.18 * (state._landDipPeak || 1)
+    : 0;
   camera.position.set(
     state.playerPos.x + rightX * lateralBob,
-    state.playerPos.y + effectiveEyeHeight + verticalBob,
+    state.playerPos.y + effectiveEyeHeight + verticalBob - landDip,
     state.playerPos.z + rightZ * lateralBob,
   );
   camera.rotation.y = state.yaw;
   camera.rotation.x = state.pitch;
+  // Wave P1 — hurt tilt: brief camera roll away from the damage source.
+  camera.rotation.z = (state._hurtTiltT || 0) > 0.001
+    ? state._hurtTilt * Math.sin(state._hurtTiltT * Math.PI) * 0.055
+    : 0;
   if (Math.abs(camera.fov - state.cameraFov) > 0.05) {
     camera.fov = state.cameraFov;
     camera.updateProjectionMatrix();
@@ -7071,15 +7091,84 @@ function takeDamage(amount, reason, attackerPos = null) {
 
   state.health = Math.max(0, state.health - damage);
   if (state.health <= 0) {
-    respawnPlayer({ healToMax: true });
-    state.recentAction = `Died (${reason}), respawned`;
-    markCraftPanelDirty();
+    // Wave P1 — death screen: interactive sessions stop on a "You died!" overlay
+    // with a Respawn button. Automation keeps the historical instant respawn so
+    // deterministic tests (void-death, bed-respawn checks) don't block on UI.
+    if (isAutomationSession) {
+      respawnPlayer({ healToMax: true });
+      state.recentAction = `Died (${reason}), respawned`;
+      markCraftPanelDirty();
+      triggerDamageFlash();
+      return;
+    }
+    enterDeathScreen(reason);
     triggerDamageFlash();
     return;
   }
   state.recentAction = `Took ${damage} damage (${reason})`;
   triggerDamageFlash();
+
+  // Wave P1 — directional hurt tilt: roll the camera away from the attacker
+  // (screen-space), or alternate sides for non-directional damage. Decays in
+  // updateCameraFeel; purely cosmetic.
+  let tiltSign;
+  if (attackerPos) {
+    const sinYaw = Math.sin(state.yaw);
+    const cosYaw = Math.cos(state.yaw);
+    // Right vector is (cosYaw, -sinYaw); positive dot = attacker on the right.
+    const dx = attackerPos.x - state.playerPos.x;
+    const dz = attackerPos.z - state.playerPos.z;
+    tiltSign = (dx * cosYaw + dz * -sinYaw) >= 0 ? 1 : -1;
+  } else {
+    state._hurtTiltFlip = !state._hurtTiltFlip;
+    tiltSign = state._hurtTiltFlip ? 1 : -1;
+  }
+  state._hurtTilt = tiltSign;
+  state._hurtTiltT = 1;
 }
+
+// Wave P1 — death screen flow. Mode "dead" freezes player simulation (the
+// non-playing branch of updateSimulation keeps mobs/weather/day-night alive) and
+// blocks all gameplay input (controls gate on mode === "playing").
+const deathScreenEl = document.querySelector("#death-screen");
+const deathCauseEl = document.querySelector("#death-cause");
+const deathScoreEl = document.querySelector("#death-score");
+const respawnBtnEl = document.querySelector("#respawn-btn");
+
+const DEATH_CAUSE_TEXT = {
+  fall: "You fell from a high place",
+  void: "You fell out of the world",
+  lava: "You tried to swim in lava",
+  starvation: "You starved to death",
+  hostile: "You were slain by a monster",
+  zombie: "You were slain by a zombie",
+  skeleton: "You were shot by a skeleton",
+  creeper: "You were blown up by a creeper",
+  spider: "You were slain by a spider",
+  debug: "You were slain by the debugger",
+};
+
+function enterDeathScreen(reason) {
+  state.mode = "dead";
+  state.keys.clear();
+  state.jumpQueued = false;
+  if (document.pointerLockElement) document.exitPointerLock();
+  if (deathCauseEl) deathCauseEl.textContent = DEATH_CAUSE_TEXT[reason] || `Cause: ${reason}`;
+  if (deathScoreEl) deathScoreEl.textContent = `Score: level ${state.xpLevel ?? 0}`;
+  if (deathScreenEl) deathScreenEl.classList.remove("hidden");
+  state.recentAction = `Died (${reason})`;
+}
+
+function respawnFromDeathScreen() {
+  if (state.mode !== "dead") return;
+  if (deathScreenEl) deathScreenEl.classList.add("hidden");
+  respawnPlayer({ healToMax: true });
+  state.mode = "playing";
+  state.recentAction = "Respawned";
+  markCraftPanelDirty();
+}
+
+if (respawnBtnEl) respawnBtnEl.addEventListener("click", respawnFromDeathScreen);
 
 function triggerDamageFlash() {
   if (!damageFlashEl) return;
@@ -7520,6 +7609,14 @@ function updateSimulation(dtSeconds) {
         const damage = overSpeed * playerConfig.fallDamageMultiplier;
         takeDamage(damage, "fall");
       }
+      // Wave P1 — landing camera dip: peak scales with impact speed (soft jump
+      // landings barely register, fall-damage landings hit full). _landDip is the
+      // phase (1 → 0), decayed below with the FOV lerp.
+      const impact = Math.abs(Math.min(0, impactVelocityY));
+      if (impact > 6) {
+        state._landDipPeak = Math.min(1, (impact - 6) / (playerConfig.fallDamageSafeSpeed + 4));
+        state._landDip = 1;
+      }
     }
 
     if (state.onGround && state.playerVel.y < 0) {
@@ -7618,6 +7715,11 @@ function updateSimulation(dtSeconds) {
   if (state.playerKnockbackRemaining > 0) {
     state.playerKnockbackRemaining = Math.max(0, state.playerKnockbackRemaining - dtSeconds);
   }
+
+  // Wave P1 — camera-feel decay: landing dip (~0.28s) and hurt tilt (~0.35s)
+  // phases run 1 → 0, dt-driven so automation stepping stays deterministic.
+  if (state._landDip > 0) state._landDip = Math.max(0, state._landDip - dtSeconds / 0.28);
+  if (state._hurtTiltT > 0) state._hurtTiltT = Math.max(0, state._hurtTiltT - dtSeconds / 0.35);
 
   clampPlayer();
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
@@ -7747,6 +7849,8 @@ function startGame() {
 
 function togglePointerLock() {
   if (document.pointerLockElement === renderer.domElement) {
+    // Deliberate unlock (L key / middle click) — not a reason to auto-pause.
+    state._suppressAutoPause = true;
     document.exitPointerLock();
     return;
   }
@@ -7754,6 +7858,165 @@ function togglePointerLock() {
     renderer.domElement.requestPointerLock();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Wave P1 — pause menu + settings.
+// Esc (or losing pointer lock in-game) opens a Game Menu; Settings adjusts FOV,
+// mouse sensitivity, render distance, volume and music, persisted in
+// localStorage (independent of world saves) and applied live.
+// ---------------------------------------------------------------------------
+const pauseMenuEl = document.querySelector("#pause-menu");
+const settingsPanelEl = document.querySelector("#settings-panel");
+
+const SETTINGS_STORAGE_KEY = "exocraft-settings";
+const DEFAULT_SETTINGS = {
+  fov: renderConfig.fov,     // captured before any override is applied
+  sensitivity: 100,          // percent
+  renderDistance: worldConfig.chunk.activeRadius,
+  volume: 100,               // percent
+  music: true,
+};
+const settings = { ...DEFAULT_SETTINGS };
+
+function loadSettings() {
+  try {
+    const raw = window.localStorage?.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    for (const key of Object.keys(DEFAULT_SETTINGS)) {
+      if (parsed[key] !== undefined) settings[key] = parsed[key];
+    }
+  } catch { /* corrupted or unavailable storage — keep defaults */ }
+}
+
+function persistSettings() {
+  try {
+    window.localStorage?.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
+  } catch { /* storage full/unavailable — settings stay session-only */ }
+}
+
+function applySettings() {
+  // FOV: the sprint lerp reads renderConfig.fov as its base every frame, so
+  // mutating it here propagates without touching the camera directly.
+  renderConfig.fov = Math.max(60, Math.min(110, Number(settings.fov) || DEFAULT_SETTINGS.fov));
+  // Mouse sensitivity: multiplier consumed by controls.js onMouseMove.
+  state.mouseSensitivity = Math.max(0.3, Math.min(2, (Number(settings.sensitivity) || 100) / 100));
+  // Render distance: chunk ring radius. Clamped so eviction (radius 5) stays outside.
+  const radius = Math.max(1, Math.min(4, Math.round(Number(settings.renderDistance) || DEFAULT_SETTINGS.renderDistance)));
+  if (world.activeRadius !== radius) {
+    world.activeRadius = radius;
+    world.lastCenterChunk = null; // force the ring to rebuild on the next tick
+  }
+  setMasterVolume((Number(settings.volume) || 0) / 100);
+  setMusicEnabled(settings.music !== false);
+}
+
+// --- Settings panel DOM sync ---
+const settingInputs = {
+  fov: document.querySelector("#setting-fov"),
+  sensitivity: document.querySelector("#setting-sensitivity"),
+  renderDistance: document.querySelector("#setting-render"),
+  volume: document.querySelector("#setting-volume"),
+  music: document.querySelector("#setting-music"),
+};
+const settingValueEls = {
+  fov: document.querySelector("#setting-fov-value"),
+  sensitivity: document.querySelector("#setting-sensitivity-value"),
+  renderDistance: document.querySelector("#setting-render-value"),
+  volume: document.querySelector("#setting-volume-value"),
+};
+
+function refreshSettingsPanel() {
+  if (settingInputs.fov) settingInputs.fov.value = String(settings.fov);
+  if (settingInputs.sensitivity) settingInputs.sensitivity.value = String(settings.sensitivity);
+  if (settingInputs.renderDistance) settingInputs.renderDistance.value = String(settings.renderDistance);
+  if (settingInputs.volume) settingInputs.volume.value = String(settings.volume);
+  if (settingInputs.music) settingInputs.music.checked = settings.music !== false;
+  if (settingValueEls.fov) settingValueEls.fov.textContent = String(settings.fov);
+  if (settingValueEls.sensitivity) settingValueEls.sensitivity.textContent = `${settings.sensitivity}%`;
+  if (settingValueEls.renderDistance) settingValueEls.renderDistance.textContent = `${settings.renderDistance} chunks`;
+  if (settingValueEls.volume) settingValueEls.volume.textContent = `${settings.volume}%`;
+}
+
+function bindSettingInput(key, input, parse) {
+  if (!input) return;
+  input.addEventListener("input", () => {
+    settings[key] = parse(input);
+    applySettings();
+    refreshSettingsPanel();
+    persistSettings();
+  });
+}
+bindSettingInput("fov", settingInputs.fov, (el) => Number(el.value));
+bindSettingInput("sensitivity", settingInputs.sensitivity, (el) => Number(el.value));
+bindSettingInput("renderDistance", settingInputs.renderDistance, (el) => Number(el.value));
+bindSettingInput("volume", settingInputs.volume, (el) => Number(el.value));
+bindSettingInput("music", settingInputs.music, (el) => el.checked);
+
+// --- Pause menu open/close ---
+function openPauseMenu() {
+  if (state.mode !== "playing" || state.pauseOpen) return;
+  state.pauseOpen = true;
+  state.keys.clear();
+  state.jumpQueued = false;
+  if (document.pointerLockElement) {
+    state._suppressAutoPause = true;
+    document.exitPointerLock();
+  }
+  if (pauseMenuEl) pauseMenuEl.classList.remove("hidden");
+  if (settingsPanelEl) settingsPanelEl.classList.add("hidden");
+}
+
+function closePauseMenu() {
+  if (!state.pauseOpen) return;
+  state.pauseOpen = false;
+  if (pauseMenuEl) pauseMenuEl.classList.add("hidden");
+  if (settingsPanelEl) settingsPanelEl.classList.add("hidden");
+}
+
+function togglePauseMenu() {
+  // Esc inside the settings sub-panel backs out to the pause menu first.
+  if (state.pauseOpen && settingsPanelEl && !settingsPanelEl.classList.contains("hidden")) {
+    settingsPanelEl.classList.add("hidden");
+    if (pauseMenuEl) pauseMenuEl.classList.remove("hidden");
+    return;
+  }
+  if (state.pauseOpen) closePauseMenu();
+  else openPauseMenu();
+}
+
+document.querySelector("#pause-resume-btn")?.addEventListener("click", closePauseMenu);
+document.querySelector("#pause-settings-btn")?.addEventListener("click", () => {
+  if (pauseMenuEl) pauseMenuEl.classList.add("hidden");
+  if (settingsPanelEl) settingsPanelEl.classList.remove("hidden");
+  refreshSettingsPanel();
+});
+document.querySelector("#pause-save-btn")?.addEventListener("click", () => {
+  saveGame("pause-menu");
+  closePauseMenu();
+});
+document.querySelector("#settings-done-btn")?.addEventListener("click", () => {
+  if (settingsPanelEl) settingsPanelEl.classList.add("hidden");
+  if (pauseMenuEl) pauseMenuEl.classList.remove("hidden");
+});
+
+// Losing pointer lock mid-game (browser Esc) opens the pause menu — unless the
+// unlock came from a panel opening, the L-key/middle-click toggle, the death
+// screen, or an automation session driving without a pointer.
+document.addEventListener("pointerlockchange", () => {
+  const locked = document.pointerLockElement === renderer.domElement;
+  if (locked) return;
+  const suppressed = state._suppressAutoPause;
+  state._suppressAutoPause = false;
+  if (suppressed || isAutomationSession) return;
+  if (state.mode !== "playing") return;
+  if (state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen) return;
+  openPauseMenu();
+});
+
+loadSettings();
+applySettings();
+refreshSettingsPanel();
 
 function toggleFullscreen() {
   if (document.fullscreenElement) {
@@ -7794,6 +8057,7 @@ setupControls({
   toggleF3Overlay: () => {
     state.f3Visible = !state.f3Visible;
   },
+  togglePauseMenu,
   onThrowItem: () => {
     const heldSlot = state.inventory[state.selectedSlot];
     if (!heldSlot || !heldSlot.itemId) return;

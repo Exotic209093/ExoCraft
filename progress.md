@@ -909,3 +909,44 @@ persist as ordinary block edits; save stays v11):
   Fix belongs to a lighting wave (relight-to-fixpoint over the affected 3x3, or a proper
   light-removal BFS). The smoke test pins its lamp rig to chunk-interior cells so the
   blocklight assertions stay deterministic.
+
+# === PRESENTATION & FEEL PHASE (2026-07-02, branch claude/exocraft-minecraft-reimplementation-rpqroe) ===
+
+## Wave P1 — item pixel-art icons + hotbar popup + death screen + pause/settings + camera feel
+- ITEM ICONS (textures.js): original 16x16 grid-string pixel paintings for every non-block
+  item (~70): one shared SHAPE grid per family (pickaxe/axe/shovel/hoe/sword/bow/arrow/
+  shears/bucket/ingot/gem/dust/lump/shard/stick/plank/feather/string/hide/puff/apple/bread/
+  wheat/seeds/meat/drumstick/helmet/chestplate/leggings/boots/totem/compass) x a per-item
+  material PALETTE (wood/stone/copper/iron/gold/diamond/bone/reinforced/vanguard/delver/
+  leather + food/material tints). ICON_SPECS painted-icon path takes precedence in
+  getItemIconCanvas (guarded the atlas path with !drawnFromAtlas — redstone dust shows a
+  dust pile, not the wire tile), feeding the hotbar, all container UIs, ground item
+  entities, and the viewmodel (held tools now render as alpha-cutout sprites, DoubleSide,
+  chip fallback kept for any un-spec'd item). Verified with a rendered contact sheet of
+  all icons + in-game hotbar/inventory screenshots.
+- HOTBAR NAME POPUP (hud.js + style.css): #mc-item-name above the HUD stack; fires on
+  selection/item change (not count changes), CSS fade (1.9s), silent on first paint.
+- DEATH SCREEN (index.html/style.css/main.js): health<=0 now enters mode "dead" — red
+  overlay, cause text (per-reason table incl. mob types), score line, Respawn button ->
+  respawnPlayer + back to playing. The non-playing sim branch keeps mobs/weather/day-night
+  alive; controls gate on mode so input is blocked. AUTOMATION KEEPS INSTANT RESPAWN
+  (isAutomationSession) so bug_sweep/client death tests don't block on UI. Verified: die ->
+  overlay -> respawn round-trip (health 20, mode playing).
+- PAUSE MENU + SETTINGS (Esc): controls.js Esc falls through to togglePauseMenu when no
+  panel is open; losing pointer lock in-game auto-opens it (suppressed for deliberate
+  L-key/middle-click unlocks via state._suppressAutoPause, panels, death, automation).
+  Game Menu: Back to Game / Settings... / Save World. Settings applied LIVE + persisted in
+  localStorage ("exocraft-settings", independent of world saves): FOV 60-110 (mutates
+  renderConfig.fov — the sprint-FOV lerp derives from it), mouse sensitivity 30-200%
+  (state.mouseSensitivity multiplier in controls.js), render distance 1-4 chunks
+  (world.activeRadius + lastCenterChunk reset; verified 49 chunks loaded at radius 3),
+  master volume (new audio.js setMasterVolume, pending-apply before audio unlock), music
+  toggle. Pause counts as an open panel for input gating.
+- CAMERA FEEL: landing dip (impact-scaled half-sine, ~0.28s, starts above soft-jump speed)
+  + directional hurt tilt (camera roll away from attacker, alternating for directionless
+  damage, ~0.35s). Both dt-driven (deterministic under advanceTime), decayed in
+  updateSimulation, applied in updateCameraTransform.
+- VERIFIED: build green; redstone smoke suite 30/30 still passes (zero page errors);
+  screenshots of hotbar icons + name popup, inventory icons, pause menu, settings panel
+  (live FOV/render-distance change + localStorage persistence), death screen; respawn
+  round-trip. All art remains original procedural pixel painting.
