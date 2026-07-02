@@ -117,6 +117,20 @@ const DEFAULT_GAME_CONFIG = {
       { id: 81, name: "Trapdoor W (open)", color: 0xc8a060, transparent: true },
       // Wave G4 — wool block (sheared/crafted from wool; a plain opaque cube).
       { id: 82, name: "Wool", color: 0xe8e8e8 },
+      // Wave R1 — redstone. Power/activation state is encoded in the id (door pattern).
+      { id: 83, name: "Redstone Wire", color: 0x6e0c0a, transparent: true },
+      { id: 84, name: "Redstone Wire (powered)", color: 0xe82820, transparent: true },
+      { id: 85, name: "Lever", color: 0x8a8a8a, transparent: true },
+      { id: 86, name: "Lever (on)", color: 0x8a8a8a, transparent: true },
+      { id: 87, name: "Stone Button", color: 0x9aa0a8, transparent: true },
+      { id: 88, name: "Stone Button (pressed)", color: 0x9aa0a8, transparent: true },
+      { id: 89, name: "Pressure Plate", color: 0x9aa0a8, transparent: true },
+      { id: 90, name: "Pressure Plate (pressed)", color: 0x9aa0a8, transparent: true },
+      { id: 91, name: "Redstone Torch", color: 0xe04030, emissive: 0x581008, emissiveIntensity: 0.3, transparent: true },
+      { id: 92, name: "Redstone Torch (off)", color: 0x702018, transparent: true },
+      { id: 93, name: "Redstone Lamp", color: 0x82603a },
+      { id: 94, name: "Redstone Lamp (lit)", color: 0xf8c86e, emissive: 0x7a4a10, emissiveIntensity: 0.5 },
+      { id: 95, name: "Redstone Block", color: 0xb01c18 },
     ],
     generation: {
       seed: 1337,

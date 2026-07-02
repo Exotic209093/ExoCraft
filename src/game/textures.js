@@ -69,6 +69,16 @@ const TILE = {
   trapdoor_oak:    [4, 6],
   // Wave G4 — wool
   wool:            [5, 6],
+  // Wave R1 — redstone tiles (buttons + pressure plates reuse the 'stone' tile)
+  redstone_wire_off: [6, 6],  // dull red dust cross (alpha-cutout, drawn flat on the floor)
+  redstone_wire_on:  [7, 6],  // bright glowing dust cross
+  redstone_torch_on:  [0, 7], // stick with a glowing red head (alpha-cutout cross-quad)
+  redstone_torch_off: [1, 7], // stick with a dark red head
+  lever_off:          [2, 7], // cobble base, stick leaning left  (alpha-cutout cross-quad)
+  lever_on:           [3, 7], // cobble base, stick leaning right
+  redstone_lamp_off:  [4, 7], // dark amber lattice (opaque cube)
+  redstone_lamp_on:   [5, 7], // bright glowing amber lattice
+  redstone_block:     [6, 7], // solid compressed-redstone red (opaque cube)
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -168,6 +178,23 @@ export const BLOCK_FACE_TILES = {
     { px: "trapdoor_oak", nx: "trapdoor_oak", py: "trapdoor_oak", ny: "trapdoor_oak", pz: "trapdoor_oak", nz: "trapdoor_oak" }])),
   // Wave G4 — wool (opaque cube).
   82: { px: "wool", nx: "wool", py: "wool", ny: "wool", pz: "wool", nz: "wool" },
+  // Wave R1 — redstone. Wire (83/84) is a flat floor quad; the mesher reads the py tile.
+  83: { px: "redstone_wire_off", nx: "redstone_wire_off", py: "redstone_wire_off", ny: "redstone_wire_off", pz: "redstone_wire_off", nz: "redstone_wire_off" },
+  84: { px: "redstone_wire_on", nx: "redstone_wire_on", py: "redstone_wire_on", ny: "redstone_wire_on", pz: "redstone_wire_on", nz: "redstone_wire_on" },
+  // Lever (85/86) + redstone torch (91/92): cross-quads, one tile per state.
+  85: { px: "lever_off", nx: "lever_off", py: "lever_off", ny: "lever_off", pz: "lever_off", nz: "lever_off" },
+  86: { px: "lever_on", nx: "lever_on", py: "lever_on", ny: "lever_on", pz: "lever_on", nz: "lever_on" },
+  // Button (87/88) + pressure plate (89/90): small stone boxes via the partial path.
+  87: { px: "stone", nx: "stone", py: "stone", ny: "stone", pz: "stone", nz: "stone" },
+  88: { px: "stone", nx: "stone", py: "stone", ny: "stone", pz: "stone", nz: "stone" },
+  89: { px: "stone", nx: "stone", py: "stone", ny: "stone", pz: "stone", nz: "stone" },
+  90: { px: "stone", nx: "stone", py: "stone", ny: "stone", pz: "stone", nz: "stone" },
+  91: { px: "redstone_torch_on", nx: "redstone_torch_on", py: "redstone_torch_on", ny: "redstone_torch_on", pz: "redstone_torch_on", nz: "redstone_torch_on" },
+  92: { px: "redstone_torch_off", nx: "redstone_torch_off", py: "redstone_torch_off", ny: "redstone_torch_off", pz: "redstone_torch_off", nz: "redstone_torch_off" },
+  // Lamp (93 off / 94 lit) + redstone block (95): plain opaque cubes.
+  93: { px: "redstone_lamp_off", nx: "redstone_lamp_off", py: "redstone_lamp_off", ny: "redstone_lamp_off", pz: "redstone_lamp_off", nz: "redstone_lamp_off" },
+  94: { px: "redstone_lamp_on", nx: "redstone_lamp_on", py: "redstone_lamp_on", ny: "redstone_lamp_on", pz: "redstone_lamp_on", nz: "redstone_lamp_on" },
+  95: { px: "redstone_block", nx: "redstone_block", py: "redstone_block", ny: "redstone_block", pz: "redstone_block", nz: "redstone_block" },
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1134,6 +1161,119 @@ function paintWool(ctx, col, row) {
   }
 }
 
+// Wave R1 — redstone dust cross: a center dot with 4 arms, drawn flat on the floor.
+// `lit` switches between the dull unpowered red and the bright powered red.
+function paintRedstoneWire(ctx, col, row, lit) {
+  const { ox, oy } = tileOrigin(col, row);
+  const c = TILE_PX / 2; // 8
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const onArmX = Math.abs(y - c + 0.5) <= 1.5; // horizontal arm band
+      const onArmZ = Math.abs(x - c + 0.5) <= 1.5; // vertical arm band
+      const onDot = Math.abs(x - c + 0.5) <= 2.5 && Math.abs(y - c + 0.5) <= 2.5;
+      if (!onArmX && !onArmZ && !onDot) continue; // transparent gap
+      const n = pixelNoise(x, y, 515);
+      let r = lit ? 232 : 110;
+      let g = lit ? 40 : 12;
+      let b = lit ? 32 : 10;
+      if (n < 0.3) { r -= 26; g -= 4; b -= 4; }
+      else if (n > 0.85 && lit) { r = 255; g = 90; b = 70; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave R1 — redstone torch: thin vertical stick with a square red head.
+function paintRedstoneTorch(ctx, col, row, lit) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const onStick = x >= 7 && x <= 8 && y >= 6;
+      const onHead = x >= 6 && x <= 9 && y >= 2 && y <= 5;
+      if (!onStick && !onHead) continue; // transparent
+      const n = pixelNoise(x, y, 516);
+      let r, g, b;
+      if (onHead) {
+        r = lit ? 240 : 96; g = lit ? 60 : 10; b = lit ? 50 : 10;
+        if (lit && n > 0.7) { r = 255; g = 120; b = 90; } // glow speckle
+      } else {
+        r = 140; g = 96; b = 52; // wood stick
+        if (n < 0.35) { r -= 20; g -= 14; b -= 8; }
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+// Wave R1 — lever: cobble base plate at the bottom + a stick leaning left (off) or
+// right (on), so flipping reads instantly even at a distance.
+function paintLever(ctx, col, row, on) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const onBase = y >= 12 && x >= 3 && x <= 12;
+      // Stick: diagonal from base center toward upper-left (off) or upper-right (on).
+      const t = 13 - y; // 0 at base, grows upward
+      const stickX = on ? 8 + Math.floor(t * 0.45) : 7 - Math.floor(t * 0.45);
+      const onStick = y <= 12 && y >= 3 && Math.abs(x - stickX) <= 0.6;
+      const onTip = on ? (y >= 2 && y <= 3 && x >= stickX - 1 && x <= stickX + 1)
+                       : (y >= 2 && y <= 3 && x >= stickX - 1 && x <= stickX + 1);
+      if (!onBase && !onStick && !onTip) continue; // transparent
+      const n = pixelNoise(x, y, on ? 518 : 517);
+      let r, g, b;
+      if (onBase) {
+        const v = 116 + (n < 0.4 ? -18 : n > 0.8 ? 14 : 0);
+        r = v; g = v; b = v + 4; // cobble grey
+      } else if (onTip) {
+        r = on ? 235 : 120; g = on ? 60 : 30; b = on ? 45 : 26; // red knob
+      } else {
+        r = 140; g = 96; b = 52; // wood stick
+        if (n < 0.35) { r -= 20; g -= 14; b -= 8; }
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+// Wave R1 — redstone lamp: warm block with a dark lattice; lit version glows.
+function paintRedstoneLamp(ctx, col, row, lit) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const onLattice = x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1 ||
+        ((x === 5 || x === 10) && y > 1 && y < TILE_PX - 2) ||
+        ((y === 5 || y === 10) && x > 1 && x < TILE_PX - 2);
+      const n = cellNoise(x, y, lit ? 520 : 519);
+      let r, g, b;
+      if (onLattice) {
+        r = lit ? 120 : 58; g = lit ? 84 : 42; b = lit ? 40 : 26; // dark frame
+      } else if (lit) {
+        r = 248; g = 200; b = 110; // glowing amber pane
+        if (n > 0.75) { r = 255; g = 224; b = 150; }
+      } else {
+        r = 130; g = 94; b = 52; // unlit amber pane
+        if (n < 0.35) { r -= 16; g -= 12; b -= 8; }
+      }
+      shade(ctx, ox + x, oy + y, rgb(r, g, b));
+    }
+  }
+}
+
+// Wave R1 — redstone block: deep red mosaic (compressed dust).
+function paintRedstoneBlock(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = cellNoise(x, y, 521, 3);
+      let r = 168, g = 26, b = 22;
+      if (n < 0.3) { r -= 36; g -= 8; b -= 6; }
+      else if (n > 0.82) { r += 40; g += 18; b += 14; }
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) { r -= 24; g -= 6; b -= 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -1195,6 +1335,16 @@ function paintAtlas(ctx) {
   paintTrapdoorOak(ctx, ...TILE.trapdoor_oak);
   // Wave G4 — wool
   paintWool(ctx, ...TILE.wool);
+  // Wave R1 — redstone
+  paintRedstoneWire(ctx, ...TILE.redstone_wire_off, false);
+  paintRedstoneWire(ctx, ...TILE.redstone_wire_on, true);
+  paintRedstoneTorch(ctx, ...TILE.redstone_torch_on, true);
+  paintRedstoneTorch(ctx, ...TILE.redstone_torch_off, false);
+  paintLever(ctx, ...TILE.lever_off, false);
+  paintLever(ctx, ...TILE.lever_on, true);
+  paintRedstoneLamp(ctx, ...TILE.redstone_lamp_off, false);
+  paintRedstoneLamp(ctx, ...TILE.redstone_lamp_on, true);
+  paintRedstoneBlock(ctx, ...TILE.redstone_block);
 }
 
 export function createAtlasTexture() {
@@ -1286,6 +1436,14 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   54: 4, 55: 4, 56: 4, 57: 4,
   // Wave G2b — doors + trapdoors are all partial-geometry (class 5).
   ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => [58 + i, 5])),
+  // Wave R1 — redstone. Wire (flat floor quad) + lever/torch (cross-quads) use class 4
+  // so neighbours never cull against them; button/plate boxes use the class-5 partial
+  // path. Lamp (93/94) and redstone block (95) are plain opaque cubes (omitted = 0).
+  83: 4, 84: 4,           // redstone wire off/on
+  85: 4, 86: 4,           // lever off/on
+  87: 5, 88: 5,           // stone button off/pressed
+  89: 5, 90: 5,           // stone pressure plate off/on
+  91: 4, 92: 4,           // redstone torch on/off
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1365,10 +1523,51 @@ export function trapdoorIsOpen(id) { return TRAPDOOR_OPEN_IDS.has(id); }
 export function trapdoorOrient(id) { return trapdoorIsOpen(id) ? id - 78 : id - 74; }
 export function trapdoorToggle(id) { return trapdoorIsOpen(id) ? id - 4 : id + 4; }
 
+// ---------------------------------------------------------------------------
+// Wave R1 — redstone id families. Power/activation state is encoded in the id
+// (the door/trapdoor pattern) so it persists as an ordinary block edit; on/off
+// toggling is +1/-1 within each pair.
+//   83 wire off / 84 wire on          (flat floor quad, dust item places it)
+//   85 lever off / 86 lever on        (cross-quad, right-click toggles)
+//   87 button off / 88 button pressed (small stone box, auto-releases ~1s)
+//   89 plate off / 90 plate on        (thin stone box, pressed by entities)
+//   91 torch ON / 92 torch OFF        (cross-quad; NOTE: default/placed state is ON,
+//                                      so the lower id is the lit one for this pair)
+//   93 lamp off / 94 lamp lit         (opaque cube; lit emits blocklight 15)
+//   95 redstone block                 (opaque cube, always-on power source)
+// ---------------------------------------------------------------------------
+export const REDSTONE_WIRE_IDS = new Set([83, 84]);
+export const REDSTONE_WIRE_OFF = 83;
+export const REDSTONE_WIRE_ON = 84;
+export const LEVER_IDS = new Set([85, 86]);
+export const LEVER_ON = 86;
+export function leverIsOn(id) { return id === 86; }
+export function leverToggle(id) { return id === 85 ? 86 : 85; }
+export const BUTTON_IDS = new Set([87, 88]);
+export const BUTTON_OFF = 87;
+export const BUTTON_PRESSED = 88;
+export const PLATE_IDS = new Set([89, 90]);
+export const PLATE_OFF = 89;
+export const PLATE_ON = 90;
+export const REDSTONE_TORCH_IDS = new Set([91, 92]);
+export const REDSTONE_TORCH_ON = 91;
+export const REDSTONE_TORCH_OFF = 92;
+export const REDSTONE_LAMP_OFF = 93;
+export const REDSTONE_LAMP_ON = 94;
+export const REDSTONE_BLOCK_ID = 95;
+// Components that must sit on a solid block and pop off when support breaks.
+export const REDSTONE_ATTACHED_IDS = new Set([83, 84, 85, 86, 87, 88, 89, 90, 91, 92]);
+// Cross-quad redstone ids (lever + torch) — share the flora-style X geometry, no sway.
+export const REDSTONE_CROSS_IDS = new Set([85, 86, 91, 92]);
+// All redstone-system ids (for debug listings / text-state filters).
+export const REDSTONE_ALL_IDS = new Set([83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]);
+
 // Combined set for fast mesher dispatch (fence + doors + trapdoors join the partial path;
 // panes & ladders get their own mesher branches).
+// Wave R1 — buttons + pressure plates are small class-5 boxes on the same path.
 export const PARTIAL_BLOCK_IDS = new Set([
   ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
+  ...BUTTON_IDS, ...PLATE_IDS,
 ]);
 
 // ----- Item icon canvases -----
@@ -1490,6 +1689,13 @@ const ITEM_CHIP_COLORS = {
   stone_stairs:       "#8890a0",
   cobblestone_stairs: "#808080",
   wood_stairs:        "#c8a060",
+  // Wave R1 — redstone components
+  lever:              "#8a8a8a",
+  stone_button:       "#9aa0a8",
+  pressure_plate:     "#9aa0a8",
+  redstone_torch:     "#e04030",
+  redstone_lamp:      "#c08040",
+  redstone_block:     "#b01c18",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */

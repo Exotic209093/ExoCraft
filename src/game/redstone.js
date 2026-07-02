@@ -1,0 +1,498 @@
+// Wave R1 — redstone signal simulation.
+//
+// Design (mirrors fluidSim.js): all persistent state lives in BLOCK IDS (the
+// door/trapdoor pattern) so circuits save/load as ordinary block edits with no
+// save-schema change. The sim keeps only TRANSIENT state: wire power levels
+// (recomputed from the ids on any nearby change), pending timers (button
+// release, torch flip delay), and the currently-pressed plate set.
+//
+// Power model (v1 simplifications vs Minecraft, documented for later waves):
+// - Sources: lever-on (86), pressed button (88), pressed plate (90), redstone
+//   block (95) power ADJACENT (6-neighbour) wire and blocks at strength 15.
+// - Redstone torch (91 lit / 92 off): powers adjacent wire at 15 and the block
+//   DIRECTLY ABOVE it; it never powers the block it is mounted on. It turns
+//   off when its support block is powered (evaluated with a 100 ms delay, so
+//   torch clocks oscillate like Minecraft's).
+// - Wire (83 off / 84 on): carries power 15→1, losing 1 per step. Connects to
+//   wire in the 4 cardinal directions on the same level, and diagonally one
+//   step up/down when the corner block doesn't cut the connection.
+// - A block is "powered" if a source is adjacent, a lit torch is directly
+//   below it, or a powered wire is adjacent. (No strong/weak distinction yet.)
+// - Consumers: lamp (93/94) follows power directly; doors/trapdoors respond to
+//   power EDGES (rising edge opens, falling edge closes what redstone opened),
+//   so manual door use still works while a circuit is idle.
+//
+// Determinism: no wall-clock, no Math.random. The sim advances only through
+// tick(deltaMs); dirty cells and timers are processed in sorted key order.
+
+import {
+  BLOCK_TRANSPARENCY_CLASS,
+  REDSTONE_WIRE_IDS, REDSTONE_WIRE_OFF, REDSTONE_WIRE_ON,
+  LEVER_ON,
+  BUTTON_OFF, BUTTON_PRESSED,
+  PLATE_OFF, PLATE_ON,
+  REDSTONE_TORCH_IDS, REDSTONE_TORCH_ON, REDSTONE_TORCH_OFF,
+  REDSTONE_LAMP_OFF, REDSTONE_LAMP_ON,
+  REDSTONE_BLOCK_ID,
+  REDSTONE_ATTACHED_IDS,
+  DOOR_BLOCK_IDS, DOOR_LOWER_IDS, doorIsOpen, doorToggle,
+  TRAPDOOR_BLOCK_IDS, trapdoorIsOpen, trapdoorToggle,
+} from "./textures";
+
+const MAX_POWER = 15;
+// Bounded work per evaluation so a pathological wire field can't stall a frame.
+// Known limit: a single connected network larger than this recomputes only the
+// gathered region; wire fed solely from beyond the frontier can read stale.
+const MAX_NETWORK_CELLS = 2048;
+const MAX_EVAL_PASSES = 8;
+// Minecraft timings: 1 redstone tick = 100 ms; stone button holds for 1 s.
+const TORCH_FLIP_DELAY_MS = 100;
+const BUTTON_RELEASE_MS = 1000;
+// Torch burnout (Minecraft-accurate + the perf guard that keeps a torch clock
+// from being a permanent 10 Hz light-emitter flip = ~90 chunk relights/sec):
+// more than BURNOUT_FLIPS flips inside BURNOUT_WINDOW_MS forces the torch OFF
+// and it stays off until a real neighbour change re-evaluates it.
+const TORCH_BURNOUT_FLIPS = 8;
+const TORCH_BURNOUT_WINDOW_MS = 1600;
+
+const EMPTY_CELLS = [];
+
+const HORIZONTAL_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+
+function cellKey(x, y, z) {
+  return `${x},${y},${z}`;
+}
+
+function parseKey(key) {
+  const [x, y, z] = key.split(",").map(Number);
+  return { x, y, z };
+}
+
+// A component can be mounted on (and signal is cut by) plain full opaque cubes.
+function isSolidCube(id) {
+  return id !== 0 && (BLOCK_TRANSPARENCY_CLASS[id] || 0) === 0;
+}
+
+function isActiveSource(id) {
+  return id === LEVER_ON || id === BUTTON_PRESSED || id === PLATE_ON || id === REDSTONE_BLOCK_ID;
+}
+
+export class RedstoneSim {
+  /**
+   * @param {object} opts
+   * @param {object} opts.world - VoxelWorld (get/set).
+   * @param {function} [opts.onComponentPopped] - (blockId, x, y, z) called when a
+   *   component loses its support and pops off. The caller resolves the drop item
+   *   (survival.js BLOCK_DROPS) and spawns the entity — no drop table lives here.
+   */
+  constructor({ world, onComponentPopped = null }) {
+    this.world = world;
+    this.onComponentPopped = onComponentPopped;
+    this._accumMs = 0;
+    this._dirty = new Set();          // cell keys needing circuit re-evaluation
+    this._wirePower = new Map();      // wire cell key -> 0..15 (transient, derived)
+    this._pressedPlates = new Set();  // plate cell keys currently held down
+    this._buttonTimers = new Map();   // cell key -> release-due ms (accum clock)
+    this._torchTimers = new Map();    // cell key -> { due, target }
+    this._torchFlipHistory = new Map(); // cell key -> { windowStart, count } (burnout)
+    this._poweredDoors = new Set();   // lower-door cell keys opened by redstone
+    this._poweredTrapdoors = new Set();
+    this._changedCells = [];          // cells world.set since the last drain
+  }
+
+  reset() {
+    this._accumMs = 0;
+    this._dirty.clear();
+    this._wirePower.clear();
+    this._pressedPlates.clear();
+    this._buttonTimers.clear();
+    this._torchTimers.clear();
+    this._torchFlipHistory.clear();
+    this._poweredDoors.clear();
+    this._poweredTrapdoors.clear();
+    this._changedCells.length = 0;
+  }
+
+  /** Notify the sim that a block changed at x,y,z (break/place/debug setBlock). */
+  onBlockChanged(x, y, z) {
+    this._dirty.add(cellKey(x, y, z));
+  }
+
+  /**
+   * After a save is loaded: seed evaluation from the persisted edit list so wire
+   * power is rederived and any mid-activation button/plate ids get released.
+   * `edits` is world.exportEdits() shape — a flat array of { x, y, z, type }.
+   */
+  seedFromWorldEdits(edits) {
+    if (!Array.isArray(edits)) return;
+    for (const e of edits) {
+      const id = e?.type;
+      if (!Number.isFinite(id) || id < 83 || id > 95) continue;
+      const key = cellKey(e.x, e.y, e.z);
+      this._dirty.add(key);
+      // Stale pressed buttons from an old save get a release timer.
+      if (id === BUTTON_PRESSED && !this._buttonTimers.has(key)) {
+        this._buttonTimers.set(key, this._accumMs + BUTTON_RELEASE_MS);
+      }
+    }
+  }
+
+  /** Right-click on a lever: flip it and re-evaluate. Returns the new id. */
+  toggleLever(x, y, z) {
+    const id = this.world.get(x, y, z);
+    if (id !== 85 && id !== 86) return null;
+    const next = id === 85 ? 86 : 85;
+    this._setBlock(x, y, z, next);
+    return next;
+  }
+
+  /** Right-click on a button: press it (no-op if already pressed). */
+  pressButton(x, y, z) {
+    const id = this.world.get(x, y, z);
+    if (id !== BUTTON_OFF) return false;
+    this._setBlock(x, y, z, BUTTON_PRESSED);
+    this._buttonTimers.set(cellKey(x, y, z), this._accumMs + BUTTON_RELEASE_MS);
+    return true;
+  }
+
+  /**
+   * Per-tick plate detection. `pressingCells` = block cells occupied by entity
+   * feet (player + mobs); `count` bounds the scan so callers can reuse a pooled
+   * scratch array. Newly-covered plates press; vacated plates release.
+   * Idle path (no plate under anyone, none pressed) allocates nothing.
+   */
+  updatePlates(pressingCells, count = pressingCells.length) {
+    let now = null; // lazily created — most frames touch no plates
+    for (let i = 0; i < count; i += 1) {
+      const c = pressingCells[i];
+      const id = this.world.get(c.x, c.y, c.z);
+      if (id === PLATE_OFF || id === PLATE_ON) {
+        const key = cellKey(c.x, c.y, c.z);
+        if (!now) now = new Set();
+        now.add(key);
+        if (id === PLATE_OFF) this._setBlockKey(key, PLATE_ON);
+      }
+    }
+    if (this._pressedPlates.size > 0) {
+      for (const key of [...this._pressedPlates].sort()) {
+        if (!now || !now.has(key)) {
+          const { x, y, z } = parseKey(key);
+          if (this.world.get(x, y, z) === PLATE_ON) this._setBlock(x, y, z, PLATE_OFF);
+        }
+      }
+    }
+    if (now) this._pressedPlates = now;
+    else if (this._pressedPlates.size > 0) this._pressedPlates.clear();
+  }
+
+  /**
+   * Advance the sim clock: fire due timers, then re-evaluate dirty circuits.
+   * Returns (and drains) the cells whose block id changed since the last drain —
+   * including plate flips recorded by updatePlates earlier this frame — so the
+   * caller can rebuild those chunks immediately. Idle path allocates nothing.
+   */
+  tick(deltaMs) {
+    this._accumMs += deltaMs;
+
+    // Button releases (sorted for determinism).
+    if (this._buttonTimers.size > 0) {
+      for (const key of [...this._buttonTimers.keys()].sort()) {
+        if (this._buttonTimers.get(key) > this._accumMs) continue;
+        this._buttonTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        if (this.world.get(x, y, z) === BUTTON_PRESSED) this._setBlock(x, y, z, BUTTON_OFF);
+      }
+    }
+
+    // Torch flips (the 1-redstone-tick delay that makes clocks oscillate).
+    if (this._torchTimers.size > 0) {
+      for (const key of [...this._torchTimers.keys()].sort()) {
+        const timer = this._torchTimers.get(key);
+        if (timer.due > this._accumMs) continue;
+        this._torchTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!REDSTONE_TORCH_IDS.has(id) || id === timer.target) continue;
+        // Burnout: count fired flips per torch in a rolling window; a fast clock
+        // exceeds the limit and the torch refuses to relight until a real
+        // neighbour change re-evaluates it (Minecraft behaviour + perf bound).
+        let hist = this._torchFlipHistory.get(key);
+        if (!hist || this._accumMs - hist.windowStart > TORCH_BURNOUT_WINDOW_MS) {
+          hist = { windowStart: this._accumMs, count: 0 };
+          this._torchFlipHistory.set(key, hist);
+        }
+        hist.count += 1;
+        if (hist.count >= TORCH_BURNOUT_FLIPS && timer.target === REDSTONE_TORCH_ON) {
+          continue; // burned out — stay off
+        }
+        this._setBlock(x, y, z, timer.target);
+      }
+    }
+
+    if (this._dirty.size > 0) this._evaluate();
+
+    if (this._changedCells.length === 0) return EMPTY_CELLS;
+    const drained = this._changedCells.slice();
+    this._changedCells.length = 0;
+    return drained;
+  }
+
+  /** Wire power (0-15) or source strength at a cell — for debug/text-state. */
+  getPowerAt(x, y, z) {
+    const id = this.world.get(x, y, z);
+    if (REDSTONE_WIRE_IDS.has(id)) {
+      const stored = this._wirePower.get(cellKey(x, y, z));
+      if (stored !== undefined) return stored;
+      return id === REDSTONE_WIRE_ON ? MAX_POWER : 0;
+    }
+    if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+    return 0;
+  }
+
+  stats() {
+    return {
+      trackedWireCells: this._wirePower.size,
+      pressedPlates: this._pressedPlates.size,
+      pendingButtons: this._buttonTimers.size,
+      pendingTorchFlips: this._torchTimers.size,
+      dirtyCells: this._dirty.size,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Internals
+  // ---------------------------------------------------------------------------
+
+  _setBlock(x, y, z, id) {
+    this.world.set(x, y, z, id);
+    this._changedCells.push({ x, y, z });
+    this._dirty.add(cellKey(x, y, z));
+  }
+
+  _setBlockKey(key, id) {
+    const { x, y, z } = parseKey(key);
+    this._setBlock(x, y, z, id);
+  }
+
+  /** Wire cells connected to the wire at x,y,z (cardinals + one-step up/down). */
+  _wireNeighbors(x, y, z) {
+    const result = [];
+    const aboveSelf = this.world.get(x, y + 1, z);
+    for (const [dx, dz] of HORIZONTAL_DIRS) {
+      const side = this.world.get(x + dx, y, z + dz);
+      if (REDSTONE_WIRE_IDS.has(side)) {
+        result.push([x + dx, y, z + dz]);
+        continue;
+      }
+      // Step up: wire on top of the neighbouring block, reachable when nothing
+      // solid sits directly above this wire to cut the diagonal.
+      if (!isSolidCube(aboveSelf) && REDSTONE_WIRE_IDS.has(this.world.get(x + dx, y + 1, z + dz))) {
+        result.push([x + dx, y + 1, z + dz]);
+      }
+      // Step down: wire one below the neighbouring cell, reachable when the
+      // neighbouring cell itself doesn't contain a solid block.
+      if (!isSolidCube(side) && REDSTONE_WIRE_IDS.has(this.world.get(x + dx, y - 1, z + dz))) {
+        result.push([x + dx, y - 1, z + dz]);
+      }
+    }
+    return result;
+  }
+
+  /** Source strength injected into the wire at x,y,z by adjacent components. */
+  _wireSourcePower(x, y, z) {
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const id = this.world.get(x + dx, y + dy, z + dz);
+      if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+    }
+    return 0;
+  }
+
+  /**
+   * Is the block cell at x,y,z powered? Adjacent active source, lit torch
+   * directly below, or adjacent powered wire. `powerMap` supplies wire levels
+   * computed this pass (falls back to the on/off id for un-visited wire).
+   */
+  _isCellPowered(x, y, z, powerMap) {
+    for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+      const nx = x + dx, ny = y + dy, nz = z + dz;
+      const id = this.world.get(nx, ny, nz);
+      if (isActiveSource(id)) return true;
+      if (id === REDSTONE_TORCH_ON && dy === -1) return true; // torch below powers this block
+      if (REDSTONE_WIRE_IDS.has(id)) {
+        const p = powerMap.get(cellKey(nx, ny, nz));
+        if (p !== undefined ? p > 0 : id === REDSTONE_WIRE_ON) return true;
+      }
+    }
+    return false;
+  }
+
+  _evaluate() {
+    for (let pass = 0; pass < MAX_EVAL_PASSES && this._dirty.size > 0; pass += 1) {
+      const seeds = [...this._dirty].sort();
+      this._dirty.clear();
+
+      // --- 1. Support pops: attached components above a removed/changed cell fall off.
+      for (const key of seeds) {
+        const { x, y, z } = parseKey(key);
+        const aboveId = this.world.get(x, y + 1, z);
+        if (REDSTONE_ATTACHED_IDS.has(aboveId) && !isSolidCube(this.world.get(x, y, z))) {
+          this._setBlock(x, y + 1, z, 0);
+          this._wirePower.delete(cellKey(x, y + 1, z));
+          if (this.onComponentPopped) {
+            this.onComponentPopped(aboveId, x, y + 1, z);
+          }
+        }
+        const selfId = this.world.get(x, y, z);
+        // A wire id that vanished (broken/popped) leaves no stale power entry.
+        if (!REDSTONE_WIRE_IDS.has(selfId)) this._wirePower.delete(key);
+        // A door/trapdoor id that vanished must not leave a stale powered-edge key:
+        // a NEW door placed here later would otherwise miss its rising edge (or see
+        // a phantom falling edge that slams a manually opened door).
+        if (!DOOR_LOWER_IDS.has(selfId)) this._poweredDoors.delete(key);
+        if (!TRAPDOOR_BLOCK_IDS.has(selfId)) this._poweredTrapdoors.delete(key);
+        // Stale pressed plates (e.g. restored from a save) release when no entity holds them.
+        if (selfId === PLATE_ON && !this._pressedPlates.has(key)) {
+          this._setBlock(x, y, z, PLATE_OFF);
+        }
+      }
+
+      // --- 2. Gather affected wire networks (bounded flood from seed adjacency).
+      const network = new Map(); // wire key -> power (filled in step 3)
+      const gatherQueue = [];
+      const pushWire = (x, y, z) => {
+        const key = cellKey(x, y, z);
+        if (!network.has(key) && network.size < MAX_NETWORK_CELLS) {
+          network.set(key, 0);
+          gatherQueue.push([x, y, z]);
+        }
+      };
+      for (const key of seeds) {
+        const { x, y, z } = parseKey(key);
+        if (REDSTONE_WIRE_IDS.has(this.world.get(x, y, z))) pushWire(x, y, z);
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+          if (REDSTONE_WIRE_IDS.has(this.world.get(x + dx, y + dy, z + dz))) pushWire(x + dx, y + dy, z + dz);
+        }
+        // Also gather STEP-DIAGONAL wires: a removed wire whose only connections
+        // were step up/down (a wire staircase) has no 6-adjacent wire, and the far
+        // side would otherwise keep stale power forever. _wireNeighbors works from
+        // an air cell (it only inspects neighbours); over-gathering is harmless.
+        for (const [nx, ny, nz] of this._wireNeighbors(x, y, z)) pushWire(nx, ny, nz);
+      }
+      while (gatherQueue.length > 0) {
+        const [x, y, z] = gatherQueue.shift();
+        for (const [nx, ny, nz] of this._wireNeighbors(x, y, z)) pushWire(nx, ny, nz);
+      }
+
+      // --- 3. Recompute wire power: multi-source BFS with -1 decay per step.
+      const bfs = [];
+      for (const key of [...network.keys()].sort()) {
+        const { x, y, z } = parseKey(key);
+        const src = this._wireSourcePower(x, y, z);
+        network.set(key, src);
+        if (src > 0) bfs.push([x, y, z, src]);
+      }
+      while (bfs.length > 0) {
+        const [x, y, z, power] = bfs.shift();
+        if (power <= 1) continue;
+        for (const [nx, ny, nz] of this._wireNeighbors(x, y, z)) {
+          const nKey = cellKey(nx, ny, nz);
+          if (!network.has(nKey)) continue; // outside the bounded gather — stays as-is
+          if (network.get(nKey) < power - 1) {
+            network.set(nKey, power - 1);
+            bfs.push([nx, ny, nz, power - 1]);
+          }
+        }
+      }
+
+      // --- 4. Apply wire results: store levels, flip on/off ids where crossed.
+      for (const [key, power] of network) {
+        this._wirePower.set(key, power);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        const want = power > 0 ? REDSTONE_WIRE_ON : REDSTONE_WIRE_OFF;
+        if (REDSTONE_WIRE_IDS.has(id) && id !== want) {
+          // Direct set (not _setBlock): wire visual flips must not re-dirty the
+          // network every pass — power is already authoritative here.
+          this.world.set(x, y, z, want);
+          this._changedCells.push({ x, y, z });
+        }
+      }
+
+      // --- 5. Consumers + torches around everything we touched this pass.
+      const interesting = new Set(seeds);
+      for (const key of network.keys()) interesting.add(key);
+      const consumerCells = new Set();
+      for (const key of [...interesting].sort()) {
+        const { x, y, z } = parseKey(key);
+        consumerCells.add(key);
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+          consumerCells.add(cellKey(x + dx, y + dy, z + dz));
+          // A torch INVERTS the block below it, so a torch two cells from a change
+          // (sitting on a neighbour of the changed cell) must also re-evaluate.
+          consumerCells.add(cellKey(x + dx, y + dy + 1, z + dz));
+        }
+      }
+      for (const key of [...consumerCells].sort()) {
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+
+        if (id === REDSTONE_LAMP_OFF || id === REDSTONE_LAMP_ON) {
+          const powered = this._isCellPowered(x, y, z, this._wirePower);
+          const want = powered ? REDSTONE_LAMP_ON : REDSTONE_LAMP_OFF;
+          if (id !== want) this._setBlock(x, y, z, want);
+        } else if (REDSTONE_TORCH_IDS.has(id)) {
+          // Torch inverts its support block's powered state, on a 100 ms delay.
+          // A redstone block IS power, so a torch mounted on one is always off.
+          const supportPowered = this.world.get(x, y - 1, z) === REDSTONE_BLOCK_ID
+            || this._isCellPowered(x, y - 1, z, this._wirePower);
+          const want = supportPowered ? REDSTONE_TORCH_OFF : REDSTONE_TORCH_ON;
+          const pending = this._torchTimers.get(key);
+          if (id === want) {
+            if (pending) this._torchTimers.delete(key);
+          } else if (!pending || pending.target !== want) {
+            this._torchTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, target: want });
+          }
+        } else if (DOOR_BLOCK_IDS.has(id)) {
+          // Re-anchor on the LOWER half: power beside the UPPER half must also
+          // drive the door, and the scan may only have visited the upper cell.
+          const ly = DOOR_LOWER_IDS.has(id) ? y : y - 1;
+          const lid = this.world.get(x, ly, z);
+          if (!DOOR_LOWER_IDS.has(lid)) continue;
+          const lowerKey = ly === y ? key : cellKey(x, ly, z);
+          const powered = this._isCellPowered(x, ly, z, this._wirePower)
+            || this._isCellPowered(x, ly + 1, z, this._wirePower);
+          const wasPowered = this._poweredDoors.has(lowerKey);
+          if (powered && !wasPowered) {
+            this._poweredDoors.add(lowerKey);
+            if (!doorIsOpen(lid)) this._toggleDoorPair(x, ly, z);
+          } else if (!powered && wasPowered) {
+            this._poweredDoors.delete(lowerKey);
+            if (doorIsOpen(this.world.get(x, ly, z))) this._toggleDoorPair(x, ly, z);
+          }
+        } else if (TRAPDOOR_BLOCK_IDS.has(id)) {
+          const powered = this._isCellPowered(x, y, z, this._wirePower);
+          const wasPowered = this._poweredTrapdoors.has(key);
+          if (powered && !wasPowered) {
+            this._poweredTrapdoors.add(key);
+            if (!trapdoorIsOpen(id)) this._setBlock(x, y, z, trapdoorToggle(id));
+          } else if (!powered && wasPowered) {
+            this._poweredTrapdoors.delete(key);
+            const cur = this.world.get(x, y, z);
+            if (trapdoorIsOpen(cur)) this._setBlock(x, y, z, trapdoorToggle(cur));
+          }
+        }
+      }
+    }
+    // Anything still dirty after MAX_EVAL_PASSES carries into the next tick —
+    // that's what lets torch clocks keep oscillating without stalling a frame.
+  }
+
+  _toggleDoorPair(x, y, z) {
+    const id = this.world.get(x, y, z);
+    if (!DOOR_BLOCK_IDS.has(id)) return;
+    this._setBlock(x, y, z, doorToggle(id));
+    const otherY = DOOR_LOWER_IDS.has(id) ? y + 1 : y - 1;
+    const other = this.world.get(x, otherY, z);
+    if (DOOR_BLOCK_IDS.has(other)) this._setBlock(x, otherY, z, doorToggle(other));
+  }
+}

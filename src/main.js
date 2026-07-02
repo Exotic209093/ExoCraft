@@ -112,7 +112,17 @@ import {
   doorToggle,
   TRAPDOOR_BLOCK_IDS,
   trapdoorToggle,
+  // Wave R1 — redstone
+  BLOCK_TRANSPARENCY_CLASS,
+  REDSTONE_WIRE_IDS,
+  LEVER_IDS,
+  BUTTON_IDS,
+  PLATE_IDS,
+  REDSTONE_TORCH_IDS,
+  REDSTONE_ATTACHED_IDS,
+  REDSTONE_ALL_IDS,
 } from "./game/textures";
+import { RedstoneSim } from "./game/redstone";
 import {
   ensureAudio as _ensureAudioModule,
   playBreakSound,
@@ -173,6 +183,11 @@ const BED_MOB_CHECK_RADIUS = 8;        // hostile-mob proximity radius (blocks)
 const WHEAT_STAGE_MIN = 47;
 const WHEAT_STAGE_MAX = 50; // mature, harvestable
 const FARMLAND_BLOCK_TYPE = 51;
+// Wave R1 — redstone block ids (state variants live in textures.js id sets).
+const REDSTONE_WIRE_OFF_TYPE = 83;
+const REDSTONE_LAMP_OFF_TYPE = 93;
+const REDSTONE_LAMP_ON_TYPE = 94;
+const REDSTONE_BLOCK_TYPE = 95;
 // Wave G4 — wool block + tuning.
 const WOOL_BLOCK_TYPE = 82;
 const WOOL_REGROW_MS = 120000;            // sheared sheep regrows wool after ~2 min on grass
@@ -421,6 +436,35 @@ const world = new VoxelWorld({
 // fluidLevels immediately. The Map starts empty — no reset needed at boot (fix #4/#9/#13).
 const fluidSim = new FluidSim(world);
 world.fluidLevels = fluidSim.fluidLevels;
+
+// Wave R1 — redstone signal sim. All circuit state lives in block ids; the sim only
+// keeps transient wire power + timers. Popped components (support broken under them)
+// drop as item entities, resolved through survival's BLOCK_DROPS so the drop table
+// has one source of truth; itemEntities is constructed later, hence the lazy closure.
+const redstoneSim = new RedstoneSim({
+  world,
+  onComponentPopped: (blockId, x, y, z) => {
+    const itemId = getBlockDropItem(blockId);
+    if (itemId) itemEntities.spawnItemEntity(itemId, 1, x + 0.5, y + 0.3, z + 0.5);
+  },
+});
+
+// Rebuild the chunks the redstone sim just mutated so lamp/wire/door flips render
+// this frame (dedupe per chunk; rebuildEditedChunksNow is per-column). Chunks outside
+// the active ring are skipped — world.set already marked them dirty, so they rebuild
+// normally when they enter the ring; building them here would attach meshes the
+// eviction path never disposes (load-time settle can touch far-away circuits).
+function applyRedstoneVisualChanges(changedCells) {
+  if (!changedCells || changedCells.length === 0) return;
+  const seen = new Set();
+  for (const c of changedCells) {
+    const pos = world.toChunkPosition(c.x, c.z);
+    if (seen.has(pos.key)) continue;
+    seen.add(pos.key);
+    if (!world.activeChunkKeys.has(pos.key)) continue;
+    world.rebuildEditedChunksNow(c.x, c.z);
+  }
+}
 
 world.generateTerrain();
 scene.add(world.meshGroup);
@@ -3124,6 +3168,34 @@ function cropHasLight(x, y, z) {
   // Open-to-sky (no skylight accessor exists) OR daytime — coarse but deterministic.
   return state.dayFactor > 0.4 || world.findSurfaceY(x, z) <= y;
 }
+// Wave R1 — per-tick redstone update: plate occupancy from entity feet cells, then
+// timers + circuit evaluation. O(entities) per tick; circuit work only when dirty.
+// Pooled scratch (grow-only object pool) keeps the idle path allocation-free — the
+// same discipline the GC phase applied to world.get()/physics scratch.
+const _pressingScratch = [];
+function _pushPressing(count, px, py, pz) {
+  let cell = _pressingScratch[count];
+  if (!cell) {
+    cell = { x: 0, y: 0, z: 0 };
+    _pressingScratch[count] = cell;
+  }
+  cell.x = Math.floor(px);
+  cell.y = Math.floor(py + 0.1);
+  cell.z = Math.floor(pz);
+  return count + 1;
+}
+function updateRedstone(deltaMs) {
+  let count = _pushPressing(0, state.playerPos.x, state.playerPos.y, state.playerPos.z);
+  for (const mob of hostileMobs) {
+    if (mob?.pos) count = _pushPressing(count, mob.pos.x, mob.pos.y, mob.pos.z);
+  }
+  for (const mob of passiveMobs) {
+    if (mob?.pos) count = _pushPressing(count, mob.pos.x, mob.pos.y, mob.pos.z);
+  }
+  redstoneSim.updatePlates(_pressingScratch, count);
+  applyRedstoneVisualChanges(redstoneSim.tick(deltaMs));
+}
+
 function updateCropGrowth(deltaMs) {
   if (!world || deltaMs <= 0) return;
   if (!Number.isFinite(state._cropTickSeed) || state._cropTickSeed === 0) {
@@ -3217,6 +3289,10 @@ function updateFallingBlocks() {
           // Unsupported: move it down one block via world.set() so edits/markDirty persist.
           world.set(worldX, y, worldZ, 0);
           world.set(worldX, y - 1, worldZ, type);
+          // Wave R1 — a moving support must pop components riding it and recompute
+          // circuits (the dirty set dedupes; no work unless redstone is adjacent).
+          redstoneSim.onBlockChanged(worldX, y, worldZ);
+          redstoneSim.onBlockChanged(worldX, y - 1, worldZ);
           stillHasFalling = true;
         }
       }
@@ -6034,6 +6110,11 @@ async function loadGame() {
     itemEntities.restore(snapshot.itemEntities ?? null);
     // Wave F5: restore flowing fluid cells; null snapshot = no flowing cells (clears map)
     fluidSim.restore(snapshot.fluidSim ?? null);
+    // Wave R1: circuit state rides the block-id edits; drop transient sim state and
+    // re-derive wire power (also releases buttons/plates saved mid-activation).
+    redstoneSim.reset();
+    redstoneSim.seedFromWorldEdits(snapshot.edits ?? null);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
     // Wave F2: restore XP state; v<=6 saves have no xp field → default to 0
     {
       const xpSnap = snapshot.xp ?? null;
@@ -6278,12 +6359,18 @@ function breakBlock(ndcX = 0, ndcY = 0) {
   const minedDeepCopper = type === COPPER_ORE_BLOCK_TYPE && isTorchPlacementInCave(coords.x, coords.y, coords.z);
   world.set(coords.x, coords.y, coords.z, 0);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid flow into dug space
+  // Wave R1 — breaking can cut a circuit or drop the support out from under a
+  // component (the sim pops those and spawns their drops on the next evaluation).
+  redstoneSim.onBlockChanged(coords.x, coords.y, coords.z);
+  applyRedstoneVisualChanges(redstoneSim.tick(0));
   // Wave G2b — a door is 2 cells: breaking one half clears the other (which drops nothing,
   // so exactly one door item drops via the broken half's BLOCK_DROPS entry).
   if (DOOR_BLOCK_IDS.has(type)) {
     const otherY = DOOR_LOWER_IDS.has(type) ? coords.y + 1 : coords.y - 1;
     if (DOOR_BLOCK_IDS.has(world.get(coords.x, otherY, coords.z))) {
       world.set(coords.x, otherY, coords.z, 0);
+      // Wave R1 — both halves are gone; let the sim drop its powered-edge key.
+      redstoneSim.onBlockChanged(coords.x, otherY, coords.z);
     }
   }
   if (type === FURNACE_BLOCK_TYPE) {
@@ -6527,6 +6614,23 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       viewmodel.triggerSwing();
       return true;
     }
+    // Wave R1 — right-click flips a lever or presses a button; the sim handles the
+    // id change, then rebuilds so the new state renders this frame.
+    if (LEVER_IDS.has(sb)) {
+      const next = redstoneSim.toggleLever(solidCoords.x, solidCoords.y, solidCoords.z);
+      applyRedstoneVisualChanges(redstoneSim.tick(0));
+      state.recentAction = next === 86 ? "Lever on" : "Lever off";
+      viewmodel.triggerSwing();
+      return true;
+    }
+    if (BUTTON_IDS.has(sb)) {
+      if (redstoneSim.pressButton(solidCoords.x, solidCoords.y, solidCoords.z)) {
+        applyRedstoneVisualChanges(redstoneSim.tick(0));
+        state.recentAction = "Button pressed";
+        viewmodel.triggerSwing();
+      }
+      return true;
+    }
   }
 
   const slot = getSelectedInventorySlot();
@@ -6681,6 +6785,14 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   if (playerInsideBlock(coords.x, coords.y, coords.z)) {
     return false;
   }
+  // Wave R1 — floor-mounted redstone components need a solid full cube below.
+  if (REDSTONE_ATTACHED_IDS.has(placeType)) {
+    const below = world.get(coords.x, coords.y - 1, coords.z);
+    if (below === 0 || (BLOCK_TRANSPARENCY_CLASS[below] || 0) !== 0) {
+      state.recentAction = "Needs a solid block below";
+      return false;
+    }
+  }
   // Wave G2b — a door needs this cell AND the one above it empty (placed atomically).
   if (doorLowerId !== null) {
     if (!world.inBounds(coords.x, coords.y + 1, coords.z)
@@ -6692,6 +6804,7 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     const orient = doorLowerId - 58;
     world.set(coords.x, coords.y, coords.z, doorLowerId);     // lower closed
     world.set(coords.x, coords.y + 1, coords.z, 66 + orient); // upper closed
+    redstoneSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave R1: door may join a circuit
     world.rebuildEditedChunksNow(coords.x, coords.z);
     world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
     consumeFromSlot(state.inventory, state.selectedSlot, 1);
@@ -6704,6 +6817,10 @@ function placeBlock(ndcX = 0, ndcY = 0) {
   }
   world.set(coords.x, coords.y, coords.z, placeType);
   fluidSim.onBlockChanged(coords.x, coords.y, coords.z); // Wave F5: let fluid react to placed block
+  // Wave R1 — any placement can join/cut a circuit; evaluate immediately so newly
+  // placed components (and their neighbours) settle this frame.
+  redstoneSim.onBlockChanged(coords.x, coords.y, coords.z);
+  applyRedstoneVisualChanges(redstoneSim.tick(0));
   if (FALLING_BLOCK_TYPES.has(placeType)) {
     const placedPos = world.toChunkPosition(coords.x, coords.z);
     const placedChunk = world.chunks.get(placedPos.key);
@@ -6977,6 +7094,7 @@ function triggerDamageFlash() {
 
 function regenerateWorld() {
   fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
+  redstoneSim.reset(); // Wave R1: drop transient circuit state with the old terrain
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -7013,6 +7131,7 @@ async function createNewWorld() {
   const seed = randomSeed();
   world.setSeed(seed);
   fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
+  redstoneSim.reset(); // Wave R1: drop transient circuit state with the old terrain
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -7543,6 +7662,9 @@ function updateSimulation(dtSeconds) {
   }
   updateFallingBlocks();
   updateCropGrowth(deltaMs);
+  // Wave R1 — redstone: pressure plates read entity feet cells (player + mobs), then
+  // the sim advances timers (button release, torch flip) and settles dirty circuits.
+  updateRedstone(deltaMs);
   updateBranchEncounterState();
   updateObjectives(deltaMs);
   updateCameraTransform();
@@ -7952,6 +8074,13 @@ window.render_game_to_text = () => {
       matureCrops: nearbyBlocks.filter((e) => e.type === WHEAT_STAGE_MAX).length,
       cropTickSeed: state._cropTickSeed >>> 0,
     },
+    // Wave R1 — redstone diagnostics: nearby component counts + transient sim stats.
+    redstone: {
+      componentsNearby: nearbyBlocks.filter((e) => REDSTONE_ALL_IDS.has(e.type)).length,
+      poweredWiresNearby: nearbyBlocks.filter((e) => e.type === 84).length,
+      litLampsNearby: nearbyBlocks.filter((e) => e.type === REDSTONE_LAMP_ON_TYPE).length,
+      ...redstoneSim.stats(),
+    },
     combat: {
       baseMobDamage: playerBaseMobDamage + combinedBonuses.mobDamageBonus,
       selectedMobDamage: getSelectedMobDamage(),
@@ -8255,6 +8384,52 @@ window.__exoCraftDebug = {
     }
     return { steps, fluidCellCount: fluidSim.fluidLevels.size, activeFluidCount: fluidSim._active[15].size + fluidSim._active[21].size };
   },
+  // Wave R1 redstone debug hooks --------------------------------------------------
+  // placeRedstone(kind,x,y,z) — kind: "wire"|"lever"|"button"|"plate"|"torch"|"lamp"|"block"
+  placeRedstone: (kind, x, y, z) => {
+    const idMap = { wire: 83, lever: 85, button: 87, plate: 89, torch: 91, lamp: 93, block: 95 };
+    const id = idMap[kind];
+    if (!id) return `Unknown redstone kind: ${kind}`;
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, id);
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, x: bx, y: by, z: bz, id: world.get(bx, by, bz) };
+  },
+  toggleLeverAt: (x, y, z) => {
+    const next = redstoneSim.toggleLever(Math.floor(x), Math.floor(y), Math.floor(z));
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return next === null ? { ok: false } : { ok: true, id: next, on: next === 86 };
+  },
+  pressButtonAt: (x, y, z) => {
+    const ok = redstoneSim.pressButton(Math.floor(x), Math.floor(y), Math.floor(z));
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return { ok };
+  },
+  // getRedstoneAt(x,y,z) — block id + wire power / source strength at the cell
+  getRedstoneAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    return { id: world.get(bx, by, bz), power: redstoneSim.getPowerAt(bx, by, bz) };
+  },
+  // stepRedstoneSim(ms) — advance the sim clock deterministically (fires timers, settles circuits)
+  stepRedstoneSim: (ms = 100) => {
+    applyRedstoneVisualChanges(redstoneSim.tick(Math.max(0, Number(ms) || 0)));
+    return redstoneSim.stats();
+  },
+  getRedstoneStats: () => redstoneSim.stats(),
+  // getLightAt(x,y,z) — baked skylight/blocklight at a cell (post-BFS chunk buffers).
+  // Debug/testing aid for the lighting engine (used by the redstone smoke test to
+  // assert a lit lamp actually injects blocklight).
+  getLightAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    if (!world.inBounds(bx, by, bz)) return null;
+    const pos = world.toChunkPosition(bx, bz);
+    const chunk = world.chunks.get(pos.key);
+    if (!chunk || !chunk.skylight || !chunk.blocklight) return { sky: null, block: null };
+    const idx = world.index(pos.localX, by, pos.localZ);
+    return { sky: chunk.skylight[idx], block: chunk.blocklight[idx] };
+  },
   // fluidCellCount() — total flowing cells in fluidLevels
   fluidCellCount: () => fluidSim.fluidLevels.size,
   // activeFluidCount() — cells pending evaluation in the active set
@@ -8533,6 +8708,9 @@ window.__exoCraftDebug = {
     const tz = Math.floor(z);
     const result = world.set(tx, ty, tz, type);
     if (result) {
+      // Wave R1 — debug edits participate in circuits like player edits do.
+      redstoneSim.onBlockChanged(tx, ty, tz);
+      applyRedstoneVisualChanges(redstoneSim.tick(0));
       world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z);
       updateTargetBlockFromCenter();
       updateTorchLights();
