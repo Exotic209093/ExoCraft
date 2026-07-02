@@ -288,6 +288,141 @@ const rigJ = await page.evaluate(async ({ P }) => {
 check("J1 torch lit on sand", rigJ.before.id === 91, JSON.stringify(rigJ.before));
 check("J2 falling sand pops the torch (cell empties)", rigJ.after.id === 0, JSON.stringify(rigJ.after));
 
+// Rig R (Wave R2): repeater refreshes a decayed signal back to 15 and recedes on off.
+const rigR = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 9;
+  for (let dx = 0; dx <= 9; dx++) D.setBlock(P.x + dx, P.y, z, 3); // support row
+  D.placeRedstone("lever", P.x, y, z);
+  for (let dx = 1; dx <= 4; dx++) D.placeRedstone("wire", P.x + dx, y, z);
+  D.placeRedstone("repeater", P.x + 5, y, z, 1); // facing E (+X)
+  for (let dx = 6; dx <= 8; dx++) D.placeRedstone("wire", P.x + dx, y, z);
+  D.placeRedstone("lamp", P.x + 9, y, z);
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(400); // > 1-tick repeater delay
+  const on = {
+    preWire: D.getRedstoneAt(P.x + 4, y, z),   // decayed input side
+    rep: D.getRedstoneAt(P.x + 5, y, z),
+    postWire: D.getRedstoneAt(P.x + 6, y, z),  // refreshed output side
+    farWire: D.getRedstoneAt(P.x + 8, y, z),
+    lamp: D.getRedstoneAt(P.x + 9, y, z),
+  };
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(400);
+  const off = {
+    postWire: D.getRedstoneAt(P.x + 6, y, z),
+    lamp: D.getRedstoneAt(P.x + 9, y, z),
+  };
+  return { on, off };
+}, { P });
+// Wire adjacent to the lever reads 15, so the 4th wire is 15-3 = 12.
+check("R1 input wire decays to 12 before the repeater", rigR.on.preWire.id === 84 && rigR.on.preWire.power === 12, JSON.stringify(rigR.on.preWire));
+check("R2 repeater powers on (output 15)", rigR.on.rep.power === 15, JSON.stringify(rigR.on.rep));
+check("R3 output wire refreshed to 15", rigR.on.postWire.id === 84 && rigR.on.postWire.power === 15, JSON.stringify(rigR.on.postWire));
+check("R4 far wire 13 + lamp lit through repeater", rigR.on.farWire.power === 13 && rigR.on.lamp.id === 94, JSON.stringify({ far: rigR.on.farWire, lamp: rigR.on.lamp }));
+check("R5 lever-off recedes through the repeater", rigR.off.postWire.id === 83 && rigR.off.lamp.id === 93, JSON.stringify(rigR.off));
+
+// Rig S (Wave R2): delay cycling — a 4-tick repeater passes the signal late.
+const rigS = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 11;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placeRedstone("wire", P.x + 1, y, z);
+  D.placeRedstone("repeater", P.x + 2, y, z, 1);
+  D.placeRedstone("wire", P.x + 3, y, z);
+  window.advanceTime(100);
+  const cycles = [D.cycleRepeaterAt(P.x + 2, y, z), D.cycleRepeaterAt(P.x + 2, y, z), D.cycleRepeaterAt(P.x + 2, y, z)];
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(250); // < 400 ms
+  const early = D.getRedstoneAt(P.x + 3, y, z);
+  window.advanceTime(400); // past the 4-tick delay
+  const late = D.getRedstoneAt(P.x + 3, y, z);
+  return { cycles: cycles.map((c) => c.delayTicks), early, late };
+}, { P });
+check("S1 right-click cycles delay 2,3,4", rigS.cycles.join(",") === "2,3,4", JSON.stringify(rigS.cycles));
+check("S2 4-tick repeater: front wire still off at 250ms", rigS.early.id === 83, JSON.stringify(rigS.early));
+check("S3 front wire on after the full delay", rigS.late.id === 84 && rigS.late.power === 15, JSON.stringify(rigS.late));
+
+// Rig U (Wave R2): comparator compare vs subtract with analog strengths.
+const rigU = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 13;
+  // Rear chain: lever -> wire(15) -> wire(14) -> comparator(E) -> front wire.
+  for (let dx = 0; dx <= 4; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placeRedstone("wire", P.x + 1, y, z);
+  D.placeRedstone("wire", P.x + 2, y, z);
+  D.placeRedstone("comparator", P.x + 3, y, z, 1);
+  D.placeRedstone("wire", P.x + 4, y, z);
+  // Side chain into the comparator's south side: lever -> wire(15) -> wire(14).
+  D.setBlock(P.x + 3, P.y, z + 1, 3);
+  D.setBlock(P.x + 3, P.y, z + 2, 3);
+  D.setBlock(P.x + 3, P.y, z + 3, 3);
+  D.placeRedstone("lever", P.x + 3, y, z + 3);
+  D.placeRedstone("wire", P.x + 3, y, z + 2);
+  D.placeRedstone("wire", P.x + 3, y, z + 1);
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);          // rear on: comparator rear reads 14
+  window.advanceTime(300);
+  const compareNoSide = D.getRedstoneAt(P.x + 4, y, z); // rear 14, side 0 -> out 14 (analog!)
+  D.toggleLeverAt(P.x + 3, y, z + 3);  // side on: side wire at comparator reads 14
+  window.advanceTime(300);
+  const compareEqualSide = D.getRedstoneAt(P.x + 4, y, z); // rear 14 >= side 14 -> out 14
+  D.toggleComparatorModeAt(P.x + 3, y, z);
+  window.advanceTime(300);
+  const subtractEqual = D.getRedstoneAt(P.x + 4, y, z);    // 14 - 14 -> 0
+  D.toggleLeverAt(P.x + 3, y, z + 3);  // side off
+  window.advanceTime(300);
+  const subtractNoSide = D.getRedstoneAt(P.x + 4, y, z);   // 14 - 0 -> 14
+  return { compareNoSide, compareEqualSide, subtractEqual, subtractNoSide };
+}, { P });
+check("U1 comparator passes ANALOG rear strength (14, not 15)", rigU.compareNoSide.id === 84 && rigU.compareNoSide.power === 14, JSON.stringify(rigU.compareNoSide));
+check("U2 compare: rear >= side still passes", rigU.compareEqualSide.power === 14, JSON.stringify(rigU.compareEqualSide));
+check("U3 subtract: equal side cancels output", rigU.subtractEqual.id === 83 && rigU.subtractEqual.power === 0, JSON.stringify(rigU.subtractEqual));
+check("U4 subtract: side off restores 14", rigU.subtractNoSide.power === 14, JSON.stringify(rigU.subtractNoSide));
+
+// Rig V (Wave R2): torch + 4-tick repeater loop = a SUSTAINABLE clock (slow enough
+// to never hit torch burnout — the repeater is what makes clocks legitimate).
+const rigV = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const ty = P.y + 5, z = P.z + 9; // isolated in the air
+  const bx = P.x;
+  // Upper row (torch level ty+1): torch on T, D1, repeater(E), D2.
+  // Lower return row (level ty, at z+1): D3..D6, where D6 sits beside T and powers it.
+  D.setBlock(bx, ty, z, 3);          // T — the block the loop powers (torch support)
+  D.setBlock(bx + 1, ty, z, 3);      // D1 support
+  D.setBlock(bx + 2, ty, z, 3);      // repeater support
+  D.setBlock(bx + 3, ty, z, 3);      // D2 support
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(bx + dx, ty - 1, z + 1, 3); // return row supports
+  // Corner cut: stops D1 step-connecting straight down to the return row, which
+  // would bypass the repeater and turn this into a burnout-speed torch loop.
+  D.setBlock(bx + 1, ty + 1, z + 1, 3);
+  D.placeRedstone("torch", bx, ty + 1, z);
+  D.placeRedstone("wire", bx + 1, ty + 1, z);      // D1
+  D.placeRedstone("repeater", bx + 2, ty + 1, z, 1); // facing E
+  D.placeRedstone("wire", bx + 3, ty + 1, z);      // D2 (repeater output)
+  D.placeRedstone("wire", bx + 3, ty, z + 1);      // D3 (step down from D2)
+  D.placeRedstone("wire", bx + 2, ty, z + 1);      // D4
+  D.placeRedstone("wire", bx + 1, ty, z + 1);      // D5
+  D.placeRedstone("wire", bx, ty, z + 1);          // D6 — beside T, powers it
+  D.cycleRepeaterAt(bx + 2, ty + 1, z); D.cycleRepeaterAt(bx + 2, ty + 1, z); D.cycleRepeaterAt(bx + 2, ty + 1, z); // 4 ticks
+  // Watch the torch over ~4 simulated seconds: it must toggle repeatedly.
+  let transitions = 0;
+  let last = D.getRedstoneAt(bx, ty + 1, z).id;
+  for (let i = 0; i < 40; i++) {
+    window.advanceTime(100);
+    const cur = D.getRedstoneAt(bx, ty + 1, z).id;
+    if (cur !== last) { transitions += 1; last = cur; }
+  }
+  // Dismantle so the rest of the run is quiet.
+  D.setBlock(bx, ty + 1, z, 0);
+  window.advanceTime(300);
+  return { transitions };
+}, { P });
+check("V1 repeater-torch clock oscillates sustainably (>=3 transitions, no burnout)", rigV.transitions >= 3, `transitions=${rigV.transitions}`);
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

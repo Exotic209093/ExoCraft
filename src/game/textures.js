@@ -79,6 +79,11 @@ const TILE = {
   redstone_lamp_off:  [4, 7], // dark amber lattice (opaque cube)
   redstone_lamp_on:   [5, 7], // bright glowing amber lattice
   redstone_block:     [6, 7], // solid compressed-redstone red (opaque cube)
+  // Wave R2 — repeater/comparator base plates + the nub boxes that mark direction/state.
+  repeater_top:       [4, 2], // pale smoothstone plate with a groove
+  comparator_top:     [2, 3], // pale smoothstone plate with a wedge mark
+  redstone_nub_on:    [3, 3], // bright red (lit nub boxes)
+  redstone_nub_off:   [4, 3], // dark red (unlit nub boxes)
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -195,6 +200,12 @@ export const BLOCK_FACE_TILES = {
   93: { px: "redstone_lamp_off", nx: "redstone_lamp_off", py: "redstone_lamp_off", ny: "redstone_lamp_off", pz: "redstone_lamp_off", nz: "redstone_lamp_off" },
   94: { px: "redstone_lamp_on", nx: "redstone_lamp_on", py: "redstone_lamp_on", ny: "redstone_lamp_on", pz: "redstone_lamp_on", nz: "redstone_lamp_on" },
   95: { px: "redstone_block", nx: "redstone_block", py: "redstone_block", ny: "redstone_block", pz: "redstone_block", nz: "redstone_block" },
+  // Wave R2 — repeaters (96-127) and comparators (128-143): base-plate tiles on all
+  // faces; the nub boxes carry their own tile via the mesher's emitBox override.
+  ...Object.fromEntries(Array.from({ length: 32 }, (_, i) => [96 + i,
+    { px: "repeater_top", nx: "repeater_top", py: "repeater_top", ny: "stone", pz: "repeater_top", nz: "repeater_top" }])),
+  ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [128 + i,
+    { px: "comparator_top", nx: "comparator_top", py: "comparator_top", ny: "stone", pz: "comparator_top", nz: "comparator_top" }])),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1274,6 +1285,36 @@ function paintRedstoneBlock(ctx, col, row) {
   }
 }
 
+// Wave R2 — repeater/comparator base plate: pale smooth stone. `wedge` paints a
+// small triangular mark (comparator) instead of the repeater's straight groove.
+function paintRedstonePlate(ctx, col, row, wedge) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = cellNoise(x, y, wedge ? 523 : 522);
+      let v = 158 + (n < 0.35 ? -10 : n > 0.8 ? 8 : 0);
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v -= 28; // rim
+      let r = v, g = v, b = v + 4;
+      if (!wedge && (y === 7 || y === 8) && x > 2 && x < 13) { r -= 30; g -= 30; b -= 30; } // groove
+      if (wedge && Math.abs(x - 7.5) <= (y - 4) * 0.5 && y >= 5 && y <= 10) { r -= 30; g -= 30; b -= 30; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave R2 — nub tiles: flat red fills used on the little direction/state boxes.
+function paintRedstoneNub(ctx, col, row, lit) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, lit ? 525 : 524);
+      let r = lit ? 232 : 96, g = lit ? 48 : 14, b = lit ? 40 : 12;
+      if (n < 0.3) { r -= 22; g -= 4; b -= 4; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), g, b));
+    }
+  }
+}
+
 function paintAtlas(ctx) {
   // Default-fill with bright magenta to make any unmapped face obvious in dev.
   fillTile(ctx, 0, 0, "#ff00ff");
@@ -1345,6 +1386,11 @@ function paintAtlas(ctx) {
   paintRedstoneLamp(ctx, ...TILE.redstone_lamp_off, false);
   paintRedstoneLamp(ctx, ...TILE.redstone_lamp_on, true);
   paintRedstoneBlock(ctx, ...TILE.redstone_block);
+  // Wave R2 — repeater/comparator
+  paintRedstonePlate(ctx, ...TILE.repeater_top, false);
+  paintRedstonePlate(ctx, ...TILE.comparator_top, true);
+  paintRedstoneNub(ctx, ...TILE.redstone_nub_on, true);
+  paintRedstoneNub(ctx, ...TILE.redstone_nub_off, false);
 }
 
 export function createAtlasTexture() {
@@ -1444,6 +1490,8 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   87: 5, 88: 5,           // stone button off/pressed
   89: 5, 90: 5,           // stone pressure plate off/on
   91: 4, 92: 4,           // redstone torch on/off
+  // Wave R2 — repeaters + comparators: thin plates on the class-5 partial path.
+  ...Object.fromEntries(Array.from({ length: 48 }, (_, i) => [96 + i, 5])),
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1555,19 +1603,53 @@ export const REDSTONE_TORCH_OFF = 92;
 export const REDSTONE_LAMP_OFF = 93;
 export const REDSTONE_LAMP_ON = 94;
 export const REDSTONE_BLOCK_ID = 95;
+// ---------------------------------------------------------------------------
+// Wave R2 — repeaters (96-127) and comparators (128-143).
+// Repeater id layout: 96 + (powered ? 16 : 0) + delayIdx*4 + facing
+//   facing 0..3 = output direction N(-Z)/E(+X)/S(+Z)/W(-X) (matches stairs)
+//   delayIdx 0..3 = 1..4 redstone ticks (100..400 ms)
+// Comparator id layout: 128 + (powered ? 8 : 0) + mode*4 + facing
+//   mode 0 = compare (rear if rear >= max side, else 0), 1 = subtract (rear - side)
+// ---------------------------------------------------------------------------
+export const REPEATER_BASE_ID = 96;
+export const REPEATER_IDS = new Set(Array.from({ length: 32 }, (_, i) => 96 + i));
+export function repeaterFacing(id) { return (id - 96) & 3; }
+export function repeaterDelayIdx(id) { return ((id - 96) >> 2) & 3; }
+export function repeaterIsPowered(id) { return (id - 96) >= 16; }
+export function makeRepeaterId(facing, delayIdx, powered) {
+  return 96 + (powered ? 16 : 0) + (delayIdx & 3) * 4 + (facing & 3);
+}
+export const COMPARATOR_BASE_ID = 128;
+export const COMPARATOR_IDS = new Set(Array.from({ length: 16 }, (_, i) => 128 + i));
+export function comparatorFacing(id) { return (id - 128) & 3; }
+export function comparatorMode(id) { return ((id - 128) >> 2) & 1; }
+export function comparatorIsPowered(id) { return (id - 128) >= 8; }
+export function makeComparatorId(facing, mode, powered) {
+  return 128 + (powered ? 8 : 0) + (mode & 1) * 4 + (facing & 3);
+}
+// Facing index -> output direction vector (same convention as stairs: 0=N faces -Z).
+export const REDSTONE_FACING_DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
+
 // Components that must sit on a solid block and pop off when support breaks.
-export const REDSTONE_ATTACHED_IDS = new Set([83, 84, 85, 86, 87, 88, 89, 90, 91, 92]);
+export const REDSTONE_ATTACHED_IDS = new Set([
+  83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
+  ...REPEATER_IDS, ...COMPARATOR_IDS,
+]);
 // Cross-quad redstone ids (lever + torch) — share the flora-style X geometry, no sway.
 export const REDSTONE_CROSS_IDS = new Set([85, 86, 91, 92]);
 // All redstone-system ids (for debug listings / text-state filters).
-export const REDSTONE_ALL_IDS = new Set([83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95]);
+export const REDSTONE_ALL_IDS = new Set([
+  83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
+  ...REPEATER_IDS, ...COMPARATOR_IDS,
+]);
 
 // Combined set for fast mesher dispatch (fence + doors + trapdoors join the partial path;
 // panes & ladders get their own mesher branches).
 // Wave R1 — buttons + pressure plates are small class-5 boxes on the same path.
+// Wave R2 — repeaters + comparators too (base plate + direction nubs).
 export const PARTIAL_BLOCK_IDS = new Set([
   ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
-  ...BUTTON_IDS, ...PLATE_IDS,
+  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS,
 ]);
 
 // ----- Item icon canvases -----
@@ -1696,6 +1778,9 @@ const ITEM_CHIP_COLORS = {
   redstone_torch:     "#e04030",
   redstone_lamp:      "#c08040",
   redstone_block:     "#b01c18",
+  // Wave R2
+  repeater:           "#b8b8c0",
+  comparator:         "#b0b0bc",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */

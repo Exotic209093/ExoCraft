@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -162,6 +162,8 @@ const LIGHT_PASSABLE = new Set([
   // geometry, light passes through and their own voxel holds the light they're lit by.
   // Lamp (93/94) and redstone block (95) are opaque cubes and stay light-blocking.
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
+  // Wave R2 — repeaters (96-127) + comparators (128-143): thin plates, light passes.
+  ...Array.from({ length: 48 }, (_, i) => 96 + i),
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2335,36 +2337,39 @@ export class VoxelWorld {
             // Helper: emit all 6 faces of an axis-aligned box.
             // ox,oy,oz = world-space min corner; sx,sy,sz = box dimensions.
             // blockId = which block's tile map to use for face UVs.
-            const emitBox = (ox, oy, oz, sx, sy, sz, blockId) => {
+            // tileOverride (Wave R2, optional) = a tile name used on ALL faces —
+            // lets one block emit boxes with different textures (repeater nubs).
+            const emitBox = (ox, oy, oz, sx, sy, sz, blockId, tileOverride) => {
+              const uv = (face) => (tileOverride ? tileUvRect(tileOverride) : getFaceUvRect(blockId, face));
               // PX (+X) face: normal +1,0,0
               emitPartialQuad(
                 [[ox+sx, oy,    oz+sz], [ox+sx, oy,    oz   ], [ox+sx, oy+sy, oz+sz], [ox+sx, oy+sy, oz   ]],
-                1, 0, 0, getFaceUvRect(blockId, FACE_PX),
+                1, 0, 0, uv(FACE_PX),
               );
               // NX (-X) face: normal -1,0,0
               emitPartialQuad(
                 [[ox,    oy,    oz   ], [ox,    oy,    oz+sz], [ox,    oy+sy, oz   ], [ox,    oy+sy, oz+sz]],
-                -1, 0, 0, getFaceUvRect(blockId, FACE_NX),
+                -1, 0, 0, uv(FACE_NX),
               );
               // PY (+Y) face: normal 0,+1,0
               emitPartialQuad(
                 [[ox,    oy+sy, oz   ], [ox+sx, oy+sy, oz   ], [ox,    oy+sy, oz+sz], [ox+sx, oy+sy, oz+sz]],
-                0, 1, 0, getFaceUvRect(blockId, FACE_PY),
+                0, 1, 0, uv(FACE_PY),
               );
               // NY (-Y) face: normal 0,-1,0
               emitPartialQuad(
                 [[ox,    oy,    oz+sz], [ox+sx, oy,    oz+sz], [ox,    oy,    oz   ], [ox+sx, oy,    oz   ]],
-                0, -1, 0, getFaceUvRect(blockId, FACE_NY),
+                0, -1, 0, uv(FACE_NY),
               );
               // PZ (+Z) face: normal 0,0,+1
               emitPartialQuad(
                 [[ox,    oy,    oz+sz], [ox+sx, oy,    oz+sz], [ox,    oy+sy, oz+sz], [ox+sx, oy+sy, oz+sz]],
-                0, 0, 1, getFaceUvRect(blockId, FACE_PZ),
+                0, 0, 1, uv(FACE_PZ),
               );
               // NZ (-Z) face: normal 0,0,-1
               emitPartialQuad(
                 [[ox+sx, oy,    oz   ], [ox,    oy,    oz   ], [ox+sx, oy+sy, oz   ], [ox,    oy+sy, oz   ]],
-                0, 0, -1, getFaceUvRect(blockId, FACE_NZ),
+                0, 0, -1, uv(FACE_NZ),
               );
             };
 
@@ -2384,6 +2389,38 @@ export class VoxelWorld {
               // the pressed state sinks visibly.
               const ph = blockType === PLATE_ON ? 0.03 : 0.0625;
               emitBox(x0 + 0.0625, y0, z0 + 0.0625, 0.875, ph, 0.875, blockType);
+            } else if (REPEATER_IDS.has(blockType) || COMPARATOR_IDS.has(blockType)) {
+              // Wave R2 — repeater/comparator: a thin base plate plus small "nub"
+              // boxes whose POSITIONS encode facing, delay and mode, so direction
+              // reads from geometry without needing rotated tiles.
+              const isRep = REPEATER_IDS.has(blockType);
+              const facing = isRep ? repeaterFacing(blockType) : comparatorFacing(blockType);
+              const lit = isRep ? repeaterIsPowered(blockType) : comparatorIsPowered(blockType);
+              const [fdx, fdz] = REDSTONE_FACING_DIRS[facing];
+              const nubTile = lit ? "redstone_nub_on" : "redstone_nub_off";
+              emitBox(x0, y0, z0, 1.0, 0.125, 1.0, blockType); // base plate
+              // Place a nub centered at (t, s) in facing-local coords: t = along the
+              // output axis (0 = input edge, 1 = output edge), s = sideways (0..1).
+              const nub = (t, s, size, height, tile) => {
+                const lx0 = 0.5 + (t - 0.5) * fdx + (s - 0.5) * -fdz;
+                const lz0 = 0.5 + (t - 0.5) * fdz + (s - 0.5) * fdx;
+                emitBox(
+                  x0 + lx0 - size / 2, y0 + 0.125, z0 + lz0 - size / 2,
+                  size, height, size, blockType, tile,
+                );
+              };
+              if (isRep) {
+                // Output-side nub is fixed; the delay nub slides toward the input
+                // edge as the delay setting grows (mirrors the moving torch idea).
+                nub(0.8, 0.5, 0.19, 0.19, nubTile);
+                nub(0.55 - repeaterDelayIdx(blockType) * 0.12, 0.5, 0.19, 0.19, nubTile);
+              } else {
+                // Two output-corner nubs + a rear mode nub (taller + lit = subtract).
+                const subtract = comparatorMode(blockType) === 1;
+                nub(0.78, 0.3, 0.16, 0.16, nubTile);
+                nub(0.78, 0.7, 0.16, 0.16, nubTile);
+                nub(0.22, 0.5, 0.16, subtract ? 0.26 : 0.14, subtract ? "redstone_nub_on" : "redstone_nub_off");
+              }
             } else if (FENCE_BLOCK_IDS.has(blockType)) {
               // Wave G2a — fence: a central post + 2 rails toward each connected cardinal
               // neighbour (another fence or any solid-opaque block).

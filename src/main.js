@@ -121,6 +121,17 @@ import {
   REDSTONE_TORCH_IDS,
   REDSTONE_ATTACHED_IDS,
   REDSTONE_ALL_IDS,
+  // Wave R2 — repeaters + comparators
+  REPEATER_IDS,
+  COMPARATOR_IDS,
+  repeaterFacing,
+  repeaterDelayIdx,
+  repeaterIsPowered,
+  makeRepeaterId,
+  comparatorFacing,
+  comparatorMode,
+  comparatorIsPowered,
+  makeComparatorId,
 } from "./game/textures";
 import { RedstoneSim } from "./game/redstone";
 import {
@@ -6642,6 +6653,30 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       }
       return true;
     }
+    // Wave R2 — right-click cycles a repeater's delay (1→2→3→4→1 ticks) or
+    // toggles a comparator between compare and subtract mode.
+    if (REPEATER_IDS.has(sb)) {
+      const nextDelay = (repeaterDelayIdx(sb) + 1) & 3;
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z,
+        makeRepeaterId(repeaterFacing(sb), nextDelay, repeaterIsPowered(sb)));
+      redstoneSim.onBlockChanged(solidCoords.x, solidCoords.y, solidCoords.z);
+      applyRedstoneVisualChanges(redstoneSim.tick(0));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = `Repeater delay: ${nextDelay + 1} tick${nextDelay ? "s" : ""}`;
+      viewmodel.triggerSwing();
+      return true;
+    }
+    if (COMPARATOR_IDS.has(sb)) {
+      const nextMode = comparatorMode(sb) ^ 1;
+      world.set(solidCoords.x, solidCoords.y, solidCoords.z,
+        makeComparatorId(comparatorFacing(sb), nextMode, comparatorIsPowered(sb)));
+      redstoneSim.onBlockChanged(solidCoords.x, solidCoords.y, solidCoords.z);
+      applyRedstoneVisualChanges(redstoneSim.tick(0));
+      world.rebuildEditedChunksNow(solidCoords.x, solidCoords.z);
+      state.recentAction = nextMode ? "Comparator: subtract mode" : "Comparator: compare mode";
+      viewmodel.triggerSwing();
+      return true;
+    }
   }
 
   const slot = getSelectedInventorySlot();
@@ -6765,6 +6800,22 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     else if (deg < 225) orient = 2;              // looks +Z → faces -Z
     else orient = 1;                             // looks +X → faces -X
     placeType = [54, 57, 55, 56][orient];
+  }
+
+  // Wave R2 — repeater/comparator placement: output faces AWAY from the player
+  // (same 4-quadrant yaw mapping as stairs/ladders).
+  if (placeType === 96 || placeType === 128) {
+    const twoPi = Math.PI * 2;
+    const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+    const deg = (normYaw / Math.PI) * 180;
+    let orient;
+    if (deg < 45 || deg >= 315) orient = 0;      // looks -Z → output N
+    else if (deg < 135) orient = 3;              // looks -X → output W
+    else if (deg < 225) orient = 2;              // looks +Z → output S
+    else orient = 1;                             // looks +X → output E
+    placeType = placeType === 96
+      ? makeRepeaterId(orient, 0, false)
+      : makeComparatorId(orient, 0, false);
   }
 
   // Wave G2b — door + trapdoor orientation from yaw (door is placed as a 2-cell pair below;
@@ -8343,6 +8394,8 @@ window.render_game_to_text = () => {
       componentsNearby: nearbyBlocks.filter((e) => REDSTONE_ALL_IDS.has(e.type)).length,
       poweredWiresNearby: nearbyBlocks.filter((e) => e.type === 84).length,
       litLampsNearby: nearbyBlocks.filter((e) => e.type === REDSTONE_LAMP_ON_TYPE).length,
+      repeatersNearby: nearbyBlocks.filter((e) => REPEATER_IDS.has(e.type)).length,
+      comparatorsNearby: nearbyBlocks.filter((e) => COMPARATOR_IDS.has(e.type)).length,
       ...redstoneSim.stats(),
     },
     combat: {
@@ -8649,10 +8702,13 @@ window.__exoCraftDebug = {
     return { steps, fluidCellCount: fluidSim.fluidLevels.size, activeFluidCount: fluidSim._active[15].size + fluidSim._active[21].size };
   },
   // Wave R1 redstone debug hooks --------------------------------------------------
-  // placeRedstone(kind,x,y,z) — kind: "wire"|"lever"|"button"|"plate"|"torch"|"lamp"|"block"
-  placeRedstone: (kind, x, y, z) => {
+  // placeRedstone(kind,x,y,z,facing) — kind: "wire"|"lever"|"button"|"plate"|"torch"|
+  // "lamp"|"block"|"repeater"|"comparator" (facing 0-3 = N/E/S/W for the R2 kinds)
+  placeRedstone: (kind, x, y, z, facing = 0) => {
     const idMap = { wire: 83, lever: 85, button: 87, plate: 89, torch: 91, lamp: 93, block: 95 };
-    const id = idMap[kind];
+    let id = idMap[kind];
+    if (kind === "repeater") id = makeRepeaterId(facing & 3, 0, false);
+    if (kind === "comparator") id = makeComparatorId(facing & 3, 0, false);
     if (!id) return `Unknown redstone kind: ${kind}`;
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
     world.set(bx, by, bz, id);
@@ -8660,6 +8716,27 @@ window.__exoCraftDebug = {
     applyRedstoneVisualChanges(redstoneSim.tick(0));
     world.rebuildEditedChunksNow(bx, bz);
     return { placed: true, x: bx, y: by, z: bz, id: world.get(bx, by, bz) };
+  },
+  // Wave R2 — cycle a repeater's delay / toggle a comparator's mode at a cell.
+  cycleRepeaterAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const id = world.get(bx, by, bz);
+    if (!REPEATER_IDS.has(id)) return { ok: false };
+    const next = makeRepeaterId(repeaterFacing(id), (repeaterDelayIdx(id) + 1) & 3, repeaterIsPowered(id));
+    world.set(bx, by, bz, next);
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return { ok: true, id: next, delayTicks: repeaterDelayIdx(next) + 1 };
+  },
+  toggleComparatorModeAt: (x, y, z) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const id = world.get(bx, by, bz);
+    if (!COMPARATOR_IDS.has(id)) return { ok: false };
+    const next = makeComparatorId(comparatorFacing(id), comparatorMode(id) ^ 1, comparatorIsPowered(id));
+    world.set(bx, by, bz, next);
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return { ok: true, id: next, mode: comparatorMode(next) ? "subtract" : "compare" };
   },
   toggleLeverAt: (x, y, z) => {
     const next = redstoneSim.toggleLever(Math.floor(x), Math.floor(y), Math.floor(z));
@@ -8682,6 +8759,13 @@ window.__exoCraftDebug = {
     return redstoneSim.stats();
   },
   getRedstoneStats: () => redstoneSim.stats(),
+  // setLook(yaw, pitch) — point the camera exactly (visual-test framing aid).
+  setLook: (yaw, pitch = 0) => {
+    if (Number.isFinite(yaw)) state.yaw = yaw;
+    if (Number.isFinite(pitch)) state.pitch = Math.max(-1.45, Math.min(1.45, pitch));
+    updateCameraTransform();
+    return { yaw: state.yaw, pitch: state.pitch };
+  },
   // getLightAt(x,y,z) — baked skylight/blocklight at a cell (post-BFS chunk buffers).
   // Debug/testing aid for the lighting engine (used by the redstone smoke test to
   // assert a lit lamp actually injects blocklight).
