@@ -24,6 +24,7 @@ export function setupControls({
   toNdc,
   toggleF3Overlay,
   onThrowItem,
+  togglePauseMenu,
 }) {
   // Movement keys tracked in state.keys. Shift and Space handled separately.
   const movementKeyCodes = new Set([
@@ -56,7 +57,9 @@ export function setupControls({
     }
 
     const isRepeat = event.repeat;
-    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen;
+    // Wave P1 — the pause menu counts as an open panel: it blocks movement keys,
+    // hotbar switching and mouse actions just like the container UIs.
+    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen;
 
     if (code === "Escape" && !isRepeat) {
       if (state.inventoryOpen && typeof toggleInventoryPanel === "function") {
@@ -73,6 +76,13 @@ export function setupControls({
       }
       if (state.chestOpen && typeof closeChestPanel === "function") {
         closeChestPanel(true);
+        return;
+      }
+      // Wave P1 — no panel open: Esc toggles the pause menu. (While pointer-locked
+      // the browser consumes Esc for the unlock; main.js opens the pause menu from
+      // the pointerlockchange event instead, so both paths land in the same place.)
+      if (typeof togglePauseMenu === "function") {
+        togglePauseMenu();
         return;
       }
     }
@@ -171,8 +181,10 @@ export function setupControls({
     if (state.mode !== "playing" || !state.pointerLocked) {
       return;
     }
-    state.yaw -= event.movementX * 0.0024;
-    state.pitch -= event.movementY * 0.002;
+    // Wave P1 — settings menu exposes a sensitivity multiplier (default 1).
+    const sens = Number.isFinite(state.mouseSensitivity) ? state.mouseSensitivity : 1;
+    state.yaw -= event.movementX * 0.0024 * sens;
+    state.pitch -= event.movementY * 0.002 * sens;
     state.pitch = clamp(state.pitch, -1.45, 1.45);
   };
 
@@ -184,7 +196,7 @@ export function setupControls({
     if (state.mode !== "playing") {
       return;
     }
-    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen || state.chestOpen) {
+    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen) {
       return;
     }
     renderer.domElement.focus();

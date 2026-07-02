@@ -80,6 +80,45 @@
         <div id="furnace-controls"></div>
       </div>
 
+      <div id="pause-menu" class="hidden">
+        <h2>Game Menu</h2>
+        <button id="pause-resume-btn" type="button">Back to Game</button>
+        <button id="pause-settings-btn" type="button">Settings...</button>
+        <button id="pause-save-btn" type="button">Save World</button>
+      </div>
+
+      <div id="settings-panel" class="hidden">
+        <h2>Settings</h2>
+        <div class="setting-row">
+          <label for="setting-fov">FOV: <span id="setting-fov-value"></span></label>
+          <input id="setting-fov" type="range" min="60" max="110" step="1" />
+        </div>
+        <div class="setting-row">
+          <label for="setting-sensitivity">Sensitivity: <span id="setting-sensitivity-value"></span></label>
+          <input id="setting-sensitivity" type="range" min="30" max="200" step="5" />
+        </div>
+        <div class="setting-row">
+          <label for="setting-render">Render Distance: <span id="setting-render-value"></span></label>
+          <input id="setting-render" type="range" min="1" max="4" step="1" />
+        </div>
+        <div class="setting-row">
+          <label for="setting-volume">Volume: <span id="setting-volume-value"></span></label>
+          <input id="setting-volume" type="range" min="0" max="100" step="5" />
+        </div>
+        <div class="setting-row setting-checkbox">
+          <label for="setting-music">Music</label>
+          <input id="setting-music" type="checkbox" />
+        </div>
+        <button id="settings-done-btn" type="button">Done</button>
+      </div>
+
+      <div id="death-screen" class="hidden">
+        <h1>You died!</h1>
+        <p id="death-cause"></p>
+        <p id="death-score"></p>
+        <button id="respawn-btn" type="button">Respawn</button>
+      </div>
+
       <div id="inventory-panel" class="hidden">
         <div id="inventory-title">Inventory</div>
         <div id="inventory-hint">Click one slot, then another slot to move or swap.</div>

@@ -65,6 +65,8 @@ export function ensureAudio() {
 
     // Schedule first music attempt in ~30s
     nextMusicAt = audioContext.currentTime + 30;
+    // Wave P1 — apply a master volume chosen from settings before audio unlocked.
+    applyPendingMasterVolume();
   }
   if (audioContext.state === "suspended") {
     audioContext.resume().catch(() => {});
@@ -81,6 +83,24 @@ export function setMusicEnabled(enabled) {
   musicEnabled = !!enabled;
   if (musicGain) {
     musicGain.gain.value = musicEnabled ? 0.07 : 0;
+  }
+}
+
+// Wave P1 — master volume for the settings menu. `volume` is 0..1 and scales the
+// default master level (0.35) so 100% matches the historical loudness. Applied
+// lazily too: ensureAudio may run after the setting loads, so remember the value.
+let _pendingMasterVolume = null;
+export function setMasterVolume(volume) {
+  const v = Math.max(0, Math.min(1, Number(volume) || 0));
+  _pendingMasterVolume = v;
+  if (audioMaster) {
+    audioMaster.gain.value = 0.35 * v;
+  }
+}
+/** Called from ensureAudio so a volume chosen before audio unlock still applies. */
+function applyPendingMasterVolume() {
+  if (_pendingMasterVolume !== null && audioMaster) {
+    audioMaster.gain.value = 0.35 * _pendingMasterVolume;
   }
 }
 

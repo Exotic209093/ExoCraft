@@ -17,7 +17,7 @@
  */
 
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, ATLAS_TILE_PX, getChipColor } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, ATLAS_TILE_PX, getChipColor, getItemIconCanvas, hasItemIconArt } from "./textures";
 import { ITEM_DEFS } from "./survival";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -300,32 +300,43 @@ export class Viewmodel {
       }
     }
 
-    // Colored canvas quad (tool/resource)
-    const colorHex = this._getChipColor(itemId);
+    // Wave P1 — held pixel-art item sprite: reuse the painted inventory icon as an
+    // alpha-cutout quad so the hand shows an actual pickaxe/sword/food sprite.
     const canvas = document.createElement("canvas");
-    canvas.width = 16; canvas.height = 16;
+    canvas.width = 32; canvas.height = 32;
     const ctx = canvas.getContext("2d");
-    // Background
-    ctx.fillStyle = "#1a1a1a";
-    ctx.fillRect(0, 0, 16, 16);
-    ctx.fillStyle = colorHex;
-    ctx.fillRect(1, 1, 14, 14);
-    // Highlight
-    ctx.fillStyle = "rgba(255,255,255,0.32)";
-    ctx.fillRect(1, 1, 14, 2);
-    ctx.fillRect(1, 1, 2, 14);
-    // Shadow
-    ctx.fillStyle = "rgba(0,0,0,0.36)";
-    ctx.fillRect(1, 13, 14, 2);
-    ctx.fillRect(13, 1, 2, 14);
+    ctx.imageSmoothingEnabled = false;
+    let cutout = false;
+    if (hasItemIconArt(itemId)) {
+      ctx.drawImage(getItemIconCanvas(itemId, ITEM_DEFS[itemId]?.placeBlockType), 0, 0);
+      cutout = true; // painted icons have transparent backgrounds
+    } else {
+      // Legacy chip fallback for any item without painted art.
+      const colorHex = this._getChipColor(itemId);
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0, 0, 32, 32);
+      ctx.fillStyle = colorHex;
+      ctx.fillRect(2, 2, 28, 28);
+      ctx.fillStyle = "rgba(255,255,255,0.32)";
+      ctx.fillRect(2, 2, 28, 4);
+      ctx.fillRect(2, 2, 4, 28);
+      ctx.fillStyle = "rgba(0,0,0,0.36)";
+      ctx.fillRect(2, 26, 28, 4);
+      ctx.fillRect(26, 2, 4, 28);
+    }
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.magFilter = THREE.NearestFilter;
     tex.minFilter = THREE.NearestFilter;
     tex.needsUpdate = true;
 
-    const geo = new THREE.PlaneGeometry(0.18, 0.18);
-    const mat = new THREE.MeshLambertMaterial({ map: tex, transparent: false });
+    const geo = new THREE.PlaneGeometry(0.22, 0.22);
+    const mat = new THREE.MeshLambertMaterial({
+      map: tex,
+      transparent: cutout,
+      alphaTest: cutout ? 0.5 : 0,
+      side: THREE.DoubleSide,
+    });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.set(0, 0.4, -0.35);
 
