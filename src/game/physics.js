@@ -134,6 +134,8 @@ export const PASSABLE_BLOCKS = new Set([
   // Pressure plates detect the player's feet cell in updateSimulation instead of colliding.
   // Lamp (93/94) and redstone block (95) are solid cubes (not listed).
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
+  // Wave R2 — repeaters (96-127) + comparators (128-143): thin plates, walk-through.
+  ...Array.from({ length: 48 }, (_, i) => 96 + i),
 ]);
 
 function isPassable(blockType) {

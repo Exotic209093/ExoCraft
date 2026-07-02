@@ -37,6 +37,10 @@ import {
   REDSTONE_ATTACHED_IDS,
   DOOR_BLOCK_IDS, DOOR_LOWER_IDS, doorIsOpen, doorToggle,
   TRAPDOOR_BLOCK_IDS, trapdoorIsOpen, trapdoorToggle,
+  // Wave R2 — repeaters + comparators
+  REPEATER_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, makeRepeaterId,
+  COMPARATOR_IDS, comparatorFacing, comparatorMode, comparatorIsPowered, makeComparatorId,
+  REDSTONE_FACING_DIRS,
 } from "./textures";
 
 const MAX_POWER = 15;
@@ -97,6 +101,12 @@ export class RedstoneSim {
     this._torchFlipHistory = new Map(); // cell key -> { windowStart, count } (burnout)
     this._poweredDoors = new Set();   // lower-door cell keys opened by redstone
     this._poweredTrapdoors = new Set();
+    // Wave R2 — repeater/comparator transient state. _componentOutput is the
+    // analog strength a powered component drives its FRONT cell with (repeater
+    // always 15; comparator computed 0-15). Timers model the 1-4 tick delays.
+    this._componentOutput = new Map();  // cell key -> 0..15
+    this._repeaterTimers = new Map();   // cell key -> { due, target: bool }
+    this._comparatorTimers = new Map(); // cell key -> { due, powered: bool, strength }
     this._changedCells = [];          // cells world.set since the last drain
   }
 
@@ -110,6 +120,9 @@ export class RedstoneSim {
     this._torchFlipHistory.clear();
     this._poweredDoors.clear();
     this._poweredTrapdoors.clear();
+    this._componentOutput.clear();
+    this._repeaterTimers.clear();
+    this._comparatorTimers.clear();
     this._changedCells.length = 0;
   }
 
@@ -127,7 +140,7 @@ export class RedstoneSim {
     if (!Array.isArray(edits)) return;
     for (const e of edits) {
       const id = e?.type;
-      if (!Number.isFinite(id) || id < 83 || id > 95) continue;
+      if (!Number.isFinite(id) || id < 83 || id > 143) continue;
       const key = cellKey(e.x, e.y, e.z);
       this._dirty.add(key);
       // Stale pressed buttons from an old save get a release timer.
@@ -229,6 +242,38 @@ export class RedstoneSim {
       }
     }
 
+    // Wave R2 — repeater flips (1-4 tick delay; refresh-to-15 directional output).
+    if (this._repeaterTimers.size > 0) {
+      for (const key of [...this._repeaterTimers.keys()].sort()) {
+        const timer = this._repeaterTimers.get(key);
+        if (timer.due > this._accumMs) continue;
+        this._repeaterTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!REPEATER_IDS.has(id)) continue;
+        this._componentOutput.set(key, timer.target ? MAX_POWER : 0);
+        const next = makeRepeaterId(repeaterFacing(id), repeaterDelayIdx(id), timer.target);
+        if (id !== next) this._setBlock(x, y, z, next);
+        else this._dirty.add(key); // output changed without an id change — recompute downstream
+      }
+    }
+
+    // Wave R2 — comparator updates (1 tick delay; analog strength output).
+    if (this._comparatorTimers.size > 0) {
+      for (const key of [...this._comparatorTimers.keys()].sort()) {
+        const timer = this._comparatorTimers.get(key);
+        if (timer.due > this._accumMs) continue;
+        this._comparatorTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!COMPARATOR_IDS.has(id)) continue;
+        this._componentOutput.set(key, timer.strength);
+        const next = makeComparatorId(comparatorFacing(id), comparatorMode(id), timer.powered);
+        if (id !== next) this._setBlock(x, y, z, next);
+        else this._dirty.add(key); // strength-only change still re-evaluates downstream
+      }
+    }
+
     if (this._dirty.size > 0) this._evaluate();
 
     if (this._changedCells.length === 0) return EMPTY_CELLS;
@@ -246,6 +291,15 @@ export class RedstoneSim {
       return id === REDSTONE_WIRE_ON ? MAX_POWER : 0;
     }
     if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+    // Wave R2 — a component reports its current output strength.
+    if (REPEATER_IDS.has(id)) {
+      if (!repeaterIsPowered(id)) return 0;
+      return this._componentOutput.get(cellKey(x, y, z)) ?? MAX_POWER;
+    }
+    if (COMPARATOR_IDS.has(id)) {
+      if (!comparatorIsPowered(id)) return 0;
+      return this._componentOutput.get(cellKey(x, y, z)) ?? MAX_POWER;
+    }
     return 0;
   }
 
@@ -255,6 +309,8 @@ export class RedstoneSim {
       pressedPlates: this._pressedPlates.size,
       pendingButtons: this._buttonTimers.size,
       pendingTorchFlips: this._torchTimers.size,
+      pendingRepeaters: this._repeaterTimers.size,
+      pendingComparators: this._comparatorTimers.size,
       dirtyCells: this._dirty.size,
     };
   }
@@ -298,13 +354,57 @@ export class RedstoneSim {
     return result;
   }
 
+  /**
+   * Wave R2 — strength a repeater/comparator at (cx,cy,cz) drives into the cell
+   * (tx,ty,tz), or 0 when it isn't a powered component facing that cell.
+   */
+  _componentOutputInto(cx, cy, cz, tx, ty, tz) {
+    if (cy !== ty) return 0;
+    const id = this.world.get(cx, cy, cz);
+    let facing = -1;
+    if (REPEATER_IDS.has(id)) {
+      if (!repeaterIsPowered(id)) return 0;
+      facing = repeaterFacing(id);
+    } else if (COMPARATOR_IDS.has(id)) {
+      if (!comparatorIsPowered(id)) return 0;
+      facing = comparatorFacing(id);
+    } else {
+      return 0;
+    }
+    const [fdx, fdz] = REDSTONE_FACING_DIRS[facing];
+    if (cx + fdx !== tx || cz + fdz !== tz) return 0;
+    const stored = this._componentOutput.get(cellKey(cx, cy, cz));
+    return stored !== undefined ? stored : MAX_POWER;
+  }
+
+  /**
+   * Wave R2 — analog signal level present in a single cell, as read by a
+   * repeater/comparator input at (rx,ry,rz): wire level, full-strength sources,
+   * or another component's output pointed at the reader.
+   */
+  _readSignalAt(x, y, z, rx, ry, rz) {
+    const id = this.world.get(x, y, z);
+    if (REDSTONE_WIRE_IDS.has(id)) {
+      const stored = this._wirePower.get(cellKey(x, y, z));
+      if (stored !== undefined) return stored;
+      return id === REDSTONE_WIRE_ON ? MAX_POWER : 0;
+    }
+    if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+    return this._componentOutputInto(x, y, z, rx, ry, rz);
+  }
+
   /** Source strength injected into the wire at x,y,z by adjacent components. */
   _wireSourcePower(x, y, z) {
+    let best = 0;
     for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
       const id = this.world.get(x + dx, y + dy, z + dz);
       if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+      if (dy === 0) {
+        const out = this._componentOutputInto(x + dx, y, z + dz, x, y, z);
+        if (out > best) best = out;
+      }
     }
-    return 0;
+    return best;
   }
 
   /**
@@ -322,6 +422,8 @@ export class RedstoneSim {
         const p = powerMap.get(cellKey(nx, ny, nz));
         if (p !== undefined ? p > 0 : id === REDSTONE_WIRE_ON) return true;
       }
+      // Wave R2 — a repeater/comparator pointing at this cell powers it.
+      if (dy === 0 && this._componentOutputInto(nx, ny, nz, x, y, z) > 0) return true;
     }
     return false;
   }
@@ -345,6 +447,8 @@ export class RedstoneSim {
         const selfId = this.world.get(x, y, z);
         // A wire id that vanished (broken/popped) leaves no stale power entry.
         if (!REDSTONE_WIRE_IDS.has(selfId)) this._wirePower.delete(key);
+        // Wave R2 — same hygiene for component outputs.
+        if (!REPEATER_IDS.has(selfId) && !COMPARATOR_IDS.has(selfId)) this._componentOutput.delete(key);
         // A door/trapdoor id that vanished must not leave a stale powered-edge key:
         // a NEW door placed here later would otherwise miss its rising edge (or see
         // a phantom falling edge that slams a manually opened door).
@@ -451,6 +555,45 @@ export class RedstoneSim {
             if (pending) this._torchTimers.delete(key);
           } else if (!pending || pending.target !== want) {
             this._torchTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, target: want });
+          }
+        } else if (REPEATER_IDS.has(id)) {
+          // Wave R2 — repeater: reads the cell BEHIND (opposite its facing) and,
+          // after its delay, drives the cell in front with a fresh 15.
+          const facing = repeaterFacing(id);
+          const [fdx, fdz] = REDSTONE_FACING_DIRS[facing];
+          const level = this._readSignalAt(x - fdx, y, z - fdz, x, y, z);
+          const want = level > 0;
+          const current = repeaterIsPowered(id);
+          const pending = this._repeaterTimers.get(key);
+          if (want === current) {
+            if (pending && pending.target !== current) this._repeaterTimers.delete(key);
+          } else if (!pending || pending.target !== want) {
+            const delayMs = (repeaterDelayIdx(id) + 1) * TORCH_FLIP_DELAY_MS;
+            this._repeaterTimers.set(key, { due: this._accumMs + delayMs, target: want });
+          }
+        } else if (COMPARATOR_IDS.has(id)) {
+          // Wave R2 — comparator: rear vs the stronger side input. Compare mode
+          // passes the rear signal through when rear >= side; subtract mode
+          // outputs rear - side. Analog strength feeds the wire BFS.
+          const facing = comparatorFacing(id);
+          const [fdx, fdz] = REDSTONE_FACING_DIRS[facing];
+          const rear = this._readSignalAt(x - fdx, y, z - fdz, x, y, z);
+          const sideA = this._readSignalAt(x - fdz, y, z + fdx, x, y, z);
+          const sideB = this._readSignalAt(x + fdz, y, z - fdx, x, y, z);
+          const side = Math.max(sideA, sideB);
+          const out = comparatorMode(id) === 1
+            ? Math.max(0, rear - side)
+            : (rear >= side ? rear : 0);
+          const wantPowered = out > 0;
+          const currentPowered = comparatorIsPowered(id);
+          const stored = this._componentOutput.get(key) ?? (currentPowered ? MAX_POWER : 0);
+          const pending = this._comparatorTimers.get(key);
+          if (wantPowered === currentPowered && out === stored) {
+            if (pending && (pending.powered !== currentPowered || pending.strength !== stored)) {
+              this._comparatorTimers.delete(key);
+            }
+          } else if (!pending || pending.powered !== wantPowered || pending.strength !== out) {
+            this._comparatorTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, powered: wantPowered, strength: out });
           }
         } else if (DOOR_BLOCK_IDS.has(id)) {
           // Re-anchor on the LOWER half: power beside the UPPER half must also

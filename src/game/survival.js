@@ -295,6 +295,10 @@ export const ITEM_DEFS = {
   redstone_torch: { id: "redstone_torch", name: "Redstone Torch", placeBlockType: 91 },
   redstone_lamp:  { id: "redstone_lamp",  name: "Redstone Lamp",  placeBlockType: 93 },
   redstone_block: { id: "redstone_block", name: "Redstone Block", placeBlockType: 95 },
+  // Wave R2 — repeater/comparator: base id is the N-facing unpowered variant;
+  // placement picks the facing id from camera yaw (special-cased in placeBlock).
+  repeater:       { id: "repeater",       name: "Repeater",       placeBlockType: 96 },
+  comparator:     { id: "comparator",     name: "Comparator",     placeBlockType: 128 },
 };
 
 // Wave R1 — redstone dust places wire (assigned outside the literal so the wire id is
@@ -502,6 +506,7 @@ for (let i = 74; i <= 81; i += 1) { BLOCK_DROPS[i] = "trapdoor"; BLOCK_HARDNESS[
 // Wave R1 — redstone components: every state-variant id drops the one base item.
 // Wire (83/84) and torches (91/92) break instantly like flora; stone-ish components
 // break fast; the redstone block is a real pickaxe block.
+// Wave R2 — all 32 repeater / 16 comparator state ids drop the single base item.
 for (const [ids, itemId, hardness, tool] of [
   [[83, 84], "redstone", 0.05, null],
   [[85, 86], "lever", 0.5, null],
@@ -510,6 +515,8 @@ for (const [ids, itemId, hardness, tool] of [
   [[91, 92], "redstone_torch", 0.05, null],
   [[93, 94], "redstone_lamp", 0.6, null],
   [[95], "redstone_block", 3.0, "pickaxe"],
+  [Array.from({ length: 32 }, (_, i) => 96 + i), "repeater", 0.1, null],
+  [Array.from({ length: 16 }, (_, i) => 128 + i), "comparator", 0.1, null],
 ]) {
   for (const id of ids) {
     BLOCK_DROPS[id] = itemId;
@@ -1365,6 +1372,26 @@ export const RECIPES = [
     inputs: [{ itemId: "redstone_block", count: 1 }],
     output: { itemId: "redstone", count: 9 },
     requiresWorkbench: false,
+  },
+  // Wave R2 — repeater (2 torches + dust on stone) and comparator (3 torches +
+  // glass "crystal" stand-in on stone).
+  {
+    id: "repeater",
+    name: "Repeater",
+    pattern: ["___", "TRT", "SSS"],
+    key: { T: "redstone_torch", R: "redstone", S: "stone" },
+    inputs: [{ itemId: "redstone_torch", count: 2 }, { itemId: "redstone", count: 1 }, { itemId: "stone", count: 3 }],
+    output: { itemId: "repeater", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "comparator",
+    name: "Comparator",
+    pattern: ["_T_", "TGT", "SSS"],
+    key: { T: "redstone_torch", G: "glass", S: "stone" },
+    inputs: [{ itemId: "redstone_torch", count: 3 }, { itemId: "glass", count: 1 }, { itemId: "stone", count: 3 }],
+    output: { itemId: "comparator", count: 1 },
+    requiresWorkbench: true,
   },
 ];
 

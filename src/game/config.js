@@ -131,6 +131,20 @@ const DEFAULT_GAME_CONFIG = {
       { id: 93, name: "Redstone Lamp", color: 0x82603a },
       { id: 94, name: "Redstone Lamp (lit)", color: 0xf8c86e, emissive: 0x7a4a10, emissiveIntensity: 0.5 },
       { id: 95, name: "Redstone Block", color: 0xb01c18 },
+      // Wave R2 — repeaters (96-127: facing/delay/powered in the id) and comparators
+      // (128-143: facing/mode/powered). Names carry the decoded state for debugging.
+      ...Array.from({ length: 32 }, (_, i) => ({
+        id: 96 + i,
+        name: `Repeater ${"NESW"[i & 3]} d${(((i >> 2) & 3) + 1)}${i >= 16 ? " (on)" : ""}`,
+        color: 0xb8b8c0,
+        transparent: true,
+      })),
+      ...Array.from({ length: 16 }, (_, i) => ({
+        id: 128 + i,
+        name: `Comparator ${"NESW"[i & 3]} ${((i >> 2) & 1) ? "sub" : "cmp"}${i >= 8 ? " (on)" : ""}`,
+        color: 0xb0b0bc,
+        transparent: true,
+      })),
     ],
     generation: {
       seed: 1337,

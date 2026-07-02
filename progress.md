@@ -950,3 +950,38 @@ persist as ordinary block edits; save stays v11):
   screenshots of hotbar icons + name popup, inventory icons, pause menu, settings panel
   (live FOV/render-distance change + localStorage persistence), death screen; respawn
   round-trip. All art remains original procedural pixel painting.
+
+## Wave R2 — repeaters + comparators (ids 96-143, same id-encoded-state discipline)
+- REPEATER (96-127): 96 + (powered?16:0) + delayIdx*4 + facing. Reads the cell BEHIND
+  (directional!), outputs a FRESH 15 to the cell in front after (delayIdx+1) x 100ms.
+  Right-click cycles delay 1-4 ticks. Signal refresh verified: an 11-strength decayed
+  line re-emerges at 15 past the repeater. Repeater id flips change no lighting ->
+  retexture-only remesh -> repeater-based clocks are the CHEAP sanctioned clock (torch +
+  4-tick repeater loop verified oscillating 8 transitions/4s with NO torch burnout).
+- COMPARATOR (128-143): 128 + (powered?8:0) + mode*4 + facing. ANALOG: rear vs max(side
+  inputs); compare mode passes rear when rear >= side, subtract outputs rear - side. The
+  output strength (not just on/off) feeds the wire BFS via a new _componentOutput map —
+  verified a 14-strength rear passes through as exactly 14 on the far wire. 100ms delay.
+  Right-click toggles mode.
+- Geometry communicates direction with ZERO new mesher risk: class-5 partial path emits
+  a 0.125 base plate + small nub boxes whose POSITIONS encode facing/delay/mode (emitBox
+  gained an optional per-box tile override for the red nub tiles). Placement takes facing
+  from camera yaw (output faces away, stairs convention). Recipes: repeater (2 torches +
+  dust on stone), comparator (3 torches + glass on stone). Items drop from all 48 state
+  ids via the R1 loop pattern. seedFromWorldEdits range widened to 143 (load-time settle).
+- New sim internals (redstone.js): _componentOutputInto (directional output check),
+  _readSignalAt (analog input read: wire level / sources / component outputs),
+  _wireSourcePower + _isCellPowered now accept component outputs, _repeaterTimers /
+  _comparatorTimers processed sorted like torch flips; strength-only comparator changes
+  re-dirty downstream without a world.set. Debug hooks: placeRedstone gains
+  repeater/comparator kinds + facing, cycleRepeaterAt, toggleComparatorModeAt, setLook
+  (camera framing for visual tests). Text-state: repeatersNearby/comparatorsNearby +
+  pending timer counts.
+- VERIFIED: smoke suite extended to 44 checks — ALL PASS (signal refresh + recede
+  through repeater, delay cycling 2/3/4 + late arrival timing, analog compare/subtract
+  incl. equal-side cancel and side-release restore, sustainable clock, all R1 rigs
+  unregressed, zero page errors); build green; in-game screenshot shows powered/
+  unpowered repeaters + subtract-mode comparator with readable nub states.
+- KNOWN (deferred): no repeater locking (side-input latch); comparators don't read
+  container fullness yet (needs hoppers wave); side inputs accept any signal source
+  (MC restricts to wire/repeaters/redstone blocks); components remain floor-mounted.
