@@ -37,6 +37,8 @@ Open `http://localhost:5173`, click **Start**, then click the canvas to lock the
 
 **Building & crafting** — Full block palette (cobblestone, glass, sand/gravel with gravity, planks, ores, …), 3×3 shaped + shapeless crafting, smelting furnaces, and 27-slot chests.
 
+**Redstone** — Redstone dust places wire that carries a 0–15 signal (with per-step decay and step-up/down connections), powered by levers, momentary stone buttons (~1 s), pressure plates (player + mobs), redstone torches (signal inverters with a 100 ms flip delay — torch clocks oscillate) and redstone blocks. Powered wire lights redstone lamps (real baked blocklight) and opens doors/trapdoors. Components pop off when their supporting block is broken; circuits persist in saves.
+
 **Mobs** — Passive cows/pigs/sheep/chickens (meat, leather, wool, feathers) and hostile zombies (daylight burn), skeletons (arrows), creepers (explode + crater terrain) and spiders, with night spawning and drops.
 
 **Feel & graphics** — Mouse-look first-person with a held-item viewmodel that swings on use, weighty combat with knockback, procedural break/place/footstep/hurt/ambient audio, animated water, biome weather (rain/snow), wind-swaying grass and leaves, and a post-processing pipeline (ACES tone mapping, bloom on emissives, FXAA).

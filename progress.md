@@ -854,3 +854,58 @@ dirt (muted clumpy brown + sparse pebbles, grass_side dirt band realigned to mat
 seams — the big win; the prior sine-grid read as static). VERIFIED: atlas rendered at 18x
 before/after; full-page UI screenshots of menu/HUD/inventory/crafting; vite build clean (36
 modules); no console/page errors in headless run.
+
+# === REDSTONE PHASE (2026-07-01, branch claude/exocraft-minecraft-reimplementation-rpqroe) ===
+
+## Wave R1 — redstone core: wire + lever + button + plate + torch + lamp + redstone block
+Block ids 83-95 (state encoded in ids, the door pattern — NO save-schema change; circuits
+persist as ordinary block edits; save stays v11):
+- 83/84 wire off/on: redstone dust item places it; carries 0-15 signal, −1 per step, connects
+  cardinally + one-step up/down (diagonals cut by a solid corner block). Rendered as a flat
+  alpha-cutout floor quad in the EXISTING flora buffer (sway 0, own-voxel light).
+- 85/86 lever, 87/88 stone button (~1s auto-release), 89/90 pressure plate (entity feet:
+  player + all mobs, O(entities)/tick diff), 91/92 redstone torch (INVERTER: powers adjacent
+  wire + the block above; turns off when its support is powered, on a 100ms delay — torch
+  clocks genuinely oscillate; BLOCK_LIGHT_EMIT 7), 93/94 lamp (lit emits blocklight 15 through
+  the normal relight path), 95 redstone block (always-on source). Torch+lever = cross-quads
+  (flora buffer, sway 0); button/plate = small boxes on the F4 class-5 partial path; lamp +
+  redstone block = plain opaque cubes. NO shader/GLSL or opaque-emitter changes.
+- New src/game/redstone.js (RedstoneSim, fluidSim discipline): transient-only state (wire
+  power Map, button/torch timers, pressed-plate Set, powered door/trapdoor edge Sets),
+  change-driven bounded evaluation (MAX_NETWORK_CELLS 2048, 8 passes/tick, sorted iteration =
+  deterministic), consumers: lamp follows power, doors/trapdoors on power EDGES (manual use
+  still works). Components pop + drop when support breaks (incl. under falling sand/gravel).
+  TORCH BURNOUT (MC-accurate + the perf bound): >8 flips in 1.6s forces the torch off until a
+  real neighbour change — a torch clock costs a short burst, not a permanent 10Hz
+  9-chunk-relight load. Recipes: lever, button, plate, redstone torch, lamp (4 dust + glass),
+  redstone block (9 dust ⇄ back). placeBlock: right-click toggles lever / presses button
+  (after door/trapdoor precedence); floor components require a solid cube below.
+- 3 adversarial reviewers (logic / mesher+blank-world / perf+save). 5 must-fixes found, ALL
+  fixed + regression-tested: step-diagonal network gather (wire staircase break left far side
+  powered), door upper-half powering was dead code (down-diagonal never scanned — re-anchored
+  on the lower half), falling sand bypassed the sim (floating lit torch), load-settle rebuilt
+  chunks OUTSIDE the active ring (undisposed ghost meshes — active-ring guard), torch-clock
+  remesh load (burnout). Plus: stale powered-door keys cleaned (phantom falling edge), plate
+  visual flip no longer eaten by tick's drain, torch-on-redstone-block turns off, idle path
+  allocation-free (pooled pressing scratch + size guards), pop drops resolved via survival's
+  BLOCK_DROPS (no duplicate table).
+- VERIFIED: scripts/redstone_smoke.mjs (in-repo, deterministic via advanceTime + debug hooks:
+  placeRedstone/toggleLeverAt/pressButtonAt/getRedstoneAt/stepRedstoneSim) — 28/28 PASS:
+  wire decay 15→11 over 4 steps, recede on lever-off, button press+auto-release, torch
+  invert + relight, staircase cut depowers far side, door opens from UPPER-half power and
+  closes on falling edge, clock oscillates then burns out (sim fully quiet after), sand-pop,
+  plate press/release via teleport, zero page errors, world renders (screenshot).
+- KNOWN (documented, deferred): no strong/weak block powering (any adjacent powered wire
+  powers a block); wall-mounted buttons/levers/torches not yet (floor only); wire has no
+  connection-aware texture orientation; >2048-cell single networks recompute only the
+  gathered region; OLD builds load new saves with ids 83-95 normalized to AIR (lossy on
+  old-build re-save — no crash). Next candidates: repeaters + comparators, pistons, hoppers.
+- PRE-EXISTING engine limitation surfaced by the new getLightAt instrumentation (NOT a
+  redstone regression — plain torch id 8 reproduces it): removing a light emitter within
+  ~its emit range of a chunk seam leaves GHOST BLOCKLIGHT (measured: torch removed at
+  x%16==15 leaves block=11; mid-chunk removal is clean 0). Cause: the emitter's chunk
+  relights while the neighbour still holds the old light in its persisted buffers, and
+  cross-seam boundary seeding re-imports it; one relight round per edit can't converge.
+  Fix belongs to a lighting wave (relight-to-fixpoint over the affected 3x3, or a proper
+  light-removal BFS). The smoke test pins its lamp rig to chunk-interior cells so the
+  blocklight assertions stay deterministic.

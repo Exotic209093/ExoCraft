@@ -130,6 +130,10 @@ export const PASSABLE_BLOCKS = new Set([
   // Wave G2b — open doors + open trapdoors are walk-through. Closed doors collide as full
   // cubes (not listed); closed trapdoors are thin floors via getBlockTopY (also not listed).
   ...DOOR_OPEN_IDS, ...TRAPDOOR_OPEN_IDS,
+  // Wave R1 — redstone components are walk-through (wire/lever/button/plate/torch).
+  // Pressure plates detect the player's feet cell in updateSimulation instead of colliding.
+  // Lamp (93/94) and redstone block (95) are solid cubes (not listed).
+  83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
 ]);
 
 function isPassable(blockType) {

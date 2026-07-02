@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -141,6 +141,9 @@ const BLOCK_LIGHT_EMIT = {
   8:  14, // torch
   9:   3, // copper ore
   21: 15, // lava — max blocklight (Wave 8)
+  // Wave R1 — redstone torch (lit) is a weak light; lit redstone lamp is a full light.
+  91: 7,
+  94: 15,
 };
 
 // Block types that allow light (sky + block) to propagate through them.
@@ -155,6 +158,10 @@ const LIGHT_PASSABLE = new Set([
   47, 48, 49, 50,
   // Wave G2a — glass pane (53) + ladders (54-57): thin, pass light (fence 52 blocks like wood)
   53, 54, 55, 56, 57,
+  // Wave R1 — redstone components (wire/lever/button/plate/torch): thin or cross-quad
+  // geometry, light passes through and their own voxel holds the light they're lit by.
+  // Lamp (93/94) and redstone block (95) are opaque cubes and stay light-blocking.
+  83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2188,6 +2195,57 @@ export class VoxelWorld {
             }
             floraIdx.push(lbase, lbase + 1, lbase + 2, lbase + 1, lbase + 3, lbase + 2);
             continue;
+          } else if (REDSTONE_WIRE_IDS.has(blockType)) {
+            // --- Wave R1: redstone wire — a single flat alpha-cutout quad lying on the
+            // floor, emitted into the flora buffer (DoubleSide, no wind sway). Light is
+            // sampled from the wire's own voxel (wire ids are LIGHT_PASSABLE). ---
+            const wSky = skylight[lIndex(lx, y, lz)];
+            const wBlk = blocklight[lIndex(lx, y, lz)];
+            const wr = wSky / 15.0, wg = wBlk / 15.0;
+            const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, FACE_PY);
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const yq = y0 + 0.03; // float just above the floor to avoid z-fighting
+            const wverts = [[x0, yq, z0 + 1], [x0 + 1, yq, z0 + 1], [x0, yq, z0], [x0 + 1, yq, z0]];
+            const wbase = floraPos.length / 3;
+            for (let v = 0; v < 4; v += 1) {
+              floraPos.push(...wverts[v]);
+              floraNorm.push(0, 1, 0);
+              const [ut, vt] = FACE_UV_INDICES[v];
+              floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+              floraCol.push(wr, wg, 1.0);
+              floraTint.push(1.0, 1.0, 1.0);
+              floraSway.push(0.0); // wire never waves
+            }
+            floraIdx.push(wbase, wbase + 1, wbase + 2, wbase + 1, wbase + 3, wbase + 2);
+            continue;
+          } else if (REDSTONE_CROSS_IDS.has(blockType)) {
+            // --- Wave R1: lever + redstone torch — two crossed alpha-cutout quads
+            // (flora-style X) with no wind sway; light from the component's own voxel. ---
+            const cSky = skylight[lIndex(lx, y, lz)];
+            const cBlk = blocklight[lIndex(lx, y, lz)];
+            const cr = cSky / 15.0, cg = cBlk / 15.0;
+            const { uMin, uMax, vMin, vMax } = getFaceUvRect(blockType, FACE_PY);
+            const x0 = worldX, y0 = y, z0 = worldZ;
+            const inset = 0.15, hgt = 0.75;
+            const diag = [
+              [x0 + inset, z0 + inset, x0 + 1 - inset, z0 + 1 - inset],
+              [x0 + 1 - inset, z0 + inset, x0 + inset, z0 + 1 - inset],
+            ];
+            for (const [ax, az, bx, bz] of diag) {
+              const qverts = [[ax, y, az], [bx, y, bz], [ax, y + hgt, az], [bx, y + hgt, bz]];
+              const qbase = floraPos.length / 3;
+              for (let v = 0; v < 4; v += 1) {
+                floraPos.push(...qverts[v]);
+                floraNorm.push(0, 0, 1);
+                const [ut, vt] = FACE_UV_INDICES[v];
+                floraUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
+                floraCol.push(cr, cg, 1.0);
+                floraTint.push(1.0, 1.0, 1.0);
+                floraSway.push(0.0); // levers/torches never wave
+              }
+              floraIdx.push(qbase, qbase + 1, qbase + 2, qbase + 1, qbase + 3, qbase + 2);
+            }
+            continue;
           } else if (PANE_BLOCK_IDS.has(blockType)) {
             // --- Wave G2a: glass pane — central post + arms to connected cardinal
             // neighbours (solid OR pane/glass), emitted into the glass buffer. ---
@@ -2317,6 +2375,15 @@ export class VoxelWorld {
             if (SLAB_BLOCK_IDS.has(blockType)) {
               // Slab: full-footprint bottom half (y0..y0+0.5).
               emitBox(x0, y0, z0, 1.0, 0.5, 1.0, blockType);
+            } else if (BUTTON_IDS.has(blockType)) {
+              // Wave R1 — stone button: a small nub on the floor; pressed sits flatter.
+              const bh = blockType === BUTTON_PRESSED ? 0.0625 : 0.125;
+              emitBox(x0 + 0.3125, y0, z0 + 0.25, 0.375, bh, 0.5, blockType);
+            } else if (PLATE_IDS.has(blockType)) {
+              // Wave R1 — pressure plate: a thin plate inset from the cell edges;
+              // the pressed state sinks visibly.
+              const ph = blockType === PLATE_ON ? 0.03 : 0.0625;
+              emitBox(x0 + 0.0625, y0, z0 + 0.0625, 0.875, ph, 0.875, blockType);
             } else if (FENCE_BLOCK_IDS.has(blockType)) {
               // Wave G2a — fence: a central post + 2 rails toward each connected cardinal
               // neighbour (another fence or any solid-opaque block).

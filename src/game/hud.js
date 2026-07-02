@@ -670,9 +670,10 @@ export function updateF3Overlay({ state, world, fps, chunkSize = 16, biome = nul
       skyLight = 0;
     }
   }
-  // Block light: 15 when eye voxel is a torch/light-emitting block, 0 otherwise.
-  // Block id 8 = torch in the default palette (BLOCK_LIGHT_EMIT in world.js).
-  const blockLight = (eyeBlock === 8) ? 15 : 0;
+  // Block light: emission level when the eye voxel is a light-emitting block,
+  // 0 otherwise. Mirrors BLOCK_LIGHT_EMIT in world.js (torch 8, redstone torch 91,
+  // lit redstone lamp 94; copper ore/lava omitted — the eye is never inside them).
+  const blockLight = (eyeBlock === 8) ? 15 : (eyeBlock === 91) ? 7 : (eyeBlock === 94) ? 15 : 0;
 
   const fpsRounded = Math.round(fps);
   const sig = `${px.toFixed(1)}|${py.toFixed(1)}|${pz.toFixed(1)}|${facing}|${tbStr}|${fpsRounded}|${loadedChunks}|${tod}`;

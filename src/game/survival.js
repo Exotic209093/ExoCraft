@@ -286,7 +286,20 @@ export const ITEM_DEFS = {
   diamond_axe:     { id: "diamond_axe",     name: "Diamond Axe",     toolKind: "axe",     toolPower: 9.2 },
   diamond_shovel:  { id: "diamond_shovel",  name: "Diamond Shovel",  toolKind: "shovel",  toolPower: 9.2 },
   diamond_sword:   { id: "diamond_sword",   name: "Diamond Sword",   mobDamage: 14 },
+  // Wave R1 — redstone components. Redstone dust (above) doubles as the wire item:
+  // placeBlockType on `redstone` is added here (wire off id 83). State-variant ids all
+  // drop back to the single base item (see the R1 loop after BLOCK_PREFERRED_TOOL).
+  lever:          { id: "lever",          name: "Lever",          placeBlockType: 85 },
+  stone_button:   { id: "stone_button",   name: "Stone Button",   placeBlockType: 87 },
+  pressure_plate: { id: "pressure_plate", name: "Pressure Plate", placeBlockType: 89 },
+  redstone_torch: { id: "redstone_torch", name: "Redstone Torch", placeBlockType: 91 },
+  redstone_lamp:  { id: "redstone_lamp",  name: "Redstone Lamp",  placeBlockType: 93 },
+  redstone_block: { id: "redstone_block", name: "Redstone Block", placeBlockType: 95 },
 };
+
+// Wave R1 — redstone dust places wire (assigned outside the literal so the wire id is
+// documented next to the other redstone entries without reshuffling the older item).
+ITEM_DEFS.redstone.placeBlockType = 83;
 
 export const BLOCK_DROPS = {
   1: "grass",
@@ -485,6 +498,25 @@ const BLOCK_PREFERRED_TOOL = {
 // are oak (axe-preferred, plank-soft). Populated via loops to avoid 24 literal lines.
 for (let i = 58; i <= 73; i += 1) { BLOCK_DROPS[i] = "door"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
 for (let i = 74; i <= 81; i += 1) { BLOCK_DROPS[i] = "trapdoor"; BLOCK_HARDNESS[i] = 1.5; BLOCK_PREFERRED_TOOL[i] = "axe"; }
+
+// Wave R1 — redstone components: every state-variant id drops the one base item.
+// Wire (83/84) and torches (91/92) break instantly like flora; stone-ish components
+// break fast; the redstone block is a real pickaxe block.
+for (const [ids, itemId, hardness, tool] of [
+  [[83, 84], "redstone", 0.05, null],
+  [[85, 86], "lever", 0.5, null],
+  [[87, 88], "stone_button", 0.5, "pickaxe"],
+  [[89, 90], "pressure_plate", 0.5, "pickaxe"],
+  [[91, 92], "redstone_torch", 0.05, null],
+  [[93, 94], "redstone_lamp", 0.6, null],
+  [[95], "redstone_block", 3.0, "pickaxe"],
+]) {
+  for (const id of ids) {
+    BLOCK_DROPS[id] = itemId;
+    BLOCK_HARDNESS[id] = hardness;
+    if (tool) BLOCK_PREFERRED_TOOL[id] = tool;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Recipe matching helpers — shared by the crafting grid and applyRecipe.
@@ -1272,6 +1304,66 @@ export const RECIPES = [
     name: "Wool Block",
     inputs: [{ itemId: "wool", count: 4 }],
     output: { itemId: "wool_block", count: 1 },
+    requiresWorkbench: false,
+  },
+  // Wave R1 — redstone components.
+  {
+    id: "lever",
+    name: "Lever",
+    pattern: ["_S_", "_C_", "___"],
+    key: { S: "stick", C: "cobblestone" },
+    inputs: [{ itemId: "stick", count: 1 }, { itemId: "cobblestone", count: 1 }],
+    output: { itemId: "lever", count: 1 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "stone_button",
+    name: "Stone Button",
+    inputs: [{ itemId: "stone", count: 1 }],
+    output: { itemId: "stone_button", count: 1 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "pressure_plate",
+    name: "Pressure Plate",
+    pattern: ["___", "SS_", "___"],
+    key: { S: "stone" },
+    inputs: [{ itemId: "stone", count: 2 }],
+    output: { itemId: "pressure_plate", count: 1 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "redstone_torch",
+    name: "Redstone Torch",
+    pattern: ["_R_", "_S_", "___"],
+    key: { R: "redstone", S: "stick" },
+    inputs: [{ itemId: "redstone", count: 1 }, { itemId: "stick", count: 1 }],
+    output: { itemId: "redstone_torch", count: 1 },
+    requiresWorkbench: false,
+  },
+  {
+    id: "redstone_lamp",
+    name: "Redstone Lamp",
+    pattern: ["_R_", "RGR", "_R_"],
+    key: { R: "redstone", G: "glass" },
+    inputs: [{ itemId: "redstone", count: 4 }, { itemId: "glass", count: 1 }],
+    output: { itemId: "redstone_lamp", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "redstone_block",
+    name: "Redstone Block",
+    pattern: ["RRR", "RRR", "RRR"],
+    key: { R: "redstone" },
+    inputs: [{ itemId: "redstone", count: 9 }],
+    output: { itemId: "redstone_block", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "redstone_from_block",
+    name: "Redstone Dust x9",
+    inputs: [{ itemId: "redstone_block", count: 1 }],
+    output: { itemId: "redstone", count: 9 },
     requiresWorkbench: false,
   },
 ];
