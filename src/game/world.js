@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS, PISTON_HEAD_IDS, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -164,6 +164,8 @@ const LIGHT_PASSABLE = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
   // Wave R2 — repeaters (96-127) + comparators (128-143): thin plates, light passes.
   ...Array.from({ length: 48 }, (_, i) => 96 + i),
+  // Wave R3 — piston heads (168-179): plate + arm, light passes (bases are opaque).
+  ...Array.from({ length: 12 }, (_, i) => 168 + i),
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2290,8 +2292,12 @@ export class VoxelWorld {
           } else if (PARTIAL_BLOCK_IDS.has(blockType)) {
             // --- Wave F4: partial-geometry emitter (slabs and stairs) ---
             // Sample light from the voxel above (open sky side), same pattern as flora.
+            // Wave R3 must-fix: piston heads sample their OWN voxel instead — a
+            // down-facing head always has its opaque base above (light 0/0) and
+            // would render pitch black; heads are LIGHT_PASSABLE so their own
+            // cell carries valid light.
             const aboveX = worldX;
-            const aboveY = y + 1;
+            const aboveY = PISTON_HEAD_IDS.has(blockType) ? y : y + 1;
             const aboveZ = worldZ;
             const aLX = aboveX - baseX;
             const aLZ = aboveZ - baseZ;
@@ -2389,6 +2395,32 @@ export class VoxelWorld {
               // the pressed state sinks visibly.
               const ph = blockType === PLATE_ON ? 0.03 : 0.0625;
               emitBox(x0 + 0.0625, y0, z0 + 0.0625, 0.875, ph, 0.875, blockType);
+            } else if (PISTON_HEAD_IDS.has(blockType)) {
+              // Wave R3 — piston head: a 0.25-thick push plate flush with the
+              // OUTER face (the pushing side) plus a slim arm reaching back to
+              // the base cell. Axis-generic via the facing direction vector.
+              const [hdx, hdy, hdz] = PISTON_FACING_DIRS[pistonHeadFacing(blockType)];
+              const P = 0.25;   // plate thickness
+              const A = 0.25;   // arm cross-section
+              // Plate: full cross-section slab at the far (facing) side of the cell.
+              const plateMin = [
+                x0 + (hdx > 0 ? 1 - P : 0), y0 + (hdy > 0 ? 1 - P : 0), z0 + (hdz > 0 ? 1 - P : 0),
+              ];
+              const plateSize = [
+                hdx !== 0 ? P : 1, hdy !== 0 ? P : 1, hdz !== 0 ? P : 1,
+              ];
+              emitBox(plateMin[0], plateMin[1], plateMin[2], plateSize[0], plateSize[1], plateSize[2], blockType);
+              // Arm: centered bar from the plate's inner face back to the near face.
+              const armLen = 1 - P;
+              const armMin = [
+                x0 + (hdx !== 0 ? (hdx > 0 ? 0 : P) : 0.5 - A / 2),
+                y0 + (hdy !== 0 ? (hdy > 0 ? 0 : P) : 0.5 - A / 2),
+                z0 + (hdz !== 0 ? (hdz > 0 ? 0 : P) : 0.5 - A / 2),
+              ];
+              const armSize = [
+                hdx !== 0 ? armLen : A, hdy !== 0 ? armLen : A, hdz !== 0 ? armLen : A,
+              ];
+              emitBox(armMin[0], armMin[1], armMin[2], armSize[0], armSize[1], armSize[2], blockType, "piston_side");
             } else if (REPEATER_IDS.has(blockType) || COMPARATOR_IDS.has(blockType)) {
               // Wave R2 — repeater/comparator: a thin base plate plus small "nub"
               // boxes whose POSITIONS encode facing, delay and mode, so direction

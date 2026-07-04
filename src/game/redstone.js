@@ -41,9 +41,20 @@ import {
   REPEATER_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, makeRepeaterId,
   COMPARATOR_IDS, comparatorFacing, comparatorMode, comparatorIsPowered, makeComparatorId,
   REDSTONE_FACING_DIRS,
+  // Wave R3 — pistons
+  PISTON_BASE_IDS, PISTON_HEAD_IDS, pistonFacing, pistonIsExtended, pistonIsSticky,
+  makePistonId, makePistonHeadId, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS,
+  FLORA_BLOCK_IDS,
 } from "./textures";
 
 const MAX_POWER = 15;
+// Wave R3 — pistons push at most this many contiguous blocks (Minecraft's limit).
+const PISTON_PUSH_LIMIT = 12;
+// Blocks a piston can never move: containers with per-position state maps
+// (furnace 7, chest 22), bedrock 13, and other pistons/heads (avoids desyncing
+// pending piston timers keyed by position). Everything else needs to be a plain
+// full cube (transparency class 0) or glass (14) to be pushable.
+const PISTON_IMMOVABLE = new Set([7, 13, 22]);
 // Bounded work per evaluation so a pathological wire field can't stall a frame.
 // Known limit: a single connected network larger than this recomputes only the
 // gathered region; wire fed solely from beyond the frontier can read stale.
@@ -58,6 +69,12 @@ const BUTTON_RELEASE_MS = 1000;
 // and it stays off until a real neighbour change re-evaluates it.
 const TORCH_BURNOUT_FLIPS = 8;
 const TORCH_BURNOUT_WINDOW_MS = 1600;
+// Wave R3 — the same guard for pistons: a sticky piston facing a redstone block
+// self-oscillates at 10 Hz forever (each transition moves an opaque block =
+// 9-column relight; measured 15-33x frame cost). After the limit the piston
+// freezes in place until a real neighbour change re-evaluates it.
+const PISTON_BURNOUT_FLIPS = 6;
+const PISTON_BURNOUT_WINDOW_MS = 2000;
 
 const EMPTY_CELLS = [];
 
@@ -107,6 +124,12 @@ export class RedstoneSim {
     this._componentOutput = new Map();  // cell key -> 0..15
     this._repeaterTimers = new Map();   // cell key -> { due, target: bool }
     this._comparatorTimers = new Map(); // cell key -> { due, powered: bool, strength }
+    // Wave R3 — piston timers: { due, extend: bool } keyed by the base cell.
+    this._pistonTimers = new Map();
+    this._pistonFlipHistory = new Map(); // cell key -> { windowStart, count } (burnout)
+    // Optional callback: (movedCells: [{x,y,z}], dir: [dx,dy,dz]) after an extension
+    // moves blocks — main.js displaces overlapping entities + flags falling blocks.
+    this.onPistonMoved = null;
     this._changedCells = [];          // cells world.set since the last drain
   }
 
@@ -123,6 +146,8 @@ export class RedstoneSim {
     this._componentOutput.clear();
     this._repeaterTimers.clear();
     this._comparatorTimers.clear();
+    this._pistonTimers.clear();
+    this._pistonFlipHistory.clear();
     this._changedCells.length = 0;
   }
 
@@ -140,7 +165,7 @@ export class RedstoneSim {
     if (!Array.isArray(edits)) return;
     for (const e of edits) {
       const id = e?.type;
-      if (!Number.isFinite(id) || id < 83 || id > 143) continue;
+      if (!Number.isFinite(id) || id < 83 || id > 179) continue;
       const key = cellKey(e.x, e.y, e.z);
       this._dirty.add(key);
       // Stale pressed buttons from an old save get a release timer.
@@ -258,6 +283,34 @@ export class RedstoneSim {
       }
     }
 
+    // Wave R3 — piston extend/retract (1 tick delay; moves blocks).
+    if (this._pistonTimers.size > 0) {
+      for (const key of [...this._pistonTimers.keys()].sort()) {
+        const timer = this._pistonTimers.get(key);
+        if (timer.due > this._accumMs) continue;
+        this._pistonTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!PISTON_BASE_IDS.has(id)) continue;
+        const wouldTransition = timer.extend !== pistonIsExtended(id);
+        if (wouldTransition) {
+          // Burnout: an unattended oscillator (e.g. sticky piston + redstone
+          // block) must not run at 10 Hz forever. Over the limit -> freeze; a
+          // skipped fire changes nothing, so no new dirty is seeded and the
+          // contraption stays quiet until a real neighbour change re-kicks it.
+          let hist = this._pistonFlipHistory.get(key);
+          if (!hist || this._accumMs - hist.windowStart > PISTON_BURNOUT_WINDOW_MS) {
+            hist = { windowStart: this._accumMs, count: 0 };
+            this._pistonFlipHistory.set(key, hist);
+          }
+          hist.count += 1;
+          if (hist.count >= PISTON_BURNOUT_FLIPS) continue;
+        }
+        if (timer.extend && !pistonIsExtended(id)) this._pistonExtend(x, y, z, id);
+        else if (!timer.extend && pistonIsExtended(id)) this._pistonRetract(x, y, z, id);
+      }
+    }
+
     // Wave R2 — comparator updates (1 tick delay; analog strength output).
     if (this._comparatorTimers.size > 0) {
       for (const key of [...this._comparatorTimers.keys()].sort()) {
@@ -311,6 +364,7 @@ export class RedstoneSim {
       pendingTorchFlips: this._torchTimers.size,
       pendingRepeaters: this._repeaterTimers.size,
       pendingComparators: this._comparatorTimers.size,
+      pendingPistons: this._pistonTimers.size,
       dirtyCells: this._dirty.size,
     };
   }
@@ -426,6 +480,97 @@ export class RedstoneSim {
       if (dy === 0 && this._componentOutputInto(nx, ny, nz, x, y, z) > 0) return true;
     }
     return false;
+  }
+
+  // -------------------------------------------------------------------------
+  // Wave R3 — piston mechanics
+  // -------------------------------------------------------------------------
+
+  /** Can a piston move this block id (as part of a push, or a sticky pull)? */
+  _isPushable(id) {
+    if (id === 0) return false;
+    if (PISTON_IMMOVABLE.has(id)) return false;
+    if (PISTON_BASE_IDS.has(id) || PISTON_HEAD_IDS.has(id)) return false;
+    if (id === 14) return true; // glass pushes fine
+    return (BLOCK_TRANSPARENCY_CLASS[id] || 0) === 0; // plain full cubes
+  }
+
+  /**
+   * Extend: collect up to PISTON_PUSH_LIMIT contiguous pushable blocks in front,
+   * shift them one cell forward (far to near), place the head, mark the base
+   * extended. Attached redstone components in the path pop as drops; a fluid or
+   * air cell terminates the row and is overwritten. Fails (no-op) on immovable
+   * blocks, over-limit rows, or world bounds.
+   */
+  _pistonExtend(x, y, z, id) {
+    const facing = pistonFacing(id);
+    const [dx, dy, dz] = PISTON_FACING_DIRS[facing];
+    const row = []; // {x,y,z,id} contiguous pushable blocks, near -> far
+    let cx = x + dx, cy = y + dy, cz = z + dz;
+    for (; ;) {
+      if (!this.world.inBounds(cx, cy, cz)) return; // fail: nowhere to push into
+      const b = this.world.get(cx, cy, cz);
+      if (b === 0 || b === 15 || b === 21) break; // air/fluid: row ends, cell is consumed
+      if (REDSTONE_ATTACHED_IDS.has(b) || FLORA_BLOCK_IDS.has(b)) {
+        // Thin components AND flora pop off (as drops); the push consumes their
+        // cell. Without the flora case, a stray tall-grass silently bricks the
+        // piston with no visible reason.
+        this._setBlock(cx, cy, cz, 0);
+        this._wirePower.delete(cellKey(cx, cy, cz));
+        if (this.onComponentPopped) this.onComponentPopped(b, cx, cy, cz);
+        break;
+      }
+      if (!this._isPushable(b)) return; // fail: immovable in the way
+      row.push({ x: cx, y: cy, z: cz, id: b });
+      if (row.length > PISTON_PUSH_LIMIT) return; // fail: too heavy
+      cx += dx; cy += dy; cz += dz;
+    }
+    // Move far -> near so nothing overwrites a block that still has to move.
+    const moved = [];
+    for (let i = row.length - 1; i >= 0; i -= 1) {
+      const cell = row[i];
+      this._setBlock(cell.x + dx, cell.y + dy, cell.z + dz, cell.id);
+      moved.push({ x: cell.x + dx, y: cell.y + dy, z: cell.z + dz });
+    }
+    // Head occupies the first cell in front; base flips to its extended id.
+    // The head cell counts as a moved-into cell too (must-fix: an entity standing
+    // in front of a bare piston has to be displaced, not entombed in the head).
+    this._setBlock(x + dx, y + dy, z + dz, makePistonHeadId(facing, pistonIsSticky(id)));
+    moved.push({ x: x + dx, y: y + dy, z: z + dz });
+    this._setBlock(x, y, z, makePistonId(facing, pistonIsSticky(id), true));
+    if (this.onPistonMoved) {
+      this.onPistonMoved(moved, [dx, dy, dz]);
+    }
+  }
+
+  /**
+   * Retract: clear the head cell; a sticky piston additionally pulls the single
+   * pushable block behind the head into the head's old cell.
+   */
+  _pistonRetract(x, y, z, id) {
+    const facing = pistonFacing(id);
+    const [dx, dy, dz] = PISTON_FACING_DIRS[facing];
+    const hx = x + dx, hy = y + dy, hz = z + dz;
+    const headId = this.world.get(hx, hy, hz);
+    // Ownership check: only clear a head that matches this base's facing and
+    // stickiness — after an explosion severs a pair, a stale extended base must
+    // not delete a NEIGHBOURING piston's head (cross-piston corruption).
+    const ownsHead = PISTON_HEAD_IDS.has(headId)
+      && pistonHeadFacing(headId) === facing
+      && pistonHeadIsSticky(headId) === pistonIsSticky(id);
+    if (ownsHead) {
+      this._setBlock(hx, hy, hz, 0);
+      if (pistonIsSticky(id)) {
+        const px = hx + dx, py = hy + dy, pz = hz + dz;
+        const pulled = this.world.inBounds(px, py, pz) ? this.world.get(px, py, pz) : 0;
+        if (this._isPushable(pulled)) {
+          this._setBlock(hx, hy, hz, pulled);
+          this._setBlock(px, py, pz, 0);
+          if (this.onPistonMoved) this.onPistonMoved([{ x: hx, y: hy, z: hz }], [-dx, -dy, -dz]);
+        }
+      }
+    }
+    this._setBlock(x, y, z, makePistonId(facing, pistonIsSticky(id), false));
   }
 
   _evaluate() {
@@ -594,6 +739,18 @@ export class RedstoneSim {
             }
           } else if (!pending || pending.powered !== wantPowered || pending.strength !== out) {
             this._comparatorTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, powered: wantPowered, strength: out });
+          }
+        } else if (PISTON_BASE_IDS.has(id)) {
+          // Wave R3 — piston: powered = extend, unpowered = retract, on a 1-tick
+          // delay. A blocked extension simply no-ops; it retries on the next
+          // circuit change that re-dirties this cell.
+          const want = this._isCellPowered(x, y, z, this._wirePower);
+          const current = pistonIsExtended(id);
+          const pending = this._pistonTimers.get(key);
+          if (want === current) {
+            if (pending && pending.extend !== current) this._pistonTimers.delete(key);
+          } else if (!pending || pending.extend !== want) {
+            this._pistonTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, extend: want });
           }
         } else if (DOOR_BLOCK_IDS.has(id)) {
           // Re-anchor on the LOWER half: power beside the UPPER half must also

@@ -985,3 +985,45 @@ persist as ordinary block edits; save stays v11):
 - KNOWN (deferred): no repeater locking (side-input latch); comparators don't read
   container fullness yet (needs hoppers wave); side inputs accept any signal source
   (MC restricts to wire/repeaters/redstone blocks); components remain floor-mounted.
+
+## Wave R3 — pistons (normal + sticky, ids 144-179)
+- BASE ids 144-167 (144 + sticky*12 + extended*6 + facing 0-5 NESW+up/down): plain
+  OPAQUE CUBES with per-facing GENERATED face maps (push plate on the facing side,
+  planks back, body sides) — zero opaque-mesher risk. HEAD ids 168-179: class-5
+  partial (0.25 plate flush with the outer face + centered arm, axis-generic via
+  PISTON_FACING_DIRS; arm reuses the R2 emitBox tileOverride). 3 new tiles fill the
+  atlas to exactly 64/64 — NEXT TILE WAVE MUST EXPAND THE ATLAS (path documented).
+- MECHANICS (redstone.js): powered=extend / unpowered=retract on 100ms timers; row
+  scan collects <=12 contiguous pushable blocks (class-0 cubes + glass; immovable:
+  furnace/chest/bedrock/other pistons), moves far->near; attached components AND
+  flora in the path pop as drops; fluids/air at the row end are consumed; sticky
+  retract pulls one block. Placement faces TOWARD the player (incl. up/down from
+  pitch); breaking base or head removes both, one drop; explosion cells notify the
+  sim. Entity displacement: AABB-overlap check (radius-aware, both mob body cells),
+  shove skipped when the destination is solid.
+- 3-lens adversarial review (logic/mesher/perf-save; 2 reviewers verified live with
+  Playwright rigs): 4 MUST-FIXES found, ALL fixed + regression-tested:
+  (1) SAVE CORRUPTION — pushing into FLOWING water left a stale fluidLevels entry;
+  fluidSim.restore() then clobbered the pushed block on load. Fixed 2 ways: sim
+  changed-cells now notify fluidSim.onBlockChanged, and _resolveCell heals stale
+  non-fluid entries. (2) Entity in front of a bare piston was never displaced (head
+  cell missing from onPistonMoved) -> physics popped the player UP through solid
+  ceilings (no-clip exploit); head destination now always included. (3) Down-facing
+  heads rendered pitch black (partial path sampled light from the opaque base
+  above); heads now sample their OWN cell. (4) Sticky piston + redstone block =
+  eternal 10Hz oscillator (measured 15-33x frame cost); piston burnout added (6
+  transitions/2s -> freeze until a real neighbour change), mirroring torch burnout.
+  Plus: retract head-OWNERSHIP check (facing+sticky match — a severed pair can no
+  longer delete a neighbouring piston's head).
+- VERIFIED: smoke suite 44 -> 58 checks, ALL PASS: extend/push rows, normal-vs-
+  sticky retract, 13-block over-limit refusal, chest immovable, wire pops in the
+  push path, up-facing lift, fluid-cell heal (pushed stone survives), player
+  displaced along the axis (not upward), oscillator burns out (5 transitions then
+  frozen, 0 pending). Reviewers also live-verified: save/load round-trip of an
+  extended sticky piston, pushed-sand falling, 12-ok/13-fail boundary, face-to-face
+  pistons deterministic, blocked pistons stay quiet. Build green; screenshots show
+  all facings rendering (down-head lighting fixed).
+- KNOWN (deferred): piston bases don't get pushed by other pistons (deliberate —
+  avoids timer-key desync); side texture band doesn't rotate with facing (cosmetic;
+  needs atlas expansion for rotated tiles); no slime-block chain physics; heads
+  collide as full cubes.

@@ -299,6 +299,10 @@ export const ITEM_DEFS = {
   // placement picks the facing id from camera yaw (special-cased in placeBlock).
   repeater:       { id: "repeater",       name: "Repeater",       placeBlockType: 96 },
   comparator:     { id: "comparator",     name: "Comparator",     placeBlockType: 128 },
+  // Wave R3 — pistons: base id is the N-facing retracted variant; placement picks
+  // facing (incl. up/down from pitch) so the face points TOWARD the player.
+  piston:         { id: "piston",         name: "Piston",         placeBlockType: 144 },
+  sticky_piston:  { id: "sticky_piston",  name: "Sticky Piston",  placeBlockType: 156 },
 };
 
 // Wave R1 — redstone dust places wire (assigned outside the literal so the wire id is
@@ -517,6 +521,12 @@ for (const [ids, itemId, hardness, tool] of [
   [[95], "redstone_block", 3.0, "pickaxe"],
   [Array.from({ length: 32 }, (_, i) => 96 + i), "repeater", 0.1, null],
   [Array.from({ length: 16 }, (_, i) => 128 + i), "comparator", 0.1, null],
+  // Wave R3 — piston bases drop their item; heads drop the same item (breaking
+  // either part removes both, so exactly one drops — paired in breakBlock).
+  [Array.from({ length: 12 }, (_, i) => 144 + i), "piston", 1.2, null],
+  [Array.from({ length: 12 }, (_, i) => 156 + i), "sticky_piston", 1.2, null],
+  [Array.from({ length: 6 }, (_, i) => 168 + i), "piston", 1.2, null],
+  [Array.from({ length: 6 }, (_, i) => 174 + i), "sticky_piston", 1.2, null],
 ]) {
   for (const id of ids) {
     BLOCK_DROPS[id] = itemId;
@@ -1392,6 +1402,26 @@ export const RECIPES = [
     inputs: [{ itemId: "redstone_torch", count: 3 }, { itemId: "glass", count: 1 }, { itemId: "stone", count: 3 }],
     output: { itemId: "comparator", count: 1 },
     requiresWorkbench: true,
+  },
+  // Wave R3 — piston (planks / cobble-iron-cobble / cobble-redstone-cobble) and
+  // sticky piston (piston + string as the adhesive stand-in).
+  {
+    id: "piston",
+    name: "Piston",
+    pattern: ["PPP", "CIC", "CRC"],
+    key: { P: "plank", C: "cobblestone", I: "iron_ingot", R: "redstone" },
+    inputs: [{ itemId: "plank", count: 3 }, { itemId: "cobblestone", count: 4 }, { itemId: "iron_ingot", count: 1 }, { itemId: "redstone", count: 1 }],
+    output: { itemId: "piston", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "sticky_piston",
+    name: "Sticky Piston",
+    pattern: ["_S_", "_P_", "___"],
+    key: { S: "string", P: "piston" },
+    inputs: [{ itemId: "string", count: 1 }, { itemId: "piston", count: 1 }],
+    output: { itemId: "sticky_piston", count: 1 },
+    requiresWorkbench: false,
   },
 ];
 

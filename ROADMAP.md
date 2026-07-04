@@ -38,7 +38,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 | Lamp (real baked light), redstone block | ✅ | |
 | Repeater (1–4 tick delay, signal refresh) | ✅ | No locking (side-input latch) |
 | Comparator (compare/subtract, analog) | ✅ | No container reading (needs hoppers) |
-| Pistons (+ sticky) | ⬜ | Next big machine wave — block moving |
+| Pistons (+ sticky) | ✅ | 6 facings, 12-block push, sticky pull, burnout guard; no slime-chain physics |
 | Hoppers (+ droppers/dispensers) | ⬜ | Item transport; unlocks comparator container reads |
 | Observers, note blocks, TNT-as-circuit-output | ⬜ | Later redstone polish |
 

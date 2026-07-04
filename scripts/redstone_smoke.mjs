@@ -423,6 +423,186 @@ const rigV = await page.evaluate(async ({ P }) => {
 }, { P });
 check("V1 repeater-torch clock oscillates sustainably (>=3 transitions, no burnout)", rigV.transitions >= 3, `transitions=${rigV.transitions}`);
 
+// Rig W (Wave R3): piston extend pushes a 2-block row; retract leaves it (normal).
+const rigW = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 15;
+  for (let dx = 0; dx <= 5; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, false); // facing E
+  D.setBlock(P.x + 2, y, z, 3);           // stone row
+  D.setBlock(P.x + 3, y, z, 3);
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const ext = {
+    base: D.getBlockAt(P.x + 1, y, z), head: D.getBlockAt(P.x + 2, y, z),
+    s1: D.getBlockAt(P.x + 3, y, z), s2: D.getBlockAt(P.x + 4, y, z),
+  };
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const ret = {
+    base: D.getBlockAt(P.x + 1, y, z), headCell: D.getBlockAt(P.x + 2, y, z),
+    s1: D.getBlockAt(P.x + 3, y, z),
+  };
+  return { ext, ret };
+}, { P });
+check("W1 piston extends: base id 151, head 169", rigW.ext.base.id === 151 && rigW.ext.head.id === 169, JSON.stringify(rigW.ext));
+check("W2 row pushed one cell (stones at +3,+4)", rigW.ext.s1.id === 3 && rigW.ext.s2.id === 3, JSON.stringify(rigW.ext));
+check("W3 normal retract: head gone, blocks stay", rigW.ret.base.id === 145 && rigW.ret.headCell.id === 0 && rigW.ret.s1.id === 3, JSON.stringify(rigW.ret));
+
+// Rig X (Wave R3): sticky piston pulls the block back on retract.
+const rigX = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 17;
+  for (let dx = 0; dx <= 4; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, true); // sticky, facing E
+  D.setBlock(P.x + 2, y, z, 82);         // wool block to move
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const ext = { base: D.getBlockAt(P.x + 1, y, z), head: D.getBlockAt(P.x + 2, y, z), wool: D.getBlockAt(P.x + 3, y, z) };
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const ret = { base: D.getBlockAt(P.x + 1, y, z), pulled: D.getBlockAt(P.x + 2, y, z), farCell: D.getBlockAt(P.x + 3, y, z) };
+  return { ext, ret };
+}, { P });
+check("X1 sticky extends: base 163, head 175, wool pushed", rigX.ext.base.id === 163 && rigX.ext.head.id === 175 && rigX.ext.wool.id === 82, JSON.stringify(rigX.ext));
+check("X2 sticky retract PULLS the wool back", rigX.ret.base.id === 157 && rigX.ret.pulled.id === 82 && rigX.ret.farCell.id === 0, JSON.stringify(rigX.ret));
+
+// Rig Y (Wave R3): push limit (13 blocks) and immovable (chest) both refuse.
+const rigY = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 19;
+  for (let dx = 0; dx <= 16; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, false);
+  for (let dx = 2; dx <= 14; dx++) D.setBlock(P.x + dx, y, z, 3); // 13 blocks
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const overLimit = { base: D.getBlockAt(P.x + 1, y, z), firstCell: D.getBlockAt(P.x + 2, y, z) };
+  // Clear to a single chest in front: immovable.
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  for (let dx = 2; dx <= 14; dx++) D.setBlock(P.x + dx, y, z, 0);
+  D.setBlock(P.x + 2, y, z, 22); // chest
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const blocked = { base: D.getBlockAt(P.x + 1, y, z), chest: D.getBlockAt(P.x + 2, y, z) };
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(200);
+  return { overLimit, blocked };
+}, { P });
+check("Y1 13-block row exceeds push limit (stays retracted)", rigY.overLimit.base.id === 145 && rigY.overLimit.firstCell.id === 3, JSON.stringify(rigY.overLimit));
+check("Y2 chest is immovable (stays retracted)", rigY.blocked.base.id === 145 && rigY.blocked.chest.id === 22, JSON.stringify(rigY.blocked));
+
+// Rig Z2 (Wave R3): pushing into wire pops it as a drop; vertical piston lifts a block.
+const rigZ2 = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 21;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, false);
+  D.placeRedstone("wire", P.x + 2, y, z); // component in the push path
+  const entitiesBefore = D.getItemEntities().count;
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const popped = {
+    head: D.getBlockAt(P.x + 2, y, z),
+    entities: D.getItemEntities().count - entitiesBefore,
+  };
+  // Vertical: up-facing piston lifts a wool block.
+  const vx = P.x + 6;
+  D.setBlock(vx, P.y, z, 3);
+  D.setBlock(vx + 1, P.y, z, 3);
+  D.placePiston(vx, P.y + 1, z, 4, false); // facing UP
+  D.setBlock(vx, P.y + 2, z, 82);
+  D.placeRedstone("lever", vx + 1, P.y + 1, z);
+  window.advanceTime(100);
+  D.toggleLeverAt(vx + 1, P.y + 1, z);
+  window.advanceTime(300);
+  const vertical = {
+    head: D.getBlockAt(vx, P.y + 2, z),
+    lifted: D.getBlockAt(vx, P.y + 3, z),
+  };
+  return { popped, vertical };
+}, { P });
+check("Z2a pushing pops the wire as a drop (head takes its cell)", rigZ2.popped.head.id === 169 && rigZ2.popped.entities >= 1, JSON.stringify(rigZ2.popped));
+check("Z2b up-facing piston lifts the block (head 172, wool above)", rigZ2.vertical.head.id === 172 && rigZ2.vertical.lifted.id === 82, JSON.stringify(rigZ2.vertical));
+
+// Rig AA (R3 must-fix): pushing into FLOWING water heals the fluid map entry —
+// the stale cell would otherwise clobber the pushed block on save/load.
+const rigAA = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 23;
+  for (let dx = 0; dx <= 4; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.setBlock(P.x + 4, P.y, z + 1, 3); // shelf for the water to spread onto
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, false);
+  D.setBlock(P.x + 2, y, z, 3); // stone to push
+  D.placeFluidSource(P.x + 4, y, z, "water");
+  for (let i = 0; i < 8; i++) D.stepFluidSim(1); // let it spread (flowing cell at +3)
+  const flowingBefore = D.getFluidAt(P.x + 3, y, z);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(400); // extend: stone pushed into the flowing cell
+  for (let i = 0; i < 6; i++) { D.stepFluidSim(1); window.advanceTime(100); }
+  const pushedCell = D.getBlockAt(P.x + 3, y, z);
+  const staleEntry = D.getFluidAt(P.x + 3, y, z); // null when block isn't fluid
+  return { flowingBefore, pushedCell, staleEntry, fluidCells: D.fluidCellCount() };
+}, { P });
+check("AA1 water spread to the push cell first", rigAA.flowingBefore && rigAA.flowingBefore.id === 15, JSON.stringify(rigAA.flowingBefore));
+check("AA2 pushed stone survives in the ex-fluid cell", rigAA.pushedCell.id === 3 && rigAA.staleEntry === null, JSON.stringify({ cell: rigAA.pushedCell, fluid: rigAA.staleEntry }));
+
+// Rig AB (R3 must-fix): entity standing in front of a bare piston gets displaced
+// along the push axis (never entombed in the head / popped through ceilings).
+const rigAB = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 25;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placeRedstone("lever", P.x, y, z);
+  D.placePiston(P.x + 1, y, z, 1, false); // empty row: head goes to +2
+  D.teleportPlayer(P.x + 2.5, y, z + 0.5); // stand exactly in the head's cell
+  window.advanceTime(100);
+  D.toggleLeverAt(P.x, y, z);
+  window.advanceTime(300);
+  const s = JSON.parse(window.render_game_to_text());
+  const head = D.getBlockAt(P.x + 2, y, z);
+  return { head, playerX: s.player.x, playerY: s.player.y, expectMinX: P.x + 3 };
+}, { P });
+check("AB1 head placed, player displaced along the axis (not upward)", rigAB.head.id === 169 && rigAB.playerX >= rigAB.expectMinX - 0.6, JSON.stringify(rigAB));
+
+// Rig AC (R3 must-fix): sticky piston + redstone block oscillator burns out.
+const rigAC = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 1, z = P.z + 27;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(P.x + dx, P.y, z, 3);
+  D.placePiston(P.x + 1, y, z, 1, true);   // sticky, facing E
+  D.placeRedstone("block", P.x + 2, y, z); // powers it adjacent -> oscillator
+  let transitions = 0;
+  let last = D.getBlockAt(P.x + 1, y, z).id;
+  for (let i = 0; i < 40; i++) {
+    window.advanceTime(100);
+    const cur = D.getBlockAt(P.x + 1, y, z).id;
+    if (cur !== last) { transitions += 1; last = cur; }
+  }
+  // Frozen tail: no transitions in the last second.
+  let tail = 0;
+  for (let i = 0; i < 10; i++) {
+    window.advanceTime(100);
+    const cur = D.getBlockAt(P.x + 1, y, z).id;
+    if (cur !== last) { tail += 1; last = cur; }
+  }
+  const stats = D.getRedstoneStats();
+  D.setBlock(P.x + 2, y, z, 0); // dismantle
+  window.advanceTime(300);
+  return { transitions, tail, pending: stats.pendingPistons };
+}, { P });
+check("AC1 oscillator burns out (few transitions, then frozen)", rigAC.transitions <= 8 && rigAC.tail === 0, JSON.stringify(rigAC));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

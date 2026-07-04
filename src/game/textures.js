@@ -84,6 +84,11 @@ const TILE = {
   comparator_top:     [2, 3], // pale smoothstone plate with a wedge mark
   redstone_nub_on:    [3, 3], // bright red (lit nub boxes)
   redstone_nub_off:   [4, 3], // dark red (unlit nub boxes)
+  // Wave R3 — pistons. ATLAS IS NOW FULL (64/64): the next tile wave must bump
+  // ATLAS_COLS/ROWS to 16 (expansion path documented at the top of this file).
+  piston_side:         [6, 3], // wood body with a stone piston band
+  piston_front:        [7, 3], // wooden push plate
+  piston_front_sticky: [7, 7], // push plate with an adhesive resin pad
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -206,6 +211,28 @@ export const BLOCK_FACE_TILES = {
     { px: "repeater_top", nx: "repeater_top", py: "repeater_top", ny: "stone", pz: "repeater_top", nz: "repeater_top" }])),
   ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [128 + i,
     { px: "comparator_top", nx: "comparator_top", py: "comparator_top", ny: "stone", pz: "comparator_top", nz: "comparator_top" }])),
+  // Wave R3 — piston bases (144-167): plain opaque cubes whose FACE MAP is generated
+  // per facing — push plate on the facing side, planks on the back, body elsewhere.
+  // Extended bases show the darker back tile in front (the plate moved to the head).
+  ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => {
+    const id = 144 + i;
+    const facing = i % 6;
+    const extended = (i % 12) >= 6;
+    const sticky = i >= 12;
+    const front = extended ? "crafting_side" : (sticky ? "piston_front_sticky" : "piston_front");
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const oppositeKey = { nz: "pz", pz: "nz", px: "nx", nx: "px", py: "ny", ny: "py" };
+    const frontKey = faceKeyByFacing[facing];
+    const map = { px: "piston_side", nx: "piston_side", py: "piston_side", ny: "piston_side", pz: "piston_side", nz: "piston_side" };
+    map[frontKey] = front;
+    map[oppositeKey[frontKey]] = "crafting_side";
+    return [id, map];
+  })),
+  // Piston heads (168-179): plate tile everywhere (the arm box overrides its tile).
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const t = i >= 6 ? "piston_front_sticky" : "piston_front";
+    return [168 + i, { px: t, nx: t, py: t, ny: t, pz: t, nz: t }];
+  })),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1302,6 +1329,45 @@ function paintRedstonePlate(ctx, col, row, wedge) {
   }
 }
 
+// Wave R3 — piston body side: planks with a grey mechanism band at the base.
+function paintPistonSide(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 526);
+      let r, g, b;
+      if (y >= 11) { // mechanism band (bottom = back of the piston)
+        const v = 96 + (n < 0.35 ? -12 : n > 0.8 ? 10 : 0);
+        r = v; g = v; b = v + 4;
+      } else {
+        r = 186; g = 148; b = 90; // planks
+        if (y === 0 || y === 10) { r -= 30; g -= 26; b -= 18; }
+        if (x % 5 === 4) { r -= 22; g -= 18; b -= 12; }
+        if (n < 0.2) { r -= 12; g -= 10; b -= 6; } else if (n > 0.85) { r += 10; g += 8; b += 5; }
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave R3 — piston push plate: plain planks, `sticky` adds a green resin pad.
+function paintPistonFront(ctx, col, row, sticky) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, sticky ? 528 : 527);
+      let r = 192, g = 154, b = 94; // plate planks
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) { r -= 34; g -= 28; b -= 20; }
+      if ((x + y) % 7 === 0) { r -= 14; g -= 12; b -= 8; }
+      if (sticky && x >= 3 && x <= 12 && y >= 3 && y <= 12) {
+        r = 96; g = 168; b = 74; // resin pad
+        if (n < 0.3) { r -= 18; g -= 24; b -= 14; } else if (n > 0.85) { r += 16; g += 20; b += 12; }
+      } else if (n < 0.2) { r -= 12; g -= 10; b -= 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 // Wave R2 — nub tiles: flat red fills used on the little direction/state boxes.
 function paintRedstoneNub(ctx, col, row, lit) {
   const { ox, oy } = tileOrigin(col, row);
@@ -1391,6 +1457,10 @@ function paintAtlas(ctx) {
   paintRedstonePlate(ctx, ...TILE.comparator_top, true);
   paintRedstoneNub(ctx, ...TILE.redstone_nub_on, true);
   paintRedstoneNub(ctx, ...TILE.redstone_nub_off, false);
+  // Wave R3 — pistons
+  paintPistonSide(ctx, ...TILE.piston_side);
+  paintPistonFront(ctx, ...TILE.piston_front, false);
+  paintPistonFront(ctx, ...TILE.piston_front_sticky, true);
 }
 
 export function createAtlasTexture() {
@@ -1492,6 +1562,8 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   91: 4, 92: 4,           // redstone torch on/off
   // Wave R2 — repeaters + comparators: thin plates on the class-5 partial path.
   ...Object.fromEntries(Array.from({ length: 48 }, (_, i) => [96 + i, 5])),
+  // Wave R3 — piston HEADS are partial (plate + arm); bases stay opaque cubes (0).
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [168 + i, 5])),
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1630,6 +1702,32 @@ export function makeComparatorId(facing, mode, powered) {
 // Facing index -> output direction vector (same convention as stairs: 0=N faces -Z).
 export const REDSTONE_FACING_DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
+// ---------------------------------------------------------------------------
+// Wave R3 — pistons.
+// Base id layout: 144 + (sticky ? 12 : 0) + (extended ? 6 : 0) + facing
+// Head id layout: 168 + (sticky ? 6 : 0) + facing
+//   facing 0..5 = -Z / +X / +Z / -X / +Y(up) / -Y(down)
+// ---------------------------------------------------------------------------
+export const PISTON_BASE_ID = 144;
+export const PISTON_HEAD_BASE_ID = 168;
+export const PISTON_BASE_IDS = new Set(Array.from({ length: 24 }, (_, i) => 144 + i));
+export const PISTON_HEAD_IDS = new Set(Array.from({ length: 12 }, (_, i) => 168 + i));
+export function pistonFacing(id) { return (id - 144) % 6; }
+export function pistonIsExtended(id) { return ((id - 144) % 12) >= 6; }
+export function pistonIsSticky(id) { return (id - 144) >= 12; }
+export function makePistonId(facing, sticky, extended) {
+  return 144 + (sticky ? 12 : 0) + (extended ? 6 : 0) + (facing % 6);
+}
+export function pistonHeadFacing(id) { return (id - 168) % 6; }
+export function pistonHeadIsSticky(id) { return (id - 168) >= 6; }
+export function makePistonHeadId(facing, sticky) {
+  return 168 + (sticky ? 6 : 0) + (facing % 6);
+}
+// Facing index -> 3D direction (extends REDSTONE_FACING_DIRS with up/down).
+export const PISTON_FACING_DIRS = [
+  [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
+];
+
 // Components that must sit on a solid block and pop off when support breaks.
 export const REDSTONE_ATTACHED_IDS = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
@@ -1649,7 +1747,7 @@ export const REDSTONE_ALL_IDS = new Set([
 // Wave R2 — repeaters + comparators too (base plate + direction nubs).
 export const PARTIAL_BLOCK_IDS = new Set([
   ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
-  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS,
+  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS, ...PISTON_HEAD_IDS,
 ]);
 
 // ----- Item icon canvases -----
@@ -1781,6 +1879,9 @@ const ITEM_CHIP_COLORS = {
   // Wave R2
   repeater:           "#b8b8c0",
   comparator:         "#b0b0bc",
+  // Wave R3
+  piston:             "#ba945a",
+  sticky_piston:      "#60a84a",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */
@@ -2363,6 +2464,24 @@ const ICON_GRIDS = {
     "................",
     "................",
   ],
+  pistonIcon: [
+    "................",
+    "................",
+    "..wwwwwwwwwww...",
+    "..wggggggggga...",
+    "..wggggggggga...",
+    "..waaaaaaaaaa...",
+    "..bcccccccccb...",
+    "..bcccccccccb...",
+    "..bccccccccab...",
+    "..bccccccccab...",
+    "..bcaacaacaab...",
+    "..bbbbbbbbbbb...",
+    "................",
+    "................",
+    "................",
+    "................",
+  ],
   compass: [
     "................",
     "................",
@@ -2424,6 +2543,10 @@ const ICON_PALS = {
   arrowPal:   { a: "#26262c", b: "#40404a", c: "#5c5c68", w: "#f0f0ee" },
   totemPal:   { a: "#2a4a1e", b: "#c8a030", c: "#e0c460" },
   compassPal: { a: "#2a2e34", b: "#98a0a8", r: "#d03030", w: "#e8e8ea" },
+  // Wave R3 — piston icons: w = plate top edge, g = plate face (wood or resin),
+  // b/c/a = grey mechanism body.
+  pistonPal:  { w: "#d8b276", g: "#ba945a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
+  stickyPistonPal: { w: "#8ac86a", g: "#60a84a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
 };
 
 // itemId -> { grid, pal } for everything without a placeable atlas tile (plus a
@@ -2507,6 +2630,9 @@ const ICON_SPECS = {
   // Specials
   warden_totem:      { grid: "totem", pal: "totemPal" },
   spelunker_compass: { grid: "compass", pal: "compassPal" },
+  // Wave R3 — pistons (painted icon wins over the block-face tile path).
+  piston:        { grid: "pistonIcon", pal: "pistonPal" },
+  sticky_piston: { grid: "pistonIcon", pal: "stickyPistonPal" },
 };
 
 /** Paints a 16x16 icon grid into ctx at 1px-per-cell using the named palette. */

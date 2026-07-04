@@ -132,6 +132,16 @@ import {
   comparatorMode,
   comparatorIsPowered,
   makeComparatorId,
+  // Wave R3 — pistons
+  PISTON_BASE_IDS,
+  PISTON_HEAD_IDS,
+  pistonFacing,
+  pistonIsExtended,
+  pistonIsSticky,
+  makePistonId,
+  pistonHeadFacing,
+  pistonHeadIsSticky,
+  PISTON_FACING_DIRS,
 } from "./game/textures";
 import { RedstoneSim } from "./game/redstone";
 import {
@@ -461,6 +471,58 @@ const redstoneSim = new RedstoneSim({
   },
 });
 
+// Wave R3 — after a piston moves blocks: nudge any entity standing in a destination
+// cell one step along the push direction, and flag destination chunks whose new
+// occupant is a gravity block so the falling-block scan picks it up.
+redstoneSim.onPistonMoved = (movedCells, dir) => {
+  for (const c of movedCells) {
+    const movedId = world.get(c.x, c.y, c.z);
+    if (FALLING_BLOCK_TYPES.has(movedId)) {
+      const pos = world.toChunkPosition(c.x, c.z);
+      const chunk = world.chunks.get(pos.key);
+      if (chunk) chunk.hasFallingBlocks = true;
+    }
+    // Player displacement: AABB overlap with the now-solid cell (radius-aware,
+    // not just the centre column) -> push out along the piston axis. Skip the
+    // shove when the destination itself is solid (pinned against a wall) so we
+    // never translate an entity INTO a block.
+    const r = playerConfig.radius;
+    const overlapsPlayer =
+      state.playerPos.x + r > c.x && state.playerPos.x - r < c.x + 1 &&
+      state.playerPos.z + r > c.z && state.playerPos.z - r < c.z + 1 &&
+      state.playerPos.y + playerConfig.height > c.y && state.playerPos.y < c.y + 1;
+    if (overlapsPlayer) {
+      const destId = world.get(
+        Math.floor(state.playerPos.x + dir[0] * 1.02),
+        Math.floor(state.playerPos.y + dir[1] * 1.02 + 0.05),
+        Math.floor(state.playerPos.z + dir[2] * 1.02),
+      );
+      const destSolid = destId !== 0 && !PASSABLE_BLOCKS.has(destId);
+      if (!destSolid) {
+        state.playerPos.x += dir[0] * 1.02;
+        state.playerPos.y += dir[1] * 1.02;
+        state.playerPos.z += dir[2] * 1.02;
+        if (dir[1] > 0) state.playerVel.y = Math.max(state.playerVel.y, 6); // gentle launch
+      }
+    }
+    for (const mobList of [hostileMobs, passiveMobs]) {
+      for (const mob of mobList) {
+        if (!mob?.pos) continue;
+        // Check both body cells (mobs are up to ~2 tall).
+        const feetY = Math.floor(mob.pos.y + 0.05);
+        const headY = Math.floor(mob.pos.y + 1.05);
+        if (Math.floor(mob.pos.x) === c.x && Math.floor(mob.pos.z) === c.z
+          && (feetY === c.y || headY === c.y)) {
+          mob.pos.x += dir[0] * 1.02;
+          mob.pos.y += dir[1] * 1.02;
+          mob.pos.z += dir[2] * 1.02;
+          if (mob.mesh) mob.mesh.position.copy(mob.pos);
+        }
+      }
+    }
+  }
+};
+
 // Rebuild the chunks the redstone sim just mutated so lamp/wire/door flips render
 // this frame (dedupe per chunk; rebuildEditedChunksNow is per-column). Chunks outside
 // the active ring are skipped — world.set already marked them dirty, so they rebuild
@@ -470,6 +532,11 @@ function applyRedstoneVisualChanges(changedCells) {
   if (!changedCells || changedCells.length === 0) return;
   const seen = new Set();
   for (const c of changedCells) {
+    // Wave R3 must-fix: sim-driven block changes (piston pushes especially) must
+    // notify the fluid sim, or a block pushed into flowing water leaves a stale
+    // fluidLevels entry that clobbers the block on save/load; vacated cells also
+    // need fluid re-enqueued so water can flow in.
+    fluidSim.onBlockChanged(c.x, c.y, c.z);
     const pos = world.toChunkPosition(c.x, c.z);
     if (seen.has(pos.key)) continue;
     seen.add(pos.key);
@@ -3621,9 +3688,13 @@ function triggerCreeperExplosion(mob) {
         // Don't remove bedrock, liquids (water=15, lava=21), or out-of-bounds
         if (type === 0 || type === 13 || type === 15 || type === 21 || !world.isWithinVerticalBounds(by)) continue;
         world.set(bx, by, bz, 0);
+        // Wave R3 — an explosion can sever circuits and piston pairs: notify the
+        // sim per cleared cell (support pops, wire recompute, orphan cleanup).
+        redstoneSim.onBlockChanged(bx, by, bz);
       }
     }
   }
+  applyRedstoneVisualChanges(redstoneSim.tick(0));
 
   // Radial damage to player
   const pdx = state.playerPos.x - mob.pos.x;
@@ -6395,6 +6466,25 @@ function breakBlock(ndcX = 0, ndcY = 0) {
       redstoneSim.onBlockChanged(coords.x, otherY, coords.z);
     }
   }
+  // Wave R3 — pistons are two-part when extended: breaking either part removes
+  // both (the directly-broken part is the one that drops, via BLOCK_DROPS).
+  if (PISTON_BASE_IDS.has(type) && pistonIsExtended(type)) {
+    const [pdx, pdy, pdz] = PISTON_FACING_DIRS[pistonFacing(type)];
+    const hx = coords.x + pdx, hy = coords.y + pdy, hz = coords.z + pdz;
+    if (PISTON_HEAD_IDS.has(world.get(hx, hy, hz))) {
+      world.set(hx, hy, hz, 0);
+      redstoneSim.onBlockChanged(hx, hy, hz);
+    }
+  }
+  if (PISTON_HEAD_IDS.has(type)) {
+    const [pdx, pdy, pdz] = PISTON_FACING_DIRS[pistonHeadFacing(type)];
+    const bx = coords.x - pdx, by = coords.y - pdy, bz = coords.z - pdz;
+    const baseId = world.get(bx, by, bz);
+    if (PISTON_BASE_IDS.has(baseId) && pistonIsExtended(baseId)) {
+      world.set(bx, by, bz, 0); // base gone too; head's own BLOCK_DROPS supplies the drop
+      redstoneSim.onBlockChanged(bx, by, bz);
+    }
+  }
   if (type === FURNACE_BLOCK_TYPE) {
     furnaceStates.delete(targetKey);
     if (state.activeFurnaceKey === targetKey) {
@@ -6816,6 +6906,27 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     placeType = placeType === 96
       ? makeRepeaterId(orient, 0, false)
       : makeComparatorId(orient, 0, false);
+  }
+
+  // Wave R3 — piston placement: the push face points TOWARD the player (Minecraft
+  // convention), including straight up/down when the player looks steeply down/up.
+  if (placeType === 144 || placeType === 156) {
+    const sticky = placeType === 156;
+    let facing;
+    if (state.pitch < -0.85) facing = 4;      // looking down -> face up at the player
+    else if (state.pitch > 0.85) facing = 5;  // looking up -> face down
+    else {
+      const twoPi = Math.PI * 2;
+      const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+      const deg = (normYaw / Math.PI) * 180;
+      let away;
+      if (deg < 45 || deg >= 315) away = 0;
+      else if (deg < 135) away = 3;
+      else if (deg < 225) away = 2;
+      else away = 1;
+      facing = (away + 2) % 4; // toward the player = opposite of "away"
+    }
+    placeType = makePistonId(facing, sticky, false);
   }
 
   // Wave G2b — door + trapdoor orientation from yaw (door is placed as a 2-cell pair below;
@@ -8396,6 +8507,7 @@ window.render_game_to_text = () => {
       litLampsNearby: nearbyBlocks.filter((e) => e.type === REDSTONE_LAMP_ON_TYPE).length,
       repeatersNearby: nearbyBlocks.filter((e) => REPEATER_IDS.has(e.type)).length,
       comparatorsNearby: nearbyBlocks.filter((e) => COMPARATOR_IDS.has(e.type)).length,
+      pistonsNearby: nearbyBlocks.filter((e) => PISTON_BASE_IDS.has(e.type) || PISTON_HEAD_IDS.has(e.type)).length,
       ...redstoneSim.stats(),
     },
     combat: {
@@ -8716,6 +8828,15 @@ window.__exoCraftDebug = {
     applyRedstoneVisualChanges(redstoneSim.tick(0));
     world.rebuildEditedChunksNow(bx, bz);
     return { placed: true, x: bx, y: by, z: bz, id: world.get(bx, by, bz) };
+  },
+  // Wave R3 — place a piston via debug: placePiston(x,y,z,facing,sticky)
+  placePiston: (x, y, z, facing = 0, sticky = false) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, makePistonId(facing % 6, !!sticky, false));
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, id: world.get(bx, by, bz) };
   },
   // Wave R2 — cycle a repeater's delay / toggle a comparator's mode at a cell.
   cycleRepeaterAt: (x, y, z) => {

@@ -305,8 +305,15 @@ export class FluidSim {
       return;
     }
 
-    // Cell is neither source nor flowing — nothing to do here.
-    // (Could be air: neighbours may have been enqueued in error, which is safe to skip.)
+    // Cell is neither source nor flowing. Usually air (a neighbour enqueued in
+    // error — safe to skip), BUT a stale fluidLevels entry can survive here when
+    // something overwrote the fluid block without notifying the sim (e.g. a
+    // piston pushing a block into flowing water — Wave R3 must-fix). Left alone
+    // it would be serialised and then clobber the world on load, so heal it.
+    if (flowInfo && blockId !== fluidId) {
+      this.fluidLevels.delete(key);
+      this._markChunkDirty(Math.floor(x / this.world.chunkSize), Math.floor(z / this.world.chunkSize));
+    }
   }
 
   // ---------------------------------------------------------------------------
