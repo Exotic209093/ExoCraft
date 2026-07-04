@@ -306,6 +306,11 @@ export const ITEM_DEFS = {
   // Wave R4 — hopper: base id is the down-facing unlocked variant; placement
   // derives the output facing from the clicked face (special-cased in placeBlock).
   hopper:         { id: "hopper",         name: "Hopper",         placeBlockType: 180 },
+  // Wave R5 — dispenser/dropper/observer: base id is the N-facing variant;
+  // placement picks facing (incl. up/down) so the face points TOWARD the player.
+  dispenser:      { id: "dispenser",      name: "Dispenser",      placeBlockType: 190 },
+  dropper:        { id: "dropper",        name: "Dropper",        placeBlockType: 196 },
+  observer:       { id: "observer",       name: "Observer",       placeBlockType: 202 },
 };
 
 // Wave R1 — redstone dust places wire (assigned outside the literal so the wire id is
@@ -532,6 +537,10 @@ for (const [ids, itemId, hardness, tool] of [
   [Array.from({ length: 6 }, (_, i) => 174 + i), "sticky_piston", 1.2, null],
   // Wave R4 — hoppers: all facing/locked variants drop the one item.
   [Array.from({ length: 10 }, (_, i) => 180 + i), "hopper", 2.4, "pickaxe"],
+  // Wave R5 — dispensers/droppers/observers: every facing/state id drops the base item.
+  [Array.from({ length: 6 }, (_, i) => 190 + i), "dispenser", 2.2, "pickaxe"],
+  [Array.from({ length: 6 }, (_, i) => 196 + i), "dropper", 2.2, "pickaxe"],
+  [Array.from({ length: 12 }, (_, i) => 202 + i), "observer", 2.2, "pickaxe"],
 ]) {
   for (const id of ids) {
     BLOCK_DROPS[id] = itemId;
@@ -1436,6 +1445,35 @@ export const RECIPES = [
     key: { I: "iron_ingot", C: "chest" },
     inputs: [{ itemId: "iron_ingot", count: 5 }, { itemId: "chest", count: 1 }],
     output: { itemId: "hopper", count: 1 },
+    requiresWorkbench: true,
+  },
+  // Wave R5 — dispenser (cobble shell + bow + dust), dropper (cobble shell +
+  // dust), observer (cobble shell + 2 dust + iron "eye").
+  {
+    id: "dispenser",
+    name: "Dispenser",
+    pattern: ["CCC", "CBC", "CRC"],
+    key: { C: "cobblestone", B: "bow", R: "redstone" },
+    inputs: [{ itemId: "cobblestone", count: 7 }, { itemId: "bow", count: 1 }, { itemId: "redstone", count: 1 }],
+    output: { itemId: "dispenser", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "dropper",
+    name: "Dropper",
+    pattern: ["CCC", "C_C", "CRC"],
+    key: { C: "cobblestone", R: "redstone" },
+    inputs: [{ itemId: "cobblestone", count: 7 }, { itemId: "redstone", count: 1 }],
+    output: { itemId: "dropper", count: 1 },
+    requiresWorkbench: true,
+  },
+  {
+    id: "observer",
+    name: "Observer",
+    pattern: ["CCC", "RRI", "CCC"],
+    key: { C: "cobblestone", R: "redstone", I: "iron_ingot" },
+    inputs: [{ itemId: "cobblestone", count: 6 }, { itemId: "redstone", count: 2 }, { itemId: "iron_ingot", count: 1 }],
+    output: { itemId: "observer", count: 1 },
     requiresWorkbench: true,
   },
 ];

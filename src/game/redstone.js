@@ -47,16 +47,22 @@ import {
   FLORA_BLOCK_IDS,
   // Wave R4 — hoppers
   HOPPER_IDS, hopperFacing, hopperIsLocked, makeHopperId,
+  // Wave R5 — dispensers/droppers + observers
+  EJECTOR_IDS, ejectorFacing, ejectorIsDropper,
+  OBSERVER_IDS, observerFacing, observerIsPowered, makeObserverId,
 } from "./textures";
 
 const MAX_POWER = 15;
 // Wave R3 — pistons push at most this many contiguous blocks (Minecraft's limit).
 const PISTON_PUSH_LIMIT = 12;
 // Blocks a piston can never move: containers with per-position state maps
-// (furnace 7, chest 22), bedrock 13, and other pistons/heads (avoids desyncing
-// pending piston timers keyed by position). Everything else needs to be a plain
-// full cube (transparency class 0) or glass (14) to be pushable.
-const PISTON_IMMOVABLE = new Set([7, 13, 22]);
+// (furnace 7, chest 22, dispensers/droppers 190-201), bedrock 13, and other
+// pistons/heads (avoids desyncing pending piston timers keyed by position).
+// Wave R5 — observers (202-213) are also immovable here (their last-seen state
+// is keyed by position; a deliberate deviation from Minecraft, documented).
+// Everything else needs to be a plain full cube (transparency class 0) or
+// glass (14) to be pushable.
+const PISTON_IMMOVABLE = new Set([7, 13, 22, ...Array.from({ length: 24 }, (_, i) => 190 + i)]);
 // Bounded work per evaluation so a pathological wire field can't stall a frame.
 // Known limit: a single connected network larger than this recomputes only the
 // gathered region; wire fed solely from beyond the frontier can read stale.
@@ -77,6 +83,11 @@ const TORCH_BURNOUT_WINDOW_MS = 1600;
 // freezes in place until a real neighbour change re-evaluates it.
 const PISTON_BURNOUT_FLIPS = 6;
 const PISTON_BURNOUT_WINDOW_MS = 2000;
+// Wave R5 — observers: two face-to-face observers ping-pong pulses at 5 Hz
+// forever (each pulse edits a block = remesh). Same guard family: over the
+// limit, pulses are swallowed until a real neighbour change re-evaluates.
+const OBSERVER_BURNOUT_FLIPS = 8;
+const OBSERVER_BURNOUT_WINDOW_MS = 1600;
 
 const EMPTY_CELLS = [];
 
@@ -136,6 +147,15 @@ export class RedstoneSim {
     // container cell (chest/furnace/hopper fullness). main.js supplies it since
     // container state maps live there.
     this.getContainerSignal = null;
+    // Wave R5 — dispensers/droppers (edge-triggered) + observers (change pulse).
+    this._ejectorPowered = new Map();   // cell key -> bool (last seen powered state)
+    this._ejectorTimers = new Map();    // cell key -> fire-due ms
+    this._observerLastSeen = new Map(); // cell key -> watched cell's block id
+    this._observerTimers = new Map();   // cell key -> { due, phase: "on"|"off" }
+    this._observerFlipHistory = new Map(); // cell key -> { windowStart, count }
+    // Optional callback: (x, y, z, facing, isDropper) when an ejector fires.
+    // main.js owns the 9-slot contents and does the actual dispensing.
+    this.onEjectorFire = null;
     this._changedCells = [];          // cells world.set since the last drain
   }
 
@@ -154,6 +174,11 @@ export class RedstoneSim {
     this._comparatorTimers.clear();
     this._pistonTimers.clear();
     this._pistonFlipHistory.clear();
+    this._ejectorPowered.clear();
+    this._ejectorTimers.clear();
+    this._observerLastSeen.clear();
+    this._observerTimers.clear();
+    this._observerFlipHistory.clear();
     this._changedCells.length = 0;
   }
 
@@ -171,7 +196,7 @@ export class RedstoneSim {
     if (!Array.isArray(edits)) return;
     for (const e of edits) {
       const id = e?.type;
-      if (!Number.isFinite(id) || id < 83 || id > 189) continue;
+      if (!Number.isFinite(id) || id < 83 || id > 213) continue;
       const key = cellKey(e.x, e.y, e.z);
       this._dirty.add(key);
       // Stale pressed buttons from an old save get a release timer.
@@ -333,6 +358,39 @@ export class RedstoneSim {
       }
     }
 
+    // Wave R5 — ejector fire: one dispense per rising edge, 1 tick after it.
+    // main.js owns the item logic; the sim only reports (x,y,z,facing,kind).
+    if (this._ejectorTimers.size > 0) {
+      for (const key of [...this._ejectorTimers.keys()].sort()) {
+        if (this._ejectorTimers.get(key) > this._accumMs) continue;
+        this._ejectorTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!EJECTOR_IDS.has(id)) continue;
+        if (this.onEjectorFire) this.onEjectorFire(x, y, z, ejectorFacing(id), ejectorIsDropper(id));
+      }
+    }
+
+    // Wave R5 — observer pulse: 1 tick after the watched change, the back
+    // powers for 1 tick, then drops. Both flips ride _setBlock so downstream
+    // circuits (and observers watching THIS observer) re-evaluate.
+    if (this._observerTimers.size > 0) {
+      for (const key of [...this._observerTimers.keys()].sort()) {
+        const timer = this._observerTimers.get(key);
+        if (timer.due > this._accumMs) continue;
+        this._observerTimers.delete(key);
+        const { x, y, z } = parseKey(key);
+        const id = this.world.get(x, y, z);
+        if (!OBSERVER_IDS.has(id)) continue;
+        if (timer.phase === "on") {
+          if (!observerIsPowered(id)) this._setBlock(x, y, z, makeObserverId(observerFacing(id), true));
+          this._observerTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, phase: "off" });
+        } else if (observerIsPowered(id)) {
+          this._setBlock(x, y, z, makeObserverId(observerFacing(id), false));
+        }
+      }
+    }
+
     if (this._dirty.size > 0) this._evaluate();
 
     if (this._changedCells.length === 0) return EMPTY_CELLS;
@@ -359,6 +417,8 @@ export class RedstoneSim {
       if (!comparatorIsPowered(id)) return 0;
       return this._componentOutput.get(cellKey(x, y, z)) ?? MAX_POWER;
     }
+    // Wave R5 — a pulsing observer reads 15 (its back output strength).
+    if (OBSERVER_IDS.has(id)) return observerIsPowered(id) ? MAX_POWER : 0;
     return 0;
   }
 
@@ -371,6 +431,8 @@ export class RedstoneSim {
       pendingRepeaters: this._repeaterTimers.size,
       pendingComparators: this._comparatorTimers.size,
       pendingPistons: this._pistonTimers.size,
+      pendingEjectors: this._ejectorTimers.size,
+      pendingObservers: this._observerTimers.size,
       dirtyCells: this._dirty.size,
     };
   }
@@ -419,8 +481,15 @@ export class RedstoneSim {
    * (tx,ty,tz), or 0 when it isn't a powered component facing that cell.
    */
   _componentOutputInto(cx, cy, cz, tx, ty, tz) {
-    if (cy !== ty) return 0;
     const id = this.world.get(cx, cy, cz);
+    // Wave R5 — a pulsing observer drives 15 out of its BACK. Checked before
+    // the same-level guard because observers can face (and output) vertically.
+    if (OBSERVER_IDS.has(id)) {
+      if (!observerIsPowered(id)) return 0;
+      const [odx, ody, odz] = PISTON_FACING_DIRS[observerFacing(id)];
+      return (cx - odx === tx && cy - ody === ty && cz - odz === tz) ? MAX_POWER : 0;
+    }
+    if (cy !== ty) return 0;
     let facing = -1;
     if (REPEATER_IDS.has(id)) {
       if (!repeaterIsPowered(id)) return 0;
@@ -466,10 +535,10 @@ export class RedstoneSim {
     for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
       const id = this.world.get(x + dx, y + dy, z + dz);
       if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
-      if (dy === 0) {
-        const out = this._componentOutputInto(x + dx, y, z + dz, x, y, z);
-        if (out > best) best = out;
-      }
+      // All 6 directions: observers output vertically; the function itself
+      // keeps repeaters/comparators same-level (Wave R5).
+      const out = this._componentOutputInto(x + dx, y + dy, z + dz, x, y, z);
+      if (out > best) best = out;
     }
     return best;
   }
@@ -490,7 +559,9 @@ export class RedstoneSim {
         if (p !== undefined ? p > 0 : id === REDSTONE_WIRE_ON) return true;
       }
       // Wave R2 — a repeater/comparator pointing at this cell powers it.
-      if (dy === 0 && this._componentOutputInto(nx, ny, nz, x, y, z) > 0) return true;
+      // Wave R5 — all 6 directions (observers output vertically; the function
+      // itself keeps repeaters/comparators same-level).
+      if (this._componentOutputInto(nx, ny, nz, x, y, z) > 0) return true;
     }
     return false;
   }
@@ -607,6 +678,10 @@ export class RedstoneSim {
         if (!REDSTONE_WIRE_IDS.has(selfId)) this._wirePower.delete(key);
         // Wave R2 — same hygiene for component outputs.
         if (!REPEATER_IDS.has(selfId) && !COMPARATOR_IDS.has(selfId)) this._componentOutput.delete(key);
+        // Wave R5 — stale ejector/observer transients when the id vanished. A NEW
+        // ejector/observer placed here later must prime fresh (no ghost edges).
+        if (!EJECTOR_IDS.has(selfId)) { this._ejectorPowered.delete(key); this._ejectorTimers.delete(key); }
+        if (!OBSERVER_IDS.has(selfId)) { this._observerLastSeen.delete(key); this._observerTimers.delete(key); }
         // A door/trapdoor id that vanished must not leave a stale powered-edge key:
         // a NEW door placed here later would otherwise miss its rising edge (or see
         // a phantom falling edge that slams a manually opened door).
@@ -759,6 +834,45 @@ export class RedstoneSim {
           const wantLocked = this._isCellPowered(x, y, z, this._wirePower);
           if (wantLocked !== hopperIsLocked(id)) {
             this._setBlock(x, y, z, makeHopperId(hopperFacing(id), wantLocked));
+          }
+        } else if (EJECTOR_IDS.has(id)) {
+          // Wave R5 — dispensers/droppers fire once per OFF->ON edge. First
+          // sight (placement or load) primes to the current state WITHOUT
+          // firing, so a save loaded next to a lit lever stays quiet.
+          const powered = this._isCellPowered(x, y, z, this._wirePower);
+          const prev = this._ejectorPowered.get(key);
+          if (prev === undefined) {
+            this._ejectorPowered.set(key, powered);
+          } else if (powered !== prev) {
+            this._ejectorPowered.set(key, powered);
+            if (powered && !this._ejectorTimers.has(key)) {
+              this._ejectorTimers.set(key, this._accumMs + TORCH_FLIP_DELAY_MS);
+            }
+          }
+        } else if (OBSERVER_IDS.has(id)) {
+          // Wave R5 — observer: pulse when the WATCHED cell's id changes.
+          // First sight primes without pulsing (placement/load never fires).
+          const facing = observerFacing(id);
+          const [wdx, wdy, wdz] = PISTON_FACING_DIRS[facing];
+          const seen = this.world.get(x + wdx, y + wdy, z + wdz);
+          const prev = this._observerLastSeen.get(key);
+          if (prev === undefined) {
+            this._observerLastSeen.set(key, seen);
+          } else if (seen !== prev) {
+            this._observerLastSeen.set(key, seen);
+            // Burnout counts EVERY detected change — including ones swallowed
+            // by an in-flight pulse. Gated on scheduling only, a face-to-face
+            // observer pair paces itself just under the window and ping-pongs
+            // forever (found by rig AU).
+            let hist = this._observerFlipHistory.get(key);
+            if (!hist || this._accumMs - hist.windowStart > OBSERVER_BURNOUT_WINDOW_MS) {
+              hist = { windowStart: this._accumMs, count: 0 };
+              this._observerFlipHistory.set(key, hist);
+            }
+            hist.count += 1;
+            if (hist.count < OBSERVER_BURNOUT_FLIPS && !this._observerTimers.has(key)) {
+              this._observerTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, phase: "on" });
+            }
           }
         } else if (PISTON_BASE_IDS.has(id)) {
           // Wave R3 — piston: powered = extend, unpowered = retract, on a 1-tick

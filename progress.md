@@ -1073,3 +1073,46 @@ persist as ordinary block edits; save stays v11):
 - KNOWN (deferred): item entities don't carry durability (pre-existing,
   engine-wide — vacuumed tools reset to full wear like any ground drop);
   droppers/dispensers next; hopper minecarts far later.
+
+## Wave R5 — dispensers/droppers + observers (ids 190-213)
+- BLOCKS: dispenser 190-195 (190+facing), dropper 196-201, observer 202-213
+  (202 + powered*6 + facing); facing 0-5 = NESW/up/down (piston order). ALL THREE
+  ARE PLAIN OPAQUE CUBES with generated per-facing BLOCK_FACE_TILES maps (bore
+  tile on the front; observer eye front / output-dot back that swaps to a lit
+  tile while pulsing) — zero mesher branches touched. 6 new atlas tiles at
+  [10..15,0]. GOTCHA (caught live): new ids MUST be registered in config.js
+  blockTypes or world.set normalizes them to air.
+- EJECTORS (shared machinery): 9-slot container (dispenserStates map, saved as
+  v13 `dispensers` field with durability + registry validation like hoppers).
+  The sim tracks per-cell powered state and fires ONCE per OFF->ON edge on a
+  1-tick delay via the onEjectorFire callback; first sight PRIMES silently, so
+  placement next to live power and save-load never fire spuriously. A fire
+  inserts one item into the faced container (chest/hopper/ejector/furnace with
+  the R4 smeltable-input + fuel rules) or throws it as an item entity with
+  facing-directed velocity (dispensers hard, droppers a gentle lob). A solid
+  non-container in front = deterministic no-op. Hoppers feed and drain ejectors;
+  comparators read their fullness (9x64); pistons refuse to move them.
+- OBSERVERS: watch the cell they FACE; when its block id changes, the back
+  pulses 15 for one redstone tick (100ms delay, 100ms pulse) through
+  _componentOutputInto — which now works vertically (observers can face and
+  output up/down; repeaters/comparators keep their same-level guard). Priming
+  semantics like ejectors. BURNOUT: counts every DETECTED change (not just
+  scheduled pulses) — the first cut gated counting on scheduling, and a
+  face-to-face observer pair paced itself just under the window and ping-ponged
+  FOREVER (found by rig AU, fixed, regression-locked: pair goes quiet with 0
+  pending timers).
+- UI: right-click opens a 3x3 dispenser panel (chest-style click-click
+  transfers, durability-safe swap rules, mutual exclusion with every other
+  panel, Esc chain, redstone-lock context line); breaking or exploding an
+  ejector spills its 9 slots.
+- VERIFIED: smoke suite 69 -> 80 checks, ALL PASS: single fire per rising edge
+  (no auto-refire, refires on the next edge), dropper->chest insert (no ground
+  item), observer prime-silent + pulse on/off, hopper->dispenser feed +
+  comparator signal, hopper drains dropper above, observer-pair burnout,
+  blocked-dispenser no-op, piston-vs-dispenser immovability. 3-lens adversarial
+  review (logic / render-registry / perf-save) with live Playwright verification
+  run against this wave; confirmed findings land as a follow-up commit.
+- KNOWN (deferred): dispensers don't yet "use" items (no arrow-projectile
+  firing, no bucket place/scoop — ejected as ground items instead); fluid-level
+  changes don't pulse observers (fluid sim doesn't notify redstone); observers
+  are piston-immovable (deviation: last-seen state is position-keyed).

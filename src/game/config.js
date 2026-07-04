@@ -165,6 +165,18 @@ const DEFAULT_GAME_CONFIG = {
         color: 0x565a62,
         transparent: true,
       })),
+      // Wave R5 — dispensers (190-195) + droppers (196-201): facing in the id.
+      ...Array.from({ length: 12 }, (_, i) => ({
+        id: 190 + i,
+        name: `${i < 6 ? "Dispenser" : "Dropper"} ${"NESWUD"[i % 6]}`,
+        color: 0x8a8a92,
+      })),
+      // Wave R5 — observers (202-213: facing x powered in the id).
+      ...Array.from({ length: 12 }, (_, i) => ({
+        id: 202 + i,
+        name: `Observer ${"NESWUD"[i % 6]}${i >= 6 ? " (pulsing)" : ""}`,
+        color: 0x74747c,
+      })),
     ],
     generation: {
       seed: 1337,

@@ -37,10 +37,11 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 | Redstone torch (inverter, clocks, burnout) | ✅ | |
 | Lamp (real baked light), redstone block | ✅ | |
 | Repeater (1–4 tick delay, signal refresh) | ✅ | No locking (side-input latch) |
-| Comparator (compare/subtract, analog) | ✅ | No container reading (needs hoppers) |
+| Comparator (compare/subtract, analog) | ✅ | Reads container fullness (chest/hopper/furnace/dispenser) |
 | Pistons (+ sticky) | ✅ | 6 facings, 12-block push, sticky pull, burnout guard; no slime-chain physics |
-| Hoppers | ✅ | Pull/push/vacuum, lock-when-powered, comparator container reads; droppers/dispensers still ⬜ |
-| Observers, note blocks, TNT-as-circuit-output | ⬜ | Later redstone polish |
+| Hoppers | ✅ | Pull/push/vacuum, lock-when-powered, comparator container reads |
+| Dispenser/dropper + observer | ✅ | 9-slot edge-triggered ejectors (throw or feed containers); observer change-pulse with burnout guard |
+| Note blocks, TNT-as-circuit-output | ⬜ | Later redstone polish |
 
 ### Gameplay & survival
 | System | Status | Notes / gaps |
@@ -110,7 +111,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 2. **Hoppers** — 5-slot container, pulls from above / pushes to facing; hopper
    minecart later; comparator reads container fullness (closes the R2 gap).
 3. **Dispenser/dropper + observer** — circuit outputs; observer completes the
-   "detect change" primitive.
+   "detect change" primitive. ✅ (Wave R5)
 
 ### Phase B — depth systems
 4. **Lighting fix wave** — seam ghost-light: relight-to-fixpoint over the affected
@@ -180,5 +181,5 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
   steps through `advanceTime` for tests.
 - Save changes must forward-default (old saves load) and be documented when
   they are lossy backward.
-- Id space: 189/255 used. If a wave would push past ~230, do the metadata-layer
+- Id space: 214/255 used (0-213). If a wave would push past ~230, do the metadata-layer
   refactor first (per-chunk aux array) instead of minting more state ids.

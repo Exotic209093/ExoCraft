@@ -95,6 +95,13 @@ const TILE = {
   // Wave R4 — atlas expanded to 16x16; rows 8+ / cols 8+ are the new space.
   hopper_outside:      [8, 0], // dark iron funnel shell
   hopper_inside:       [9, 0], // darker iron cavity (top face)
+  // Wave R5 — dispenser/dropper fronts + observer faces.
+  dispenser_front:     [10, 0], // stone face with a round dark bore
+  dropper_front:       [11, 0], // stone face with a smaller square bore
+  observer_face:       [12, 0], // grey slab with a wide detector "eye"
+  observer_back:       [13, 0], // grey slab with a dark output dot
+  observer_back_lit:   [14, 0], // grey slab with a bright red output dot (pulsing)
+  observer_side:       [15, 0], // grey slab with a direction groove
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -242,6 +249,31 @@ export const BLOCK_FACE_TILES = {
   // Wave R4 — hoppers (180-189): iron shell, funnel-mouth top.
   ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [180 + i,
     { px: "hopper_outside", nx: "hopper_outside", py: "hopper_inside", ny: "hopper_outside", pz: "hopper_outside", nz: "hopper_outside" }])),
+  // Wave R5 — dispensers (190-195) + droppers (196-201): plain opaque cubes with
+  // a generated face map — bore tile on the facing side, furnace-stone body.
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const id = 190 + i;
+    const facing = i % 6;
+    const front = i < 6 ? "dispenser_front" : "dropper_front";
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const map = { px: "furnace_side", nx: "furnace_side", py: "furnace_top", ny: "furnace_top", pz: "furnace_side", nz: "furnace_side" };
+    map[faceKeyByFacing[facing]] = front;
+    return [id, map];
+  })),
+  // Observers (202-213): eye on the facing (watching) side, output dot on the
+  // opposite side (lit while pulsing), grooved body elsewhere.
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const id = 202 + i;
+    const facing = i % 6;
+    const powered = i >= 6;
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const oppositeKey = { nz: "pz", pz: "nz", px: "nx", nx: "px", py: "ny", ny: "py" };
+    const frontKey = faceKeyByFacing[facing];
+    const map = { px: "observer_side", nx: "observer_side", py: "observer_side", ny: "observer_side", pz: "observer_side", nz: "observer_side" };
+    map[frontKey] = "observer_face";
+    map[oppositeKey[frontKey]] = powered ? "observer_back_lit" : "observer_back";
+    return [id, map];
+  })),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1394,6 +1426,58 @@ function paintHopper(ctx, col, row, inside) {
   }
 }
 
+// Wave R5 — dispenser/dropper front: furnace-stone face with a dark bore.
+// The dispenser bore is round and wide; the dropper bore is a smaller square.
+function paintEjectorFront(ctx, col, row, isDropper) {
+  const { ox, oy } = tileOrigin(col, row);
+  const cx = 7.5, cy = 7.5;
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, isDropper ? 532 : 531);
+      let v = 116 + (n < 0.3 ? -12 : n > 0.85 ? 10 : 0); // stone body
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v -= 22;
+      const inBore = isDropper
+        ? (x >= 5 && x <= 10 && y >= 5 && y <= 10)
+        : ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= 4.2 * 4.2);
+      if (inBore) {
+        v = 26 + (n < 0.4 ? -6 : 0); // dark cavity
+        const rim = isDropper
+          ? (x === 5 || x === 10 || y === 5 || y === 10)
+          : ((x - cx) * (x - cx) + (y - cy) * (y - cy) >= 3.1 * 3.1);
+        if (rim) v = 62; // bore rim
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, v), Math.max(0, v), Math.max(0, v + 4)));
+    }
+  }
+}
+
+// Wave R5 — observer tiles. face: wide detector eye; back: output dot (bright
+// while pulsing); side: a horizontal groove giving the block a direction read.
+function paintObserver(ctx, col, row, kind) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 533 + (kind === "face" ? 0 : kind === "back" ? 1 : kind === "back_lit" ? 2 : 3));
+      let r, g, b;
+      let v = 104 + (n < 0.3 ? -10 : n > 0.85 ? 8 : 0); // smooth grey body
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v -= 20;
+      r = v; g = v; b = v + 2;
+      if (kind === "face") {
+        if (y >= 5 && y <= 10 && x >= 2 && x <= 13) { r = 34; g = 30; b = 30; } // eye slot
+        if (y >= 6 && y <= 9 && (x === 4 || x === 5 || x === 10 || x === 11)) { r = 214; g = 208; b = 196; } // pupils
+      } else if (kind === "back" || kind === "back_lit") {
+        const lit = kind === "back_lit";
+        if (x >= 6 && x <= 9 && y >= 6 && y <= 9) {
+          r = lit ? 236 : 88; g = lit ? 54 : 16; b = lit ? 44 : 14; // output dot
+        }
+      } else { // side
+        if (y >= 7 && y <= 8 && x >= 2 && x <= 13) { r -= 34; g -= 34; b -= 32; } // groove
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 // Wave R2 — nub tiles: flat red fills used on the little direction/state boxes.
 function paintRedstoneNub(ctx, col, row, lit) {
   const { ox, oy } = tileOrigin(col, row);
@@ -1490,6 +1574,13 @@ function paintAtlas(ctx) {
   // Wave R4 — hopper
   paintHopper(ctx, ...TILE.hopper_outside, false);
   paintHopper(ctx, ...TILE.hopper_inside, true);
+  // Wave R5 — dispenser/dropper/observer
+  paintEjectorFront(ctx, ...TILE.dispenser_front, false);
+  paintEjectorFront(ctx, ...TILE.dropper_front, true);
+  paintObserver(ctx, ...TILE.observer_face, "face");
+  paintObserver(ctx, ...TILE.observer_back, "back");
+  paintObserver(ctx, ...TILE.observer_back_lit, "back_lit");
+  paintObserver(ctx, ...TILE.observer_side, "side");
 }
 
 export function createAtlasTexture() {
@@ -1775,6 +1866,28 @@ export const PISTON_FACING_DIRS = [
   [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
 ];
 
+// ---------------------------------------------------------------------------
+// Wave R5 — dispensers, droppers, observers.
+// Dispenser: 190 + facing (0..5, PISTON_FACING_DIRS order). Edge-triggered ejector.
+// Dropper:   196 + facing. Same container, gentler ejection.
+// Observer:  202 + (powered ? 6 : 0) + facing — watches the cell it FACES and
+//            pulses power out of its BACK when that cell's block id changes.
+// ---------------------------------------------------------------------------
+export const DISPENSER_BASE_ID = 190;
+export const DROPPER_BASE_ID = 196;
+export const OBSERVER_BASE_ID = 202;
+export const DISPENSER_IDS = new Set(Array.from({ length: 6 }, (_, i) => 190 + i));
+export const DROPPER_IDS = new Set(Array.from({ length: 6 }, (_, i) => 196 + i));
+// Both share the 9-slot container + edge-triggered fire; "ejector" = either.
+export const EJECTOR_IDS = new Set([...DISPENSER_IDS, ...DROPPER_IDS]);
+export const OBSERVER_IDS = new Set(Array.from({ length: 12 }, (_, i) => 202 + i));
+export function ejectorFacing(id) { return (id - 190) % 6; }
+export function ejectorIsDropper(id) { return id >= 196; }
+export function makeEjectorId(facing, isDropper) { return (isDropper ? 196 : 190) + (facing % 6); }
+export function observerFacing(id) { return (id - 202) % 6; }
+export function observerIsPowered(id) { return (id - 202) >= 6; }
+export function makeObserverId(facing, powered) { return 202 + (powered ? 6 : 0) + (facing % 6); }
+
 // Components that must sit on a solid block and pop off when support breaks.
 export const REDSTONE_ATTACHED_IDS = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
@@ -1785,7 +1898,7 @@ export const REDSTONE_CROSS_IDS = new Set([85, 86, 91, 92]);
 // All redstone-system ids (for debug listings / text-state filters).
 export const REDSTONE_ALL_IDS = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-  ...REPEATER_IDS, ...COMPARATOR_IDS,
+  ...REPEATER_IDS, ...COMPARATOR_IDS, ...EJECTOR_IDS, ...OBSERVER_IDS,
 ]);
 
 // Combined set for fast mesher dispatch (fence + doors + trapdoors join the partial path;

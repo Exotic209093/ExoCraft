@@ -786,6 +786,143 @@ const rigAP = await page.evaluate(async ({ P }) => {
 }, { P });
 check("AP1 non-smeltable stays in hopper; furnace input stays clean", rigAP.kept === 2 && rigAP.furnaceSignal === 0, JSON.stringify(rigAP));
 
+// Rig AQ (Wave R5): dispenser fires ONE item per rising edge — no auto-refire
+// while held powered; a second OFF->ON edge fires again.
+const rigAQ = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 51, x = P.x + 1;
+  for (let dx = -1; dx <= 3; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.placeEjector(x, P.y + 1, z, 1, false); // dispenser facing E, open cell in front
+  D.giveEjectorItem(x, P.y + 1, z, "arrow", 3);
+  window.advanceTime(200);
+  const e0 = D.getItemEntities().count;
+  D.placeRedstone("block", x - 1, P.y + 1, z); // rising edge
+  window.advanceTime(300);
+  const e1 = D.getItemEntities().count;
+  window.advanceTime(1200); // held powered
+  const e2 = D.getItemEntities().count;
+  D.setBlock(x - 1, P.y + 1, z, 0); // falling edge
+  window.advanceTime(200);
+  D.placeRedstone("block", x - 1, P.y + 1, z); // second rising edge
+  window.advanceTime(300);
+  const e3 = D.getItemEntities().count;
+  const left = D.getEjectorAt(x, P.y + 1, z).slots.reduce((n, s) => n + (s ? s.count : 0), 0);
+  return { e0, e1, e2, e3, left };
+}, { P });
+check("AQ1 dispenser fires once on the rising edge", rigAQ.e1 === rigAQ.e0 + 1, JSON.stringify(rigAQ));
+check("AQ2 held power does NOT re-fire", rigAQ.e2 === rigAQ.e1, JSON.stringify(rigAQ));
+check("AQ3 second edge fires again (2 spent, 1 left)", rigAQ.e3 === rigAQ.e2 + 1 && rigAQ.left === 1, JSON.stringify(rigAQ));
+
+// Rig AR (Wave R5): a dropper facing a chest INSERTS instead of throwing.
+const rigAR = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 53, x = P.x + 1;
+  for (let dx = -1; dx <= 1; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.openChestAt(x + 1, P.y + 1, z);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.placeEjector(x, P.y + 1, z, 1, true); // dropper facing E = into the chest
+  D.giveEjectorItem(x, P.y + 1, z, "bread", 2);
+  const e0 = D.getItemEntities().count;
+  D.placeRedstone("block", x - 1, P.y + 1, z);
+  window.advanceTime(300);
+  const e1 = D.getItemEntities().count;
+  const chest = (D.getChestContentsAt(x + 1, P.y + 1, z) || []).filter((s) => s && s.itemId === "bread");
+  return { inserted: chest.reduce((n, s) => n + s.count, 0), e0, e1 };
+}, { P });
+// e1 <= e0: unrelated older drops may merge/despawn during the window; the
+// claim is only that the dropper spawned no NEW ground item.
+check("AR1 dropper->chest inserts (no ground item)", rigAR.inserted === 1 && rigAR.e1 <= rigAR.e0, JSON.stringify(rigAR));
+
+// Rig AS (Wave R5): observer pulses its back for 1 tick when the watched cell
+// changes; placement primes silently (no pulse before the change).
+const rigAS = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 55, x = P.x + 1;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.placeObserver(x + 1, P.y + 1, z, 1); // faces E: watches x+2, back = x
+  D.placeRedstone("wire", x, P.y + 1, z);
+  window.advanceTime(400);
+  const primed = D.getRedstoneAt(x, P.y + 1, z); // must still be off
+  D.setBlock(x + 2, P.y + 1, z, 82); // watched cell changes
+  window.advanceTime(150);
+  const during = D.getRedstoneAt(x, P.y + 1, z);
+  window.advanceTime(400);
+  const after = D.getRedstoneAt(x, P.y + 1, z);
+  return { primed, during, after };
+}, { P });
+check("AS1 placement primes silently; pulse powers the back wire", rigAS.primed.power === 0 && rigAS.during.id === 84 && rigAS.during.power === 15, JSON.stringify(rigAS));
+check("AS2 pulse drops after 1 tick (wire back off)", rigAS.after.id === 83 && rigAS.after.power === 0, JSON.stringify(rigAS));
+
+// Rig AT (Wave R5): hoppers feed dispensers (down) and drain them (from above);
+// comparators read ejector fullness.
+const rigAT = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 57, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.placeEjector(x, P.y + 1, z, 0, false);  // dispenser (facing N, irrelevant)
+  D.placeHopper(x, P.y + 2, z, 0);          // hopper above, output down
+  D.giveHopperItem(x, P.y + 2, z, "coal", 2);
+  for (let i = 0; i < 12; i++) window.advanceTime(100);
+  const inDisp = D.getEjectorAt(x, P.y + 1, z).slots.reduce((n, s) => n + (s ? s.count : 0), 0);
+  const sig = D.getContainerSignalAt(x, P.y + 1, z);
+  // Reverse: dispenser above a hopper drains into it.
+  const z2 = z + 2;
+  D.setBlock(x, P.y, z2, 3);
+  D.placeHopper(x, P.y + 1, z2, 0);
+  D.placeEjector(x, P.y + 2, z2, 0, true);  // dropper above the hopper
+  D.giveEjectorItem(x, P.y + 2, z2, "bread", 2);
+  for (let i = 0; i < 12; i++) window.advanceTime(100);
+  const inHopper = D.getHopperAt(x, P.y + 1, z2).slots.reduce((n, s) => n + (s ? s.count : 0), 0);
+  return { inDisp, sig, inHopper };
+}, { P });
+check("AT1 hopper feeds the dispenser below; comparator signal >=1", rigAT.inDisp === 2 && rigAT.sig >= 1, JSON.stringify(rigAT));
+check("AT2 hopper drains the dropper above it", rigAT.inHopper === 2, JSON.stringify(rigAT));
+
+// Rig AU (Wave R5): two observers facing each other ping-pong, then the
+// burnout guard freezes the pair (no eternal 5 Hz remesh loop).
+const rigAU = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 61, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.setBlock(x + 1, P.y, z, 3);
+  D.placeObserver(x, P.y + 1, z, 1);     // faces E (watches x+1)
+  window.advanceTime(200);
+  D.placeObserver(x + 1, P.y + 1, z, 3); // faces W (watches x) -> A sees it appear
+  for (let i = 0; i < 30; i++) window.advanceTime(100); // 3s of ping-pong + burnout
+  const stats = JSON.parse(window.render_game_to_text()).redstone;
+  const idA = D.getObserverAt(x, P.y + 1, z);
+  const idB = D.getObserverAt(x + 1, P.y + 1, z);
+  return { pending: stats.pendingObservers, aPowered: idA.powered, bPowered: idB.powered };
+}, { P });
+check("AU1 observer pair burns out quiet (no pending pulses)", rigAU.pending === 0, JSON.stringify(rigAU));
+
+// Rig AV (Wave R5): dispenser blocked by a solid wall keeps its item (no-op);
+// pistons cannot push dispensers (container immovability).
+const rigAV = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 63, x = P.x + 1;
+  for (let dx = -1; dx <= 1; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.setBlock(x + 1, P.y + 1, z, 3); // solid wall in front
+  D.placeEjector(x, P.y + 1, z, 1, false);
+  D.giveEjectorItem(x, P.y + 1, z, "coal", 1);
+  const e0 = D.getItemEntities().count;
+  D.placeRedstone("block", x - 1, P.y + 1, z);
+  window.advanceTime(400);
+  const e1 = D.getItemEntities().count;
+  const kept = D.getEjectorAt(x, P.y + 1, z).slots.reduce((n, s) => n + (s ? s.count : 0), 0);
+  // Piston vs dispenser: must refuse to extend.
+  const z2 = z + 2;
+  for (let dx = 0; dx <= 2; dx++) D.setBlock(x + dx, P.y, z2, 3);
+  D.placePiston(x, P.y + 1, z2, 1, false);
+  D.placeEjector(x + 1, P.y + 1, z2, 0, false);
+  D.placeRedstone("block", x, P.y + 2, z2); // power the piston from above... via adjacency
+  window.advanceTime(400);
+  const pistonId = D.getRedstoneAt(x, P.y + 1, z2);
+  return { e0, e1, kept, pistonId };
+}, { P });
+check("AV1 blocked dispenser keeps its item (deterministic no-op)", rigAV.e1 === rigAV.e0 && rigAV.kept === 1, JSON.stringify(rigAV));
+check("AV2 piston refuses to push a dispenser (stays retracted)", rigAV.pistonId.id === 145, JSON.stringify(rigAV.pistonId));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));
