@@ -303,6 +303,9 @@ export const ITEM_DEFS = {
   // facing (incl. up/down from pitch) so the face points TOWARD the player.
   piston:         { id: "piston",         name: "Piston",         placeBlockType: 144 },
   sticky_piston:  { id: "sticky_piston",  name: "Sticky Piston",  placeBlockType: 156 },
+  // Wave R4 — hopper: base id is the down-facing unlocked variant; placement
+  // derives the output facing from the clicked face (special-cased in placeBlock).
+  hopper:         { id: "hopper",         name: "Hopper",         placeBlockType: 180 },
 };
 
 // Wave R1 — redstone dust places wire (assigned outside the literal so the wire id is
@@ -527,6 +530,8 @@ for (const [ids, itemId, hardness, tool] of [
   [Array.from({ length: 12 }, (_, i) => 156 + i), "sticky_piston", 1.2, null],
   [Array.from({ length: 6 }, (_, i) => 168 + i), "piston", 1.2, null],
   [Array.from({ length: 6 }, (_, i) => 174 + i), "sticky_piston", 1.2, null],
+  // Wave R4 — hoppers: all facing/locked variants drop the one item.
+  [Array.from({ length: 10 }, (_, i) => 180 + i), "hopper", 2.4, "pickaxe"],
 ]) {
   for (const id of ids) {
     BLOCK_DROPS[id] = itemId;
@@ -1422,6 +1427,16 @@ export const RECIPES = [
     inputs: [{ itemId: "string", count: 1 }, { itemId: "piston", count: 1 }],
     output: { itemId: "sticky_piston", count: 1 },
     requiresWorkbench: false,
+  },
+  // Wave R4 — hopper: 5 iron around a chest (Minecraft-style funnel).
+  {
+    id: "hopper",
+    name: "Hopper",
+    pattern: ["I_I", "ICI", "_I_"],
+    key: { I: "iron_ingot", C: "chest" },
+    inputs: [{ itemId: "iron_ingot", count: 5 }, { itemId: "chest", count: 1 }],
+    output: { itemId: "hopper", count: 1 },
+    requiresWorkbench: true,
   },
 ];
 

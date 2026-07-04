@@ -33,6 +33,8 @@ const COLLECT_RADIUS   = 0.6;       // blocks — remove and award
 const MERGE_RADIUS     = 0.8;       // blocks — merge counts between ground entities
 const DESPAWN_S        = 300;       // seconds of world time
 const MAX_ENTITIES     = 200;
+// Shared no-drops result for collectInCell — callers only read/spread it.
+const EMPTY_COLLECTED  = Object.freeze([]);
 
 const BOB_AMPLITUDE    = 0.12;      // blocks up/down
 const BOB_PERIOD_S     = 1.4;       // seconds per full bob cycle
@@ -397,6 +399,39 @@ export class ItemEntityManager {
     }
 
     return pickups;
+  }
+
+  // -------------------------------------------------------------------------
+  // Wave R4 — hopper vacuum: remove and return every collectible entity whose
+  // position is inside the given block cell (used for the cell above a hopper).
+  // Returns [{ itemId, count }]; empty array when nothing was collected.
+  // -------------------------------------------------------------------------
+  collectInCell(x, y, z) {
+    // Hoppers poll this every transfer tick; a world with no ground drops is
+    // the common case, so skip the per-call array churn entirely.
+    if (this._entities.length === 0) return EMPTY_COLLECTED;
+    const collected = [];
+    const keep = [];
+    for (const e of this._entities) {
+      const inCell = Math.floor(e.pos.x) === x && Math.floor(e.pos.y) === y && Math.floor(e.pos.z) === z;
+      if (inCell && e.ageS >= e.pickupDelayS) {
+        collected.push({ itemId: e.itemId, count: e.count });
+        this.group.remove(e.mesh);
+        if (e.mesh.geometry) e.mesh.geometry.dispose();
+        if (e.mesh.material) {
+          const mats = Array.isArray(e.mesh.material) ? e.mesh.material : [e.mesh.material];
+          for (const m of mats) {
+            // Never dispose the shared block atlas — only sprite entities own their map.
+            if (m.map && !e.isBlock) m.map.dispose();
+            m.dispose();
+          }
+        }
+      } else {
+        keep.push(e);
+      }
+    }
+    if (collected.length > 0) this._entities = keep;
+    return collected;
   }
 
   // -------------------------------------------------------------------------

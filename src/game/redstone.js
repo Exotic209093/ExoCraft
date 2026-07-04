@@ -45,6 +45,8 @@ import {
   PISTON_BASE_IDS, PISTON_HEAD_IDS, pistonFacing, pistonIsExtended, pistonIsSticky,
   makePistonId, makePistonHeadId, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS,
   FLORA_BLOCK_IDS,
+  // Wave R4 — hoppers
+  HOPPER_IDS, hopperFacing, hopperIsLocked, makeHopperId,
 } from "./textures";
 
 const MAX_POWER = 15;
@@ -130,6 +132,10 @@ export class RedstoneSim {
     // Optional callback: (movedCells: [{x,y,z}], dir: [dx,dy,dz]) after an extension
     // moves blocks — main.js displaces overlapping entities + flags falling blocks.
     this.onPistonMoved = null;
+    // Wave R4 — optional callback: (x,y,z) -> 0..15 comparator signal for a
+    // container cell (chest/furnace/hopper fullness). main.js supplies it since
+    // container state maps live there.
+    this.getContainerSignal = null;
     this._changedCells = [];          // cells world.set since the last drain
   }
 
@@ -165,7 +171,7 @@ export class RedstoneSim {
     if (!Array.isArray(edits)) return;
     for (const e of edits) {
       const id = e?.type;
-      if (!Number.isFinite(id) || id < 83 || id > 179) continue;
+      if (!Number.isFinite(id) || id < 83 || id > 189) continue;
       const key = cellKey(e.x, e.y, e.z);
       this._dirty.add(key);
       // Stale pressed buttons from an old save get a release timer.
@@ -436,7 +442,7 @@ export class RedstoneSim {
    * repeater/comparator input at (rx,ry,rz): wire level, full-strength sources,
    * or another component's output pointed at the reader.
    */
-  _readSignalAt(x, y, z, rx, ry, rz) {
+  _readSignalAt(x, y, z, rx, ry, rz, allowContainer = false) {
     const id = this.world.get(x, y, z);
     if (REDSTONE_WIRE_IDS.has(id)) {
       const stored = this._wirePower.get(cellKey(x, y, z));
@@ -444,6 +450,13 @@ export class RedstoneSim {
       return id === REDSTONE_WIRE_ON ? MAX_POWER : 0;
     }
     if (isActiveSource(id) || id === REDSTONE_TORCH_ON) return MAX_POWER;
+    // Wave R4 — ONLY the comparator's REAR read may see container fullness
+    // (chest 22, furnace 7, hopper). Without the gate, a repeater in front of a
+    // stocked chest would phantom-latch ON and comparator SIDES would subtract
+    // phantom signal (must-fix from the R4 review).
+    if (allowContainer && (id === 22 || id === 7 || HOPPER_IDS.has(id)) && this.getContainerSignal) {
+      return this.getContainerSignal(x, y, z) | 0;
+    }
     return this._componentOutputInto(x, y, z, rx, ry, rz);
   }
 
@@ -722,7 +735,7 @@ export class RedstoneSim {
           // outputs rear - side. Analog strength feeds the wire BFS.
           const facing = comparatorFacing(id);
           const [fdx, fdz] = REDSTONE_FACING_DIRS[facing];
-          const rear = this._readSignalAt(x - fdx, y, z - fdz, x, y, z);
+          const rear = this._readSignalAt(x - fdx, y, z - fdz, x, y, z, true);
           const sideA = this._readSignalAt(x - fdz, y, z + fdx, x, y, z);
           const sideB = this._readSignalAt(x + fdz, y, z - fdx, x, y, z);
           const side = Math.max(sideA, sideB);
@@ -739,6 +752,13 @@ export class RedstoneSim {
             }
           } else if (!pending || pending.powered !== wantPowered || pending.strength !== out) {
             this._comparatorTimers.set(key, { due: this._accumMs + TORCH_FLIP_DELAY_MS, powered: wantPowered, strength: out });
+          }
+        } else if (HOPPER_IDS.has(id)) {
+          // Wave R4 — powered hopper locks (transfers pause). Instant flip like
+          // the lamp; the id change is retexture-free (same tiles) and cheap.
+          const wantLocked = this._isCellPowered(x, y, z, this._wirePower);
+          if (wantLocked !== hopperIsLocked(id)) {
+            this._setBlock(x, y, z, makeHopperId(hopperFacing(id), wantLocked));
           }
         } else if (PISTON_BASE_IDS.has(id)) {
           // Wave R3 — piston: powered = extend, unpowered = retract, on a 1-tick

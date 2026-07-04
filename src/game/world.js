@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS, PISTON_HEAD_IDS, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS, PISTON_HEAD_IDS, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS, HOPPER_IDS, hopperFacing, HOPPER_FACING_DIRS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -166,6 +166,8 @@ const LIGHT_PASSABLE = new Set([
   ...Array.from({ length: 48 }, (_, i) => 96 + i),
   // Wave R3 — piston heads (168-179): plate + arm, light passes (bases are opaque).
   ...Array.from({ length: 12 }, (_, i) => 168 + i),
+  // Wave R4 — hoppers (180-189): funnel with gaps, light passes.
+  ...Array.from({ length: 10 }, (_, i) => 180 + i),
 ]);
 
 function toChunkKey(cx, cz) {
@@ -2295,9 +2297,10 @@ export class VoxelWorld {
             // Wave R3 must-fix: piston heads sample their OWN voxel instead — a
             // down-facing head always has its opaque base above (light 0/0) and
             // would render pitch black; heads are LIGHT_PASSABLE so their own
-            // cell carries valid light.
+            // cell carries valid light. Wave R4: hoppers get the same treatment
+            // (a chest or solid block directly above is the normal setup).
             const aboveX = worldX;
-            const aboveY = PISTON_HEAD_IDS.has(blockType) ? y : y + 1;
+            const aboveY = (PISTON_HEAD_IDS.has(blockType) || HOPPER_IDS.has(blockType)) ? y : y + 1;
             const aboveZ = worldZ;
             const aLX = aboveX - baseX;
             const aLZ = aboveZ - baseZ;
@@ -2395,6 +2398,22 @@ export class VoxelWorld {
               // the pressed state sinks visibly.
               const ph = blockType === PLATE_ON ? 0.03 : 0.0625;
               emitBox(x0 + 0.0625, y0, z0 + 0.0625, 0.875, ph, 0.875, blockType);
+            } else if (HOPPER_IDS.has(blockType)) {
+              // Wave R4 — hopper funnel: wide mouth box (top half), tapered stem,
+              // and a small output spout offset toward the facing direction.
+              const hFacing = hopperFacing(blockType);
+              const [odx, ody, odz] = HOPPER_FACING_DIRS[hFacing];
+              emitBox(x0, y0 + 0.5, z0, 1.0, 0.5, 1.0, blockType);              // mouth
+              emitBox(x0 + 0.25, y0 + 0.2, z0 + 0.25, 0.5, 0.3, 0.5, blockType); // stem
+              if (hFacing === 0) {
+                emitBox(x0 + 0.375, y0, z0 + 0.375, 0.25, 0.2, 0.25, blockType); // down spout
+              } else {
+                // Horizontal spout: a 0.25 bar hugging the output face (kept
+                // strictly inside this cell).
+                const sMinX = odx === 1 ? x0 + 0.75 : (odx === -1 ? x0 : x0 + 0.375);
+                const sMinZ = odz === 1 ? z0 + 0.75 : (odz === -1 ? z0 : z0 + 0.375);
+                emitBox(sMinX, y0 + 0.2, sMinZ, 0.25, 0.2, 0.25, blockType);
+              }
             } else if (PISTON_HEAD_IDS.has(blockType)) {
               // Wave R3 — piston head: a 0.25-thick push plate flush with the
               // OUTER face (the pushing side) plus a slim arm reaching back to

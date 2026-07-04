@@ -603,6 +603,189 @@ const rigAC = await page.evaluate(async ({ P }) => {
 }, { P });
 check("AC1 oscillator burns out (few transitions, then frozen)", rigAC.transitions <= 8 && rigAC.tail === 0, JSON.stringify(rigAC));
 
+// Rig AH (Wave R4): chest -> hopper -> chest gravity chain moves items down.
+const rigAH = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 29, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3); // pedestal
+  D.setBlock(x, P.y + 1, z, 22);      // bottom chest
+  D.placeHopper(x, P.y + 2, z, 0);    // hopper, output down
+  // openChestAt creates the top chest block + state and opens its panel;
+  // giveChestItem targets it by KEY; Escape (window-only dispatch) closes the panel.
+  D.openChestAt(x, P.y + 3, z);
+  D.giveChestItem("bread", 3, `${x},${P.y + 3},${z}`);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  for (let i = 0; i < 40; i++) window.advanceTime(100); // 4s: 3 pulls + 3 pushes
+  const hopper = D.getHopperAt(x, P.y + 2, z);
+  const signalBottom = D.getContainerSignalAt(x, P.y + 1, z);
+  return { hopper, signalBottom };
+}, { P });
+check("AH1 chest->hopper->chest chain delivers (bottom signal >=1, hopper drained)", rigAH.signalBottom >= 1 && rigAH.hopper.slots.every((s) => s === null), JSON.stringify(rigAH));
+
+// Rig AI (Wave R4): a redstone-locked hopper pauses; unlocking resumes.
+const rigAI = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 31, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.setBlock(x, P.y + 1, z, 22);      // bottom chest
+  D.placeHopper(x, P.y + 2, z, 0);
+  D.giveHopperItem(x, P.y + 2, z, "apple", 2);
+  D.placeRedstone("block", x + 1, P.y + 2, z); // power = lock
+  window.advanceTime(200);
+  const lockedId = D.getHopperAt(x, P.y + 2, z);
+  for (let i = 0; i < 15; i++) window.advanceTime(100);
+  const whileLocked = D.getContainerSignalAt(x, P.y + 1, z);
+  D.setBlock(x + 1, P.y + 2, z, 0); // unlock
+  for (let i = 0; i < 15; i++) window.advanceTime(100);
+  const afterUnlock = D.getContainerSignalAt(x, P.y + 1, z);
+  return { locked: lockedId.locked, whileLocked, afterUnlock };
+}, { P });
+check("AI1 locked hopper holds items; unlock resumes", rigAI.locked === true && rigAI.whileLocked === 0 && rigAI.afterUnlock >= 1, JSON.stringify(rigAI));
+
+// Rig AJ (Wave R4): comparator reads container fullness into wire strength.
+const rigAJ = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 33, x = P.x + 1;
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.openChestAt(x, P.y + 1, z);               // chest (comparator rear) + state
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.placeRedstone("comparator", x + 1, P.y + 1, z, 1); // facing E, rear = chest
+  D.placeRedstone("wire", x + 2, P.y + 1, z);
+  window.advanceTime(300);
+  const empty = D.getRedstoneAt(x + 2, P.y + 1, z);
+  // No nudge needed: container mutations dirty the sim, waking the comparator.
+  D.giveChestItem("stone", 64, `${x},${P.y + 1},${z}`); // ~1/27 slots -> signal 1
+  window.advanceTime(400);
+  const some = D.getRedstoneAt(x + 2, P.y + 1, z);
+  return { empty, some };
+}, { P });
+check("AJ1 empty chest -> comparator outputs 0", rigAJ.empty.id === 83 && rigAJ.empty.power === 0, JSON.stringify(rigAJ.empty));
+check("AJ2 stocked chest -> comparator drives wire (>=1)", rigAJ.some.id === 84 && rigAJ.some.power >= 1, JSON.stringify(rigAJ.some));
+
+// Rig AK (Wave R4): hopper vacuums dropped items from the cell above.
+const rigAK = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 35, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.placeHopper(x, P.y + 1, z, 0);
+  // spawnItemEntity takes PLAYER-RELATIVE offsets — compute them to land the
+  // stack in the cell above the hopper (player is far away, outside magnet range).
+  // Zero velocity = scatter-free vertical drop straight into the funnel.
+  const sp = JSON.parse(window.render_game_to_text()).player;
+  D.spawnItemEntity("coal", 5, (x + 0.5) - sp.x, (P.y + 2.4) - sp.y, (z + 0.5) - sp.z, { vx: 0, vy: 0, vz: 0 });
+  for (let i = 0; i < 20; i++) window.advanceTime(100);
+  const hopper = D.getHopperAt(x, P.y + 1, z);
+  const total = hopper.slots.reduce((n, s) => n + (s ? s.count : 0), 0);
+  return { total, itemId: hopper.slots.find((s) => s)?.itemId };
+}, { P });
+check("AK1 hopper vacuums the dropped stack (5 coal)", rigAK.total === 5 && rigAK.itemId === "coal", JSON.stringify(rigAK));
+
+// Rig AL (Wave R4): hopper above a furnace feeds the smelt input.
+const rigAL = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 37, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.setBlock(x, P.y + 1, z, 7);       // furnace
+  D.placeHopper(x, P.y + 2, z, 0);    // hopper above, output down
+  D.giveHopperItem(x, P.y + 2, z, "iron_ore", 2);
+  for (let i = 0; i < 12; i++) window.advanceTime(100);
+  const s = JSON.parse(window.render_game_to_text());
+  const hopper = D.getHopperAt(x, P.y + 2, z);
+  const left = hopper.slots.reduce((n, sl) => n + (sl ? sl.count : 0), 0);
+  return { left };
+}, { P });
+check("AL1 hopper feeds furnace input (hopper drains)", rigAL.left === 0, JSON.stringify(rigAL));
+
+// Rig AM (Wave R4 review): container reads reach ONLY the comparator rear —
+// a repeater behind a stocked chest and a comparator with a chest on its SIDE
+// must both stay off (no phantom latch).
+const rigAM = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 39, x = P.x + 1;
+  // a) Repeater rear = stocked chest.
+  for (let dx = 0; dx <= 2; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.openChestAt(x, P.y + 1, z);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.giveChestItem("stone", 64, `${x},${P.y + 1},${z}`);
+  D.placeRedstone("repeater", x + 1, P.y + 1, z, 1); // facing E, rear = chest
+  D.placeRedstone("wire", x + 2, P.y + 1, z);
+  // b) SUBTRACT comparator: rear = redstone block (15), stocked chest on its
+  // SIDE. Sides must ignore containers -> out 15; a leak would shave it to 14.
+  const z2 = z + 3;
+  for (let dx = 0; dx <= 2; dx++) D.setBlock(x + dx, P.y, z2, 3);
+  D.setBlock(x + 1, P.y, z2 + 1, 3);
+  D.openChestAt(x + 1, P.y + 1, z2 + 1);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.giveChestItem("stone", 64, `${x + 1},${P.y + 1},${z2 + 1}`); // side chest -> signal 1
+  D.placeRedstone("block", x, P.y + 1, z2);              // rear source 15
+  D.placeRedstone("comparator", x + 1, P.y + 1, z2, 1);  // facing E
+  D.toggleComparatorModeAt(x + 1, P.y + 1, z2);          // subtract mode
+  D.placeRedstone("wire", x + 2, P.y + 1, z2);
+  window.advanceTime(600);
+  return {
+    repeaterWire: D.getRedstoneAt(x + 2, P.y + 1, z),
+    comparatorWire: D.getRedstoneAt(x + 2, P.y + 1, z2),
+  };
+}, { P });
+check("AM1 repeater does NOT read chest rear (wire stays off)", rigAM.repeaterWire.id === 83 && rigAM.repeaterWire.power === 0, JSON.stringify(rigAM.repeaterWire));
+check("AM2 comparator side ignores containers (subtract keeps full 15)", rigAM.comparatorWire.id === 84 && rigAM.comparatorWire.power === 15, JSON.stringify(rigAM.comparatorWire));
+
+// Rig AN (Wave R4 review): tools keep their wear through hopper transfers and
+// never stack — two worn pickaxes land in two chest slots, durability intact.
+const rigAN = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 45, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.openChestAt(x, P.y + 1, z); // target chest
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.placeHopper(x, P.y + 2, z, 0); // output down into the chest
+  D.giveHopperItem(x, P.y + 2, z, "stone_pickaxe", 2, 7); // 2 picks, wear 7/132
+  for (let i = 0; i < 15; i++) window.advanceTime(100); // 2 transfer ticks
+  const chest = D.getChestContentsAt(x, P.y + 1, z) || [];
+  const picks = chest.filter((s) => s && s.itemId === "stone_pickaxe");
+  const hopper = D.getHopperAt(x, P.y + 2, z);
+  return { picks, hopperLeft: hopper.slots.filter(Boolean).length };
+}, { P });
+check("AN1 tools land one-per-slot (2 slots, count 1 each)", rigAN.picks.length === 2 && rigAN.picks.every((s) => s.count === 1) && rigAN.hopperLeft === 0, JSON.stringify(rigAN));
+check("AN2 tool wear survives the transfer (durability 7)", rigAN.picks.every((s) => s.durability === 7), JSON.stringify(rigAN.picks));
+
+// Rig AO (Wave R4 review): a hopper delivering into a chest wakes the
+// comparator reading that chest — live signal rise, no manual re-dirty.
+const rigAO = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 47, x = P.x + 1;
+  for (let dx = 0; dx <= 2; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.openChestAt(x, P.y + 1, z);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  D.placeRedstone("comparator", x + 1, P.y + 1, z, 1); // rear = chest
+  D.placeRedstone("wire", x + 2, P.y + 1, z);
+  window.advanceTime(300);
+  const before = D.getRedstoneAt(x + 2, P.y + 1, z);
+  D.placeHopper(x, P.y + 2, z, 0); // above the chest, output down
+  D.giveHopperItem(x, P.y + 2, z, "bread", 1);
+  for (let i = 0; i < 10; i++) window.advanceTime(100);
+  const after = D.getRedstoneAt(x + 2, P.y + 1, z);
+  return { before, after };
+}, { P });
+check("AO1 hopper->chest delivery wakes the comparator (wire off->on)", rigAO.before.power === 0 && rigAO.after.id === 84 && rigAO.after.power >= 1, JSON.stringify(rigAO));
+
+// Rig AP (Wave R4 review): non-smeltable items never jam the furnace input —
+// the hopper holds them instead of wedging the smelter.
+const rigAP = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 49, x = P.x + 1;
+  D.setBlock(x, P.y, z, 3);
+  D.setBlock(x, P.y + 1, z, 7);       // furnace
+  D.placeHopper(x, P.y + 2, z, 0);    // hopper above, output down
+  D.giveHopperItem(x, P.y + 2, z, "bread", 2); // bread is not smeltable
+  for (let i = 0; i < 12; i++) window.advanceTime(100);
+  const hopper = D.getHopperAt(x, P.y + 2, z);
+  const kept = hopper.slots.reduce((n, sl) => n + (sl ? sl.count : 0), 0);
+  const furnaceSignal = D.getContainerSignalAt(x, P.y + 1, z);
+  return { kept, furnaceSignal };
+}, { P });
+check("AP1 non-smeltable stays in hopper; furnace input stays clean", rigAP.kept === 2 && rigAP.furnaceSignal === 0, JSON.stringify(rigAP));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

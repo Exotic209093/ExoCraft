@@ -39,7 +39,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 | Repeater (1–4 tick delay, signal refresh) | ✅ | No locking (side-input latch) |
 | Comparator (compare/subtract, analog) | ✅ | No container reading (needs hoppers) |
 | Pistons (+ sticky) | ✅ | 6 facings, 12-block push, sticky pull, burnout guard; no slime-chain physics |
-| Hoppers (+ droppers/dispensers) | ⬜ | Item transport; unlocks comparator container reads |
+| Hoppers | ✅ | Pull/push/vacuum, lock-when-powered, comparator container reads; droppers/dispensers still ⬜ |
 | Observers, note blocks, TNT-as-circuit-output | ⬜ | Later redstone polish |
 
 ### Gameplay & survival
@@ -180,5 +180,5 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
   steps through `advanceTime` for tests.
 - Save changes must forward-default (old saves load) and be documented when
   they are lossy backward.
-- Id space: 143/255 used. If a wave would push past ~230, do the metadata-layer
+- Id space: 189/255 used. If a wave would push past ~230, do the metadata-layer
   refactor first (per-chunk aux array) instead of minting more state ids.

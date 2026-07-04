@@ -158,6 +158,13 @@ const DEFAULT_GAME_CONFIG = {
         color: 0xc8a060,
         transparent: true,
       })),
+      // Wave R4 — hoppers (180-189: facing D/N/E/S/W x locked in the id).
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: 180 + i,
+        name: `Hopper ${"DNESW"[i % 5]}${i >= 5 ? " (locked)" : ""}`,
+        color: 0x565a62,
+        transparent: true,
+      })),
     ],
     generation: {
       seed: 1337,

@@ -1,8 +1,12 @@
 import * as THREE from "three";
 
 const TILE_PX = 16;
-const ATLAS_COLS = 8;
-const ATLAS_ROWS = 8;
+// Wave R4 — atlas expanded 8x8 -> 16x16 (the 8x8 grid filled up at the piston
+// wave). All existing [col,row] slots keep their coordinates; tileOrigin and
+// tileUvRect derive everything from ATLAS_COLS/ATLAS_PX, so UVs stay exact.
+// Canvas grows 144px -> 288px (NPOT is fine in WebGL2, mipmaps unaffected).
+const ATLAS_COLS = 16;
+const ATLAS_ROWS = 16;
 // 1px gutter between tiles so mipmaps don't bleed across tile borders.
 const TILE_GUTTER = 1;
 const ATLAS_PX = (TILE_PX + TILE_GUTTER * 2) * ATLAS_COLS;
@@ -84,11 +88,13 @@ const TILE = {
   comparator_top:     [2, 3], // pale smoothstone plate with a wedge mark
   redstone_nub_on:    [3, 3], // bright red (lit nub boxes)
   redstone_nub_off:   [4, 3], // dark red (unlit nub boxes)
-  // Wave R3 — pistons. ATLAS IS NOW FULL (64/64): the next tile wave must bump
-  // ATLAS_COLS/ROWS to 16 (expansion path documented at the top of this file).
+  // Wave R3 — pistons (these filled the original 8x8 grid).
   piston_side:         [6, 3], // wood body with a stone piston band
   piston_front:        [7, 3], // wooden push plate
   piston_front_sticky: [7, 7], // push plate with an adhesive resin pad
+  // Wave R4 — atlas expanded to 16x16; rows 8+ / cols 8+ are the new space.
+  hopper_outside:      [8, 0], // dark iron funnel shell
+  hopper_inside:       [9, 0], // darker iron cavity (top face)
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -233,6 +239,9 @@ export const BLOCK_FACE_TILES = {
     const t = i >= 6 ? "piston_front_sticky" : "piston_front";
     return [168 + i, { px: t, nx: t, py: t, ny: t, pz: t, nz: t }];
   })),
+  // Wave R4 — hoppers (180-189): iron shell, funnel-mouth top.
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [180 + i,
+    { px: "hopper_outside", nx: "hopper_outside", py: "hopper_inside", ny: "hopper_outside", pz: "hopper_outside", nz: "hopper_outside" }])),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1368,6 +1377,23 @@ function paintPistonFront(ctx, col, row, sticky) {
   }
 }
 
+// Wave R4 — hopper shell/cavity: dark iron with rivet specks; the inside variant
+// is darker with a sunken center so the top face reads as a funnel mouth.
+function paintHopper(ctx, col, row, inside) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, inside ? 530 : 529);
+      let v = inside ? 52 : 74;
+      if (inside && x >= 3 && x <= 12 && y >= 3 && y <= 12) v -= 16; // cavity
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v += 14; // rim
+      if (!inside && ((x % 6 === 2 && y % 6 === 2))) v += 26; // rivets
+      if (n < 0.25) v -= 6; else if (n > 0.85) v += 6;
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, v), Math.max(0, v + 2), Math.max(0, v + 6)));
+    }
+  }
+}
+
 // Wave R2 — nub tiles: flat red fills used on the little direction/state boxes.
 function paintRedstoneNub(ctx, col, row, lit) {
   const { ox, oy } = tileOrigin(col, row);
@@ -1461,6 +1487,9 @@ function paintAtlas(ctx) {
   paintPistonSide(ctx, ...TILE.piston_side);
   paintPistonFront(ctx, ...TILE.piston_front, false);
   paintPistonFront(ctx, ...TILE.piston_front_sticky, true);
+  // Wave R4 — hopper
+  paintHopper(ctx, ...TILE.hopper_outside, false);
+  paintHopper(ctx, ...TILE.hopper_inside, true);
 }
 
 export function createAtlasTexture() {
@@ -1564,6 +1593,8 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   ...Object.fromEntries(Array.from({ length: 48 }, (_, i) => [96 + i, 5])),
   // Wave R3 — piston HEADS are partial (plate + arm); bases stay opaque cubes (0).
   ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [168 + i, 5])),
+  // Wave R4 — hoppers: funnel geometry on the partial path.
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [180 + i, 5])),
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1703,6 +1734,22 @@ export function makeComparatorId(facing, mode, powered) {
 export const REDSTONE_FACING_DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
 // ---------------------------------------------------------------------------
+// Wave R4 — hoppers.
+// Id layout: 180 + (locked ? 5 : 0) + facing
+//   facing 0 = output DOWN, 1..4 = output N(-Z)/E(+X)/S(+Z)/W(-X)
+//   locked = powered by redstone (transfers pause), toggled by the sim.
+// ---------------------------------------------------------------------------
+export const HOPPER_BASE_ID = 180;
+export const HOPPER_IDS = new Set(Array.from({ length: 10 }, (_, i) => 180 + i));
+export function hopperFacing(id) { return (id - 180) % 5; }
+export function hopperIsLocked(id) { return (id - 180) >= 5; }
+export function makeHopperId(facing, locked) { return 180 + (locked ? 5 : 0) + (facing % 5); }
+// facing index -> output direction (0 = down, 1-4 = horizontal like pistons 0-3).
+export const HOPPER_FACING_DIRS = [
+  [0, -1, 0], [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0],
+];
+
+// ---------------------------------------------------------------------------
 // Wave R3 — pistons.
 // Base id layout: 144 + (sticky ? 12 : 0) + (extended ? 6 : 0) + facing
 // Head id layout: 168 + (sticky ? 6 : 0) + facing
@@ -1747,7 +1794,7 @@ export const REDSTONE_ALL_IDS = new Set([
 // Wave R2 — repeaters + comparators too (base plate + direction nubs).
 export const PARTIAL_BLOCK_IDS = new Set([
   ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
-  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS, ...PISTON_HEAD_IDS,
+  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS, ...PISTON_HEAD_IDS, ...HOPPER_IDS,
 ]);
 
 // ----- Item icon canvases -----
@@ -1882,6 +1929,8 @@ const ITEM_CHIP_COLORS = {
   // Wave R3
   piston:             "#ba945a",
   sticky_piston:      "#60a84a",
+  // Wave R4
+  hopper:             "#565a62",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */
@@ -2464,6 +2513,24 @@ const ICON_GRIDS = {
     "................",
     "................",
   ],
+  hopperIcon: [
+    "................",
+    ".baaaaaaaaaaab..",
+    ".bcccccccccccb..",
+    ".bcaaaaaaaaacb..",
+    "..bcccccccccb...",
+    "..baaaaaaaaab...",
+    "...bcccccccb....",
+    "....baaaaab.....",
+    ".....bcccb......",
+    ".....bcccb......",
+    ".....baaab......",
+    ".....bbbbb......",
+    "................",
+    "................",
+    "................",
+    "................",
+  ],
   pistonIcon: [
     "................",
     "................",
@@ -2547,6 +2614,7 @@ const ICON_PALS = {
   // b/c/a = grey mechanism body.
   pistonPal:  { w: "#d8b276", g: "#ba945a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
   stickyPistonPal: { w: "#8ac86a", g: "#60a84a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
+  hopperPal:  { a: "#3a3e46", b: "#565a62", c: "#787c86" },
 };
 
 // itemId -> { grid, pal } for everything without a placeable atlas tile (plus a
@@ -2633,6 +2701,8 @@ const ICON_SPECS = {
   // Wave R3 — pistons (painted icon wins over the block-face tile path).
   piston:        { grid: "pistonIcon", pal: "pistonPal" },
   sticky_piston: { grid: "pistonIcon", pal: "stickyPistonPal" },
+  // Wave R4 — hopper funnel.
+  hopper:        { grid: "hopperIcon", pal: "hopperPal" },
 };
 
 /** Paints a 16x16 icon grid into ctx at 1px-per-cell using the named palette. */

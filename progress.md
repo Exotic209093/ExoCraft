@@ -1027,3 +1027,49 @@ persist as ordinary block edits; save stays v11):
   avoids timer-key desync); side texture band doesn't rotate with facing (cosmetic;
   needs atlas expansion for rotated tiles); no slime-block chain physics; heads
   collide as full cubes.
+
+## Wave R4 — hoppers + comparator container reading (ids 180-189)
+- BLOCKS: hopper ids 180-189 = 180 + locked*5 + facing (0=down, 1-4 NESW).
+  Class-5 partial geometry: funnel mouth (full-width upper half), narrow stem,
+  and a short spout hugging the output face — all strictly in-cell. 2 new tiles
+  (hopper outside/inside) forced the ATLAS EXPANSION from 8x8 to 16x16
+  (ATLAS_COLS/ROWS=16); all UVs derive from tileOrigin/tileUvRect so existing
+  slots kept their coordinates — verified zero visual drift. LIGHT_PASSABLE +
+  own-cell light sampling (like piston heads: a chest directly above is the
+  normal setup and would otherwise render the hopper pitch black).
+- MECHANICS (main.js): 5-slot container per hopper (hopperStates map, saved as
+  v12 `hoppers` field — old saves forward-default). Every 400ms an unlocked
+  hopper pushes ONE item into the container it faces (chest / hopper / furnace:
+  from above feeds the smelt input — ONLY if the item is smeltable; from the
+  side burns it as fuel) and pulls ONE from the container above (chest /
+  hopper / furnace output), or VACUUMS dropped item entities from its mouth.
+  Redstone power sets the locked bit (transfers pause; instant flip like the
+  lamp). Right-click opens a 5-slot panel with click-click transfers. Breaking
+  (or exploding) a hopper spills its slots; evicted chunks pause their hoppers
+  instead of forcing chunk regen every tick.
+- COMPARATORS now read container fullness (1 + floor(14*fill) over chest 27x64 /
+  hopper 5x64 / furnace 2x64) — closes the R2 gap. Container reads are gated to
+  the comparator's REAR input only.
+- 3-lens adversarial review (logic / mesher-blank-world / perf-save, live
+  Playwright verification): 5 MUST-FIXES, all fixed + regression-rigged:
+  (1) STALENESS — comparators poll containers only on re-evaluation and no
+  mutation path dirtied the sim; every container mutation (hopper push/pull,
+  all panel transfers, furnace load/take, debug hooks) now calls
+  redstoneSim.onBlockChanged on the container cell. (2) DURABILITY — hopper
+  transfers stripped tool wear and stacked tools (free repair + item loss on
+  reload); insertIntoSlots is now one-per-slot for tools/non-stackables and
+  carries durability end-to-end incl. save/load validation against ITEM_DEFS.
+  (3) PHANTOM LATCH — container reads leaked into repeater rears and comparator
+  sides; now rear-only via an allowContainer flag. (4) FURNACE JAM —
+  non-smeltables fed from above wedged the input slot; gated on
+  getSmeltingRecipeByInput. (5) Hopper under an opaque block rendered black
+  (light sampled the cell above); hoppers sample their OWN cell.
+- VERIFIED: smoke suite 58 -> 69 checks, ALL PASS: chest->hopper->chest chain,
+  redstone lock/unlock pause-resume, comparator reads fullness LIVE (no manual
+  re-dirty — the old masking "nudge" removed), vacuum pickup, furnace feeding,
+  repeater-behind-chest stays off, subtract-mode sides ignore containers (15
+  stays 15), 2 worn pickaxes cross a hopper into 2 chest slots at durability 7,
+  hopper delivery wakes an adjacent comparator, non-smeltables stay put.
+- KNOWN (deferred): item entities don't carry durability (pre-existing,
+  engine-wide — vacuumed tools reset to full wear like any ground drop);
+  droppers/dispensers next; hopper minecarts far later.

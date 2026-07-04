@@ -803,7 +803,8 @@ canvas {
 }
 
 /* ---- Wave 10: Chest panel ---- */
-#chest-panel {
+#chest-panel,
+#hopper-panel {
   position: absolute;
   left: 50%;
   top: 50%;
@@ -820,6 +821,18 @@ canvas {
   pointer-events: auto;
   box-shadow: inset 2px 2px 0 #fff, inset -2px -2px 0 var(--mc-shadow), 0 0 0 2px #2b2b2b;
 }
+
+/* Wave R4 — hopper: a single 5-slot row above the shared inventory grid. */
+#hopper-slots {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.3rem;
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid #a3a3a3;
+}
+#hopper-title { font-size: 1.35rem; margin-bottom: 0.2rem; }
+#hopper-context { font-size: 1rem; color: #5a5a5a; margin-bottom: 0.4rem; }
 
 #chest-title {
   font-size: 1.35rem;
