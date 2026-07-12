@@ -1,8 +1,12 @@
 import * as THREE from "three";
 
 const TILE_PX = 16;
-const ATLAS_COLS = 8;
-const ATLAS_ROWS = 8;
+// Wave R4 — atlas expanded 8x8 -> 16x16 (the 8x8 grid filled up at the piston
+// wave). All existing [col,row] slots keep their coordinates; tileOrigin and
+// tileUvRect derive everything from ATLAS_COLS/ATLAS_PX, so UVs stay exact.
+// Canvas grows 144px -> 288px (NPOT is fine in WebGL2, mipmaps unaffected).
+const ATLAS_COLS = 16;
+const ATLAS_ROWS = 16;
 // 1px gutter between tiles so mipmaps don't bleed across tile borders.
 const TILE_GUTTER = 1;
 const ATLAS_PX = (TILE_PX + TILE_GUTTER * 2) * ATLAS_COLS;
@@ -84,6 +88,20 @@ const TILE = {
   comparator_top:     [2, 3], // pale smoothstone plate with a wedge mark
   redstone_nub_on:    [3, 3], // bright red (lit nub boxes)
   redstone_nub_off:   [4, 3], // dark red (unlit nub boxes)
+  // Wave R3 — pistons (these filled the original 8x8 grid).
+  piston_side:         [6, 3], // wood body with a stone piston band
+  piston_front:        [7, 3], // wooden push plate
+  piston_front_sticky: [7, 7], // push plate with an adhesive resin pad
+  // Wave R4 — atlas expanded to 16x16; rows 8+ / cols 8+ are the new space.
+  hopper_outside:      [8, 0], // dark iron funnel shell
+  hopper_inside:       [9, 0], // darker iron cavity (top face)
+  // Wave R5 — dispenser/dropper fronts + observer faces.
+  dispenser_front:     [10, 0], // stone face with a round dark bore
+  dropper_front:       [11, 0], // stone face with a smaller square bore
+  observer_face:       [12, 0], // grey slab with a wide detector "eye"
+  observer_back:       [13, 0], // grey slab with a dark output dot
+  observer_back_lit:   [14, 0], // grey slab with a bright red output dot (pulsing)
+  observer_side:       [15, 0], // grey slab with a direction groove
 };
 
 // For each block id, list the tile shown on each of the 6 box faces.
@@ -206,6 +224,56 @@ export const BLOCK_FACE_TILES = {
     { px: "repeater_top", nx: "repeater_top", py: "repeater_top", ny: "stone", pz: "repeater_top", nz: "repeater_top" }])),
   ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [128 + i,
     { px: "comparator_top", nx: "comparator_top", py: "comparator_top", ny: "stone", pz: "comparator_top", nz: "comparator_top" }])),
+  // Wave R3 — piston bases (144-167): plain opaque cubes whose FACE MAP is generated
+  // per facing — push plate on the facing side, planks on the back, body elsewhere.
+  // Extended bases show the darker back tile in front (the plate moved to the head).
+  ...Object.fromEntries(Array.from({ length: 24 }, (_, i) => {
+    const id = 144 + i;
+    const facing = i % 6;
+    const extended = (i % 12) >= 6;
+    const sticky = i >= 12;
+    const front = extended ? "crafting_side" : (sticky ? "piston_front_sticky" : "piston_front");
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const oppositeKey = { nz: "pz", pz: "nz", px: "nx", nx: "px", py: "ny", ny: "py" };
+    const frontKey = faceKeyByFacing[facing];
+    const map = { px: "piston_side", nx: "piston_side", py: "piston_side", ny: "piston_side", pz: "piston_side", nz: "piston_side" };
+    map[frontKey] = front;
+    map[oppositeKey[frontKey]] = "crafting_side";
+    return [id, map];
+  })),
+  // Piston heads (168-179): plate tile everywhere (the arm box overrides its tile).
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const t = i >= 6 ? "piston_front_sticky" : "piston_front";
+    return [168 + i, { px: t, nx: t, py: t, ny: t, pz: t, nz: t }];
+  })),
+  // Wave R4 — hoppers (180-189): iron shell, funnel-mouth top.
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [180 + i,
+    { px: "hopper_outside", nx: "hopper_outside", py: "hopper_inside", ny: "hopper_outside", pz: "hopper_outside", nz: "hopper_outside" }])),
+  // Wave R5 — dispensers (190-195) + droppers (196-201): plain opaque cubes with
+  // a generated face map — bore tile on the facing side, furnace-stone body.
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const id = 190 + i;
+    const facing = i % 6;
+    const front = i < 6 ? "dispenser_front" : "dropper_front";
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const map = { px: "furnace_side", nx: "furnace_side", py: "furnace_top", ny: "furnace_top", pz: "furnace_side", nz: "furnace_side" };
+    map[faceKeyByFacing[facing]] = front;
+    return [id, map];
+  })),
+  // Observers (202-213): eye on the facing (watching) side, output dot on the
+  // opposite side (lit while pulsing), grooved body elsewhere.
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => {
+    const id = 202 + i;
+    const facing = i % 6;
+    const powered = i >= 6;
+    const faceKeyByFacing = ["nz", "px", "pz", "nx", "py", "ny"];
+    const oppositeKey = { nz: "pz", pz: "nz", px: "nx", nx: "px", py: "ny", ny: "py" };
+    const frontKey = faceKeyByFacing[facing];
+    const map = { px: "observer_side", nx: "observer_side", py: "observer_side", ny: "observer_side", pz: "observer_side", nz: "observer_side" };
+    map[frontKey] = "observer_face";
+    map[oppositeKey[frontKey]] = powered ? "observer_back_lit" : "observer_back";
+    return [id, map];
+  })),
 };
 
 // Deterministic pseudo-random — seeded by pixel index so textures are stable across reloads.
@@ -1302,6 +1370,114 @@ function paintRedstonePlate(ctx, col, row, wedge) {
   }
 }
 
+// Wave R3 — piston body side: planks with a grey mechanism band at the base.
+function paintPistonSide(ctx, col, row) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 526);
+      let r, g, b;
+      if (y >= 11) { // mechanism band (bottom = back of the piston)
+        const v = 96 + (n < 0.35 ? -12 : n > 0.8 ? 10 : 0);
+        r = v; g = v; b = v + 4;
+      } else {
+        r = 186; g = 148; b = 90; // planks
+        if (y === 0 || y === 10) { r -= 30; g -= 26; b -= 18; }
+        if (x % 5 === 4) { r -= 22; g -= 18; b -= 12; }
+        if (n < 0.2) { r -= 12; g -= 10; b -= 6; } else if (n > 0.85) { r += 10; g += 8; b += 5; }
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave R3 — piston push plate: plain planks, `sticky` adds a green resin pad.
+function paintPistonFront(ctx, col, row, sticky) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, sticky ? 528 : 527);
+      let r = 192, g = 154, b = 94; // plate planks
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) { r -= 34; g -= 28; b -= 20; }
+      if ((x + y) % 7 === 0) { r -= 14; g -= 12; b -= 8; }
+      if (sticky && x >= 3 && x <= 12 && y >= 3 && y <= 12) {
+        r = 96; g = 168; b = 74; // resin pad
+        if (n < 0.3) { r -= 18; g -= 24; b -= 14; } else if (n > 0.85) { r += 16; g += 20; b += 12; }
+      } else if (n < 0.2) { r -= 12; g -= 10; b -= 6; }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
+// Wave R4 — hopper shell/cavity: dark iron with rivet specks; the inside variant
+// is darker with a sunken center so the top face reads as a funnel mouth.
+function paintHopper(ctx, col, row, inside) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, inside ? 530 : 529);
+      let v = inside ? 52 : 74;
+      if (inside && x >= 3 && x <= 12 && y >= 3 && y <= 12) v -= 16; // cavity
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v += 14; // rim
+      if (!inside && ((x % 6 === 2 && y % 6 === 2))) v += 26; // rivets
+      if (n < 0.25) v -= 6; else if (n > 0.85) v += 6;
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, v), Math.max(0, v + 2), Math.max(0, v + 6)));
+    }
+  }
+}
+
+// Wave R5 — dispenser/dropper front: furnace-stone face with a dark bore.
+// The dispenser bore is round and wide; the dropper bore is a smaller square.
+function paintEjectorFront(ctx, col, row, isDropper) {
+  const { ox, oy } = tileOrigin(col, row);
+  const cx = 7.5, cy = 7.5;
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, isDropper ? 532 : 531);
+      let v = 116 + (n < 0.3 ? -12 : n > 0.85 ? 10 : 0); // stone body
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v -= 22;
+      const inBore = isDropper
+        ? (x >= 5 && x <= 10 && y >= 5 && y <= 10)
+        : ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= 4.2 * 4.2);
+      if (inBore) {
+        v = 26 + (n < 0.4 ? -6 : 0); // dark cavity
+        const rim = isDropper
+          ? (x === 5 || x === 10 || y === 5 || y === 10)
+          : ((x - cx) * (x - cx) + (y - cy) * (y - cy) >= 3.1 * 3.1);
+        if (rim) v = 62; // bore rim
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, v), Math.max(0, v), Math.max(0, v + 4)));
+    }
+  }
+}
+
+// Wave R5 — observer tiles. face: wide detector eye; back: output dot (bright
+// while pulsing); side: a horizontal groove giving the block a direction read.
+function paintObserver(ctx, col, row, kind) {
+  const { ox, oy } = tileOrigin(col, row);
+  for (let y = 0; y < TILE_PX; y += 1) {
+    for (let x = 0; x < TILE_PX; x += 1) {
+      const n = pixelNoise(x, y, 533 + (kind === "face" ? 0 : kind === "back" ? 1 : kind === "back_lit" ? 2 : 3));
+      let r, g, b;
+      let v = 104 + (n < 0.3 ? -10 : n > 0.85 ? 8 : 0); // smooth grey body
+      if (x === 0 || y === 0 || x === TILE_PX - 1 || y === TILE_PX - 1) v -= 20;
+      r = v; g = v; b = v + 2;
+      if (kind === "face") {
+        if (y >= 5 && y <= 10 && x >= 2 && x <= 13) { r = 34; g = 30; b = 30; } // eye slot
+        if (y >= 6 && y <= 9 && (x === 4 || x === 5 || x === 10 || x === 11)) { r = 214; g = 208; b = 196; } // pupils
+      } else if (kind === "back" || kind === "back_lit") {
+        const lit = kind === "back_lit";
+        if (x >= 6 && x <= 9 && y >= 6 && y <= 9) {
+          r = lit ? 236 : 88; g = lit ? 54 : 16; b = lit ? 44 : 14; // output dot
+        }
+      } else { // side
+        if (y >= 7 && y <= 8 && x >= 2 && x <= 13) { r -= 34; g -= 34; b -= 32; } // groove
+      }
+      shade(ctx, ox + x, oy + y, rgb(Math.max(0, r), Math.max(0, g), Math.max(0, b)));
+    }
+  }
+}
+
 // Wave R2 — nub tiles: flat red fills used on the little direction/state boxes.
 function paintRedstoneNub(ctx, col, row, lit) {
   const { ox, oy } = tileOrigin(col, row);
@@ -1391,6 +1567,20 @@ function paintAtlas(ctx) {
   paintRedstonePlate(ctx, ...TILE.comparator_top, true);
   paintRedstoneNub(ctx, ...TILE.redstone_nub_on, true);
   paintRedstoneNub(ctx, ...TILE.redstone_nub_off, false);
+  // Wave R3 — pistons
+  paintPistonSide(ctx, ...TILE.piston_side);
+  paintPistonFront(ctx, ...TILE.piston_front, false);
+  paintPistonFront(ctx, ...TILE.piston_front_sticky, true);
+  // Wave R4 — hopper
+  paintHopper(ctx, ...TILE.hopper_outside, false);
+  paintHopper(ctx, ...TILE.hopper_inside, true);
+  // Wave R5 — dispenser/dropper/observer
+  paintEjectorFront(ctx, ...TILE.dispenser_front, false);
+  paintEjectorFront(ctx, ...TILE.dropper_front, true);
+  paintObserver(ctx, ...TILE.observer_face, "face");
+  paintObserver(ctx, ...TILE.observer_back, "back");
+  paintObserver(ctx, ...TILE.observer_back_lit, "back_lit");
+  paintObserver(ctx, ...TILE.observer_side, "side");
 }
 
 export function createAtlasTexture() {
@@ -1492,6 +1682,10 @@ export const BLOCK_TRANSPARENCY_CLASS = {
   91: 4, 92: 4,           // redstone torch on/off
   // Wave R2 — repeaters + comparators: thin plates on the class-5 partial path.
   ...Object.fromEntries(Array.from({ length: 48 }, (_, i) => [96 + i, 5])),
+  // Wave R3 — piston HEADS are partial (plate + arm); bases stay opaque cubes (0).
+  ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [168 + i, 5])),
+  // Wave R4 — hoppers: funnel geometry on the partial path.
+  ...Object.fromEntries(Array.from({ length: 10 }, (_, i) => [180 + i, 5])),
 };
 
 // Flora block ids as a Set — used by the mesher and collision system.
@@ -1630,6 +1824,70 @@ export function makeComparatorId(facing, mode, powered) {
 // Facing index -> output direction vector (same convention as stairs: 0=N faces -Z).
 export const REDSTONE_FACING_DIRS = [[0, -1], [1, 0], [0, 1], [-1, 0]];
 
+// ---------------------------------------------------------------------------
+// Wave R4 — hoppers.
+// Id layout: 180 + (locked ? 5 : 0) + facing
+//   facing 0 = output DOWN, 1..4 = output N(-Z)/E(+X)/S(+Z)/W(-X)
+//   locked = powered by redstone (transfers pause), toggled by the sim.
+// ---------------------------------------------------------------------------
+export const HOPPER_BASE_ID = 180;
+export const HOPPER_IDS = new Set(Array.from({ length: 10 }, (_, i) => 180 + i));
+export function hopperFacing(id) { return (id - 180) % 5; }
+export function hopperIsLocked(id) { return (id - 180) >= 5; }
+export function makeHopperId(facing, locked) { return 180 + (locked ? 5 : 0) + (facing % 5); }
+// facing index -> output direction (0 = down, 1-4 = horizontal like pistons 0-3).
+export const HOPPER_FACING_DIRS = [
+  [0, -1, 0], [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0],
+];
+
+// ---------------------------------------------------------------------------
+// Wave R3 — pistons.
+// Base id layout: 144 + (sticky ? 12 : 0) + (extended ? 6 : 0) + facing
+// Head id layout: 168 + (sticky ? 6 : 0) + facing
+//   facing 0..5 = -Z / +X / +Z / -X / +Y(up) / -Y(down)
+// ---------------------------------------------------------------------------
+export const PISTON_BASE_ID = 144;
+export const PISTON_HEAD_BASE_ID = 168;
+export const PISTON_BASE_IDS = new Set(Array.from({ length: 24 }, (_, i) => 144 + i));
+export const PISTON_HEAD_IDS = new Set(Array.from({ length: 12 }, (_, i) => 168 + i));
+export function pistonFacing(id) { return (id - 144) % 6; }
+export function pistonIsExtended(id) { return ((id - 144) % 12) >= 6; }
+export function pistonIsSticky(id) { return (id - 144) >= 12; }
+export function makePistonId(facing, sticky, extended) {
+  return 144 + (sticky ? 12 : 0) + (extended ? 6 : 0) + (facing % 6);
+}
+export function pistonHeadFacing(id) { return (id - 168) % 6; }
+export function pistonHeadIsSticky(id) { return (id - 168) >= 6; }
+export function makePistonHeadId(facing, sticky) {
+  return 168 + (sticky ? 6 : 0) + (facing % 6);
+}
+// Facing index -> 3D direction (extends REDSTONE_FACING_DIRS with up/down).
+export const PISTON_FACING_DIRS = [
+  [0, 0, -1], [1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
+];
+
+// ---------------------------------------------------------------------------
+// Wave R5 — dispensers, droppers, observers.
+// Dispenser: 190 + facing (0..5, PISTON_FACING_DIRS order). Edge-triggered ejector.
+// Dropper:   196 + facing. Same container, gentler ejection.
+// Observer:  202 + (powered ? 6 : 0) + facing — watches the cell it FACES and
+//            pulses power out of its BACK when that cell's block id changes.
+// ---------------------------------------------------------------------------
+export const DISPENSER_BASE_ID = 190;
+export const DROPPER_BASE_ID = 196;
+export const OBSERVER_BASE_ID = 202;
+export const DISPENSER_IDS = new Set(Array.from({ length: 6 }, (_, i) => 190 + i));
+export const DROPPER_IDS = new Set(Array.from({ length: 6 }, (_, i) => 196 + i));
+// Both share the 9-slot container + edge-triggered fire; "ejector" = either.
+export const EJECTOR_IDS = new Set([...DISPENSER_IDS, ...DROPPER_IDS]);
+export const OBSERVER_IDS = new Set(Array.from({ length: 12 }, (_, i) => 202 + i));
+export function ejectorFacing(id) { return (id - 190) % 6; }
+export function ejectorIsDropper(id) { return id >= 196; }
+export function makeEjectorId(facing, isDropper) { return (isDropper ? 196 : 190) + (facing % 6); }
+export function observerFacing(id) { return (id - 202) % 6; }
+export function observerIsPowered(id) { return (id - 202) >= 6; }
+export function makeObserverId(facing, powered) { return 202 + (powered ? 6 : 0) + (facing % 6); }
+
 // Components that must sit on a solid block and pop off when support breaks.
 export const REDSTONE_ATTACHED_IDS = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
@@ -1640,7 +1898,7 @@ export const REDSTONE_CROSS_IDS = new Set([85, 86, 91, 92]);
 // All redstone-system ids (for debug listings / text-state filters).
 export const REDSTONE_ALL_IDS = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95,
-  ...REPEATER_IDS, ...COMPARATOR_IDS,
+  ...REPEATER_IDS, ...COMPARATOR_IDS, ...EJECTOR_IDS, ...OBSERVER_IDS,
 ]);
 
 // Combined set for fast mesher dispatch (fence + doors + trapdoors join the partial path;
@@ -1649,7 +1907,7 @@ export const REDSTONE_ALL_IDS = new Set([
 // Wave R2 — repeaters + comparators too (base plate + direction nubs).
 export const PARTIAL_BLOCK_IDS = new Set([
   ...SLAB_BLOCK_IDS, ...STAIR_BLOCK_IDS, ...FENCE_BLOCK_IDS, ...DOOR_BLOCK_IDS, ...TRAPDOOR_BLOCK_IDS,
-  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS,
+  ...BUTTON_IDS, ...PLATE_IDS, ...REPEATER_IDS, ...COMPARATOR_IDS, ...PISTON_HEAD_IDS, ...HOPPER_IDS,
 ]);
 
 // ----- Item icon canvases -----
@@ -1781,6 +2039,11 @@ const ITEM_CHIP_COLORS = {
   // Wave R2
   repeater:           "#b8b8c0",
   comparator:         "#b0b0bc",
+  // Wave R3
+  piston:             "#ba945a",
+  sticky_piston:      "#60a84a",
+  // Wave R4
+  hopper:             "#565a62",
 };
 
 /** Returns the chip color hex string for any item id, falling back to the shared default. */
@@ -2363,6 +2626,42 @@ const ICON_GRIDS = {
     "................",
     "................",
   ],
+  hopperIcon: [
+    "................",
+    ".baaaaaaaaaaab..",
+    ".bcccccccccccb..",
+    ".bcaaaaaaaaacb..",
+    "..bcccccccccb...",
+    "..baaaaaaaaab...",
+    "...bcccccccb....",
+    "....baaaaab.....",
+    ".....bcccb......",
+    ".....bcccb......",
+    ".....baaab......",
+    ".....bbbbb......",
+    "................",
+    "................",
+    "................",
+    "................",
+  ],
+  pistonIcon: [
+    "................",
+    "................",
+    "..wwwwwwwwwww...",
+    "..wggggggggga...",
+    "..wggggggggga...",
+    "..waaaaaaaaaa...",
+    "..bcccccccccb...",
+    "..bcccccccccb...",
+    "..bccccccccab...",
+    "..bccccccccab...",
+    "..bcaacaacaab...",
+    "..bbbbbbbbbbb...",
+    "................",
+    "................",
+    "................",
+    "................",
+  ],
   compass: [
     "................",
     "................",
@@ -2424,6 +2723,11 @@ const ICON_PALS = {
   arrowPal:   { a: "#26262c", b: "#40404a", c: "#5c5c68", w: "#f0f0ee" },
   totemPal:   { a: "#2a4a1e", b: "#c8a030", c: "#e0c460" },
   compassPal: { a: "#2a2e34", b: "#98a0a8", r: "#d03030", w: "#e8e8ea" },
+  // Wave R3 — piston icons: w = plate top edge, g = plate face (wood or resin),
+  // b/c/a = grey mechanism body.
+  pistonPal:  { w: "#d8b276", g: "#ba945a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
+  stickyPistonPal: { w: "#8ac86a", g: "#60a84a", a: "#4a4e56", b: "#6a6e76", c: "#8a8e96" },
+  hopperPal:  { a: "#3a3e46", b: "#565a62", c: "#787c86" },
 };
 
 // itemId -> { grid, pal } for everything without a placeable atlas tile (plus a
@@ -2507,6 +2811,11 @@ const ICON_SPECS = {
   // Specials
   warden_totem:      { grid: "totem", pal: "totemPal" },
   spelunker_compass: { grid: "compass", pal: "compassPal" },
+  // Wave R3 — pistons (painted icon wins over the block-face tile path).
+  piston:        { grid: "pistonIcon", pal: "pistonPal" },
+  sticky_piston: { grid: "pistonIcon", pal: "stickyPistonPal" },
+  // Wave R4 — hopper funnel.
+  hopper:        { grid: "hopperIcon", pal: "hopperPal" },
 };
 
 /** Paints a 16x16 icon grid into ctx at 1px-per-cell using the named palette. */
@@ -2548,6 +2857,14 @@ const _iconCache = new Map();
  * For tools/resources: a flat colored chip with a pixel highlight/shadow border.
  * Memoized per itemId; safe to call every frame.
  */
+// Wave R5 — item-icon face override: base placeBlockType -> the tile to draw as
+// its inventory/hotbar icon (their top faces collide, so use the front instead).
+const ICON_FRONT_TILE_OVERRIDE = {
+  190: "dispenser_front", // dispenser base (facing N)
+  196: "dropper_front",   // dropper base (facing N)
+  202: "observer_face",   // observer base (facing N)
+};
+
 export function getItemIconCanvas(itemId, placeBlockType) {
   if (_iconCache.has(itemId)) return _iconCache.get(itemId);
 
@@ -2577,7 +2894,10 @@ export function getItemIconCanvas(itemId, placeBlockType) {
   if (!drawnFromAtlas && placeBlockType != null && BLOCK_FACE_TILES[placeBlockType]) {
     const faces = BLOCK_FACE_TILES[placeBlockType];
     // Use top face for icon; torches/uniform blocks use any available face.
-    const tileName = faces.py || faces.pz || faces.px;
+    // Wave R5 — dispenser/dropper/observer share a top tile (furnace_top /
+    // observer_side), so their icons would be indistinguishable. Override to the
+    // distinctive FRONT tile so the hotbar tells them apart.
+    const tileName = ICON_FRONT_TILE_OVERRIDE[placeBlockType] || faces.py || faces.pz || faces.px;
     const slot = TILE[tileName];
     if (slot) {
       const [col, row] = slot;

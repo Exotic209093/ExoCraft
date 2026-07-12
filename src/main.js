@@ -132,6 +132,31 @@ import {
   comparatorMode,
   comparatorIsPowered,
   makeComparatorId,
+  // Wave R3 — pistons
+  PISTON_BASE_IDS,
+  PISTON_HEAD_IDS,
+  pistonFacing,
+  pistonIsExtended,
+  pistonIsSticky,
+  makePistonId,
+  pistonHeadFacing,
+  pistonHeadIsSticky,
+  PISTON_FACING_DIRS,
+  // Wave R4 — hoppers
+  HOPPER_IDS,
+  hopperFacing,
+  hopperIsLocked,
+  makeHopperId,
+  HOPPER_FACING_DIRS,
+  // Wave R5 — dispensers/droppers + observers
+  EJECTOR_IDS,
+  DISPENSER_IDS,
+  ejectorFacing,
+  ejectorIsDropper,
+  makeEjectorId,
+  OBSERVER_IDS,
+  observerFacing,
+  makeObserverId,
 } from "./game/textures";
 import { RedstoneSim } from "./game/redstone";
 import {
@@ -461,6 +486,65 @@ const redstoneSim = new RedstoneSim({
   },
 });
 
+// Wave R3 — after a piston moves blocks: nudge any entity standing in a destination
+// cell one step along the push direction, and flag destination chunks whose new
+// occupant is a gravity block so the falling-block scan picks it up.
+redstoneSim.onPistonMoved = (movedCells, dir) => {
+  for (const c of movedCells) {
+    const movedId = world.get(c.x, c.y, c.z);
+    if (FALLING_BLOCK_TYPES.has(movedId)) {
+      const pos = world.toChunkPosition(c.x, c.z);
+      const chunk = world.chunks.get(pos.key);
+      if (chunk) chunk.hasFallingBlocks = true;
+    }
+    // Player displacement: AABB overlap with the now-solid cell (radius-aware,
+    // not just the centre column) -> push out along the piston axis. Skip the
+    // shove when the destination itself is solid (pinned against a wall) so we
+    // never translate an entity INTO a block.
+    const r = playerConfig.radius;
+    const overlapsPlayer =
+      state.playerPos.x + r > c.x && state.playerPos.x - r < c.x + 1 &&
+      state.playerPos.z + r > c.z && state.playerPos.z - r < c.z + 1 &&
+      state.playerPos.y + playerConfig.height > c.y && state.playerPos.y < c.y + 1;
+    if (overlapsPlayer) {
+      const destId = world.get(
+        Math.floor(state.playerPos.x + dir[0] * 1.02),
+        Math.floor(state.playerPos.y + dir[1] * 1.02 + 0.05),
+        Math.floor(state.playerPos.z + dir[2] * 1.02),
+      );
+      const destSolid = destId !== 0 && !PASSABLE_BLOCKS.has(destId);
+      if (!destSolid) {
+        state.playerPos.x += dir[0] * 1.02;
+        state.playerPos.y += dir[1] * 1.02;
+        state.playerPos.z += dir[2] * 1.02;
+        if (dir[1] > 0) state.playerVel.y = Math.max(state.playerVel.y, 6); // gentle launch
+      }
+    }
+    for (const mobList of [hostileMobs, passiveMobs]) {
+      for (const mob of mobList) {
+        if (!mob?.pos) continue;
+        // Check both body cells (mobs are up to ~2 tall).
+        const feetY = Math.floor(mob.pos.y + 0.05);
+        const headY = Math.floor(mob.pos.y + 1.05);
+        if (Math.floor(mob.pos.x) === c.x && Math.floor(mob.pos.z) === c.z
+          && (feetY === c.y || headY === c.y)) {
+          mob.pos.x += dir[0] * 1.02;
+          mob.pos.y += dir[1] * 1.02;
+          mob.pos.z += dir[2] * 1.02;
+          if (mob.mesh) mob.mesh.position.copy(mob.pos);
+        }
+      }
+    }
+  }
+};
+
+// Wave R4 — comparators ask the sim, the sim asks us: container fullness signal.
+redstoneSim.getContainerSignal = (x, y, z) => containerSignalAt(x, y, z);
+
+// Wave R5 — the sim reports edge-triggered ejector fires; the item logic (slots,
+// containers, ground drops) lives here. Defined below with the ejector state.
+redstoneSim.onEjectorFire = (x, y, z, facing, isDropper) => ejectorFireAt(x, y, z, facing, isDropper);
+
 // Rebuild the chunks the redstone sim just mutated so lamp/wire/door flips render
 // this frame (dedupe per chunk; rebuildEditedChunksNow is per-column). Chunks outside
 // the active ring are skipped — world.set already marked them dirty, so they rebuild
@@ -470,6 +554,11 @@ function applyRedstoneVisualChanges(changedCells) {
   if (!changedCells || changedCells.length === 0) return;
   const seen = new Set();
   for (const c of changedCells) {
+    // Wave R3 must-fix: sim-driven block changes (piston pushes especially) must
+    // notify the fluid sim, or a block pushed into flowing water leaves a stale
+    // fluidLevels entry that clobbers the block on save/load; vacated cells also
+    // need fluid re-enqueued so water can flow in.
+    fluidSim.onBlockChanged(c.x, c.y, c.z);
     const pos = world.toChunkPosition(c.x, c.z);
     if (seen.has(pos.key)) continue;
     seen.add(pos.key);
@@ -772,6 +861,9 @@ const state = {
   playerKnockbackRemaining: 0,
   // Wave 11 — F3 debug overlay
   f3Visible: false,
+  // Wave R4 — hopper panel open flag (transient)
+  hopperOpen: false,
+  dispenserOpen: false, // Wave R5 — dispenser/dropper 9-slot panel
   // Wave P1 — pause menu + settings (transient, not persisted)
   pauseOpen: false,
   mouseSensitivity: 1,       // settings multiplier consumed by controls.js
@@ -2690,6 +2782,832 @@ function createDefaultChestInventory() {
   return new Array(CHEST_SIZE).fill(null);
 }
 
+// ---------------------------------------------------------------------------
+// Wave R4 — hoppers: 5-slot funnels that pull from the container above, vacuum
+// dropped items resting in the cell above, and push into the container they
+// face (chest, another hopper, or a furnace: down = smelt input, horizontal =
+// fuel). One item moves per action per 400 ms cadence; a redstone-locked
+// hopper (id bit, maintained by the sim) pauses entirely.
+// ---------------------------------------------------------------------------
+const HOPPER_SIZE = 5;
+const HOPPER_TRANSFER_MS = 400;
+const hopperStates = new Map(); // "x,y,z" -> { slots: ({itemId,count}|null)[5], cooldownMs }
+
+function toHopperKey(x, y, z) {
+  return `${x},${y},${z}`;
+}
+
+function getHopperState(key, createIfMissing = true) {
+  let hopper = hopperStates.get(key);
+  if (!hopper && createIfMissing) {
+    hopper = { slots: new Array(HOPPER_SIZE).fill(null), cooldownMs: 0 };
+    hopperStates.set(key, hopper);
+  }
+  return hopper || null;
+}
+
+/** Insert up to `count` of itemId into a slot array; returns how many DIDN'T fit.
+ * Tools and non-stackables never merge into an existing stack — each copy takes
+ * its own slot (count 1) and keeps `durability`, so hopper transfers can't
+ * silently repair a worn tool or fuse two tools into one. */
+function insertIntoSlots(slots, itemId, count, durability = undefined, start = 0, end = slots.length - 1) {
+  let remaining = count;
+  const onePerSlot = hasDurability(itemId) || NON_STACKABLE.has(itemId);
+  const lo = Math.max(0, start);
+  const hi = Math.min(slots.length - 1, end);
+  // Merge into existing stacks first, then empty slots. `start`/`end` bound the
+  // considered range (used by the shift-click hotbar<->backpack quick-move).
+  for (let pass = 0; pass < 2 && remaining > 0; pass += 1) {
+    for (let i = lo; i <= hi && remaining > 0; i += 1) {
+      const slot = slots[i];
+      if (pass === 0 && !onePerSlot && slot && slot.itemId === itemId && slot.count < MAX_STACK) {
+        const take = Math.min(MAX_STACK - slot.count, remaining);
+        slot.count += take;
+        remaining -= take;
+      } else if (pass === 1 && !slot) {
+        const take = onePerSlot ? 1 : Math.min(MAX_STACK, remaining);
+        const entry = { itemId, count: take };
+        if (hasDurability(itemId)) {
+          const maxDur = TOOL_MAX_DURABILITY[itemId] ?? 1;
+          entry.durability = Number.isFinite(durability) ? Math.min(maxDur, durability) : maxDur;
+        }
+        slots[i] = entry;
+        remaining -= take;
+      }
+    }
+  }
+  return remaining;
+}
+
+/** The first non-empty slot index of a slot array, or -1. */
+function firstFilledSlot(slots) {
+  for (let i = 0; i < slots.length; i += 1) {
+    if (slots[i] && slots[i].count > 0) return i;
+  }
+  return -1;
+}
+
+/** Move ONE item from a hopper into the container it faces. True on success. */
+function hopperPushOne(hx, hy, hz, hopper, facing) {
+  const from = firstFilledSlot(hopper.slots);
+  if (from === -1) return false;
+  const slot = hopper.slots[from];
+  const [dx, dy, dz] = HOPPER_FACING_DIRS[facing];
+  const tx = hx + dx, ty = hy + dy, tz = hz + dz;
+  const targetId = world.get(tx, ty, tz);
+
+  let accepted = false;
+  if (targetId === CHEST_BLOCK_TYPE) {
+    const chest = getChestState(toChestKey(tx, ty, tz), true);
+    accepted = insertIntoSlots(chest, slot.itemId, 1, slot.durability) === 0;
+    if (accepted) markChestPanelDirty();
+  } else if (HOPPER_IDS.has(targetId)) {
+    const target = getHopperState(toHopperKey(tx, ty, tz), true);
+    accepted = insertIntoSlots(target.slots, slot.itemId, 1, slot.durability) === 0;
+  } else if (EJECTOR_IDS.has(targetId)) {
+    // Wave R5 — hoppers feed dispensers/droppers like any other container.
+    const target = getEjectorState(toEjectorKey(tx, ty, tz), true);
+    accepted = insertIntoSlots(target.slots, slot.itemId, 1, slot.durability) === 0;
+  } else if (targetId === FURNACE_BLOCK_TYPE) {
+    const furnace = getFurnaceState(toFurnaceKey(tx, ty, tz), true);
+    if (facing === 0) {
+      // From above: feed the smelt input (same item merge or empty). Only
+      // smeltable items go in — anything else would jam the input slot with
+      // no player-facing way to see why the furnace stopped.
+      if (getSmeltingRecipeByInput(slot.itemId)
+          && (!furnace.inputItemId || (furnace.inputItemId === slot.itemId && furnace.inputCount < MAX_STACK))) {
+        furnace.inputItemId = slot.itemId;
+        furnace.inputCount += 1;
+        accepted = true;
+      }
+    } else if (FUEL_ITEM_MS[slot.itemId]) {
+      // From the side: burn one item's worth of fuel into the buffer.
+      furnace.fuelBufferMs += FUEL_ITEM_MS[slot.itemId];
+      accepted = true;
+    }
+    if (accepted) markFurnacePanelDirty();
+  }
+
+  if (accepted) {
+    slot.count -= 1;
+    if (slot.count <= 0) hopper.slots[from] = null;
+    // Comparators poll container fullness only when re-evaluated — dirty both
+    // ends of the transfer so adjacent comparators pick up the new levels.
+    redstoneSim.onBlockChanged(hx, hy, hz);
+    redstoneSim.onBlockChanged(tx, ty, tz);
+  }
+  return accepted;
+}
+
+/** Pull ONE item into the hopper from the container above it. True on success. */
+function hopperPullOne(hx, hy, hz, hopper) {
+  const ty = hy + 1;
+  const sourceId = world.get(hx, ty, hz);
+  let itemId = null;
+  let durability; // carried through so tools keep their wear
+  let take = null; // () => void — commits the removal from the source
+
+  if (sourceId === CHEST_BLOCK_TYPE) {
+    const chest = getChestState(toChestKey(hx, ty, hz), true);
+    const idx = firstFilledSlot(chest);
+    if (idx !== -1) {
+      itemId = chest[idx].itemId;
+      durability = chest[idx].durability;
+      take = () => {
+        chest[idx].count -= 1;
+        if (chest[idx].count <= 0) chest[idx] = null;
+        markChestPanelDirty();
+      };
+    }
+  } else if (HOPPER_IDS.has(sourceId)) {
+    const source = getHopperState(toHopperKey(hx, ty, hz), true);
+    const idx = firstFilledSlot(source.slots);
+    if (idx !== -1) {
+      itemId = source.slots[idx].itemId;
+      durability = source.slots[idx].durability;
+      take = () => {
+        source.slots[idx].count -= 1;
+        if (source.slots[idx].count <= 0) source.slots[idx] = null;
+      };
+    }
+  } else if (EJECTOR_IDS.has(sourceId)) {
+    // Wave R5 — hoppers drain dispensers/droppers from below.
+    const source = getEjectorState(toEjectorKey(hx, ty, hz), true);
+    const idx = firstFilledSlot(source.slots);
+    if (idx !== -1) {
+      itemId = source.slots[idx].itemId;
+      durability = source.slots[idx].durability;
+      take = () => {
+        source.slots[idx].count -= 1;
+        if (source.slots[idx].count <= 0) source.slots[idx] = null;
+      };
+    }
+  } else if (sourceId === FURNACE_BLOCK_TYPE) {
+    const furnace = getFurnaceState(toFurnaceKey(hx, ty, hz), true);
+    if (furnace.outputItemId && furnace.outputCount > 0) {
+      itemId = furnace.outputItemId;
+      take = () => {
+        furnace.outputCount -= 1;
+        if (furnace.outputCount <= 0) furnace.outputItemId = null;
+        markFurnacePanelDirty();
+      };
+    }
+  }
+
+  if (itemId && insertIntoSlots(hopper.slots, itemId, 1, durability) === 0) {
+    take();
+    redstoneSim.onBlockChanged(hx, hy, hz);
+    redstoneSim.onBlockChanged(hx, ty, hz);
+    return true;
+  }
+  // Vacuum: dropped item entities resting in the open cell above OR sitting at
+  // the funnel mouth (their center can end up in either cell after settling).
+  if (sourceId === 0) {
+    const sucked = [
+      ...itemEntities.collectInCell(hx, ty, hz),
+      ...itemEntities.collectInCell(hx, hy, hz),
+    ];
+    let any = false;
+    for (const s of sucked) {
+      const left = insertIntoSlots(hopper.slots, s.itemId, s.count);
+      // Anything that doesn't fit is re-dropped where it was, motionless so it
+      // doesn't scatter into a neighbouring cell and bounce forever.
+      if (left > 0) {
+        itemEntities.spawnItemEntity(s.itemId, left, hx + 0.5, ty + 0.3, hz + 0.5, { vx: 0, vy: 0, vz: 0 });
+      }
+      if (left < s.count) any = true;
+    }
+    if (any) redstoneSim.onBlockChanged(hx, hy, hz);
+    return any;
+  }
+  return false;
+}
+
+let hopperPanelKey = null; // open hopper's position key (null = closed)
+
+function updateHopperSimulation(deltaMs) {
+  if (hopperStates.size === 0) return;
+  for (const [key, hopper] of hopperStates) {
+    hopper.cooldownMs -= deltaMs;
+    if (hopper.cooldownMs > 0) continue;
+    hopper.cooldownMs = HOPPER_TRANSFER_MS;
+    const [hx, hy, hz] = key.split(",").map(Number);
+    // Evicted chunk: pause instead of ticking — world.get() would force a full
+    // chunk regeneration every 400 ms. State persists; resumes when re-streamed.
+    const S = world.chunkSize;
+    const residentChunk = world.chunks.get(Math.floor(hx / S) + "," + Math.floor(hz / S));
+    if (!residentChunk || !residentChunk.blocks) continue;
+    const id = world.get(hx, hy, hz);
+    if (!HOPPER_IDS.has(id)) {
+      // Block destroyed without breakBlock (e.g. creeper crater): spill the
+      // contents where the hopper stood and drop the orphaned state.
+      for (const slot of hopper.slots) {
+        if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, hx + 0.5, hy + 0.5, hz + 0.5);
+      }
+      if (hopperPanelKey === key) closeHopperPanel();
+      hopperStates.delete(key);
+      continue;
+    }
+    if (hopperIsLocked(id)) continue;  // redstone-powered = paused
+    const pushed = hopperPushOne(hx, hy, hz, hopper, hopperFacing(id));
+    const pulled = hopperPullOne(hx, hy, hz, hopper);
+    if ((pushed || pulled) && hopperPanelKey === key) markHopperPanelDirty();
+  }
+}
+
+// --- Hopper panel (Wave R4): 5-slot row + player inventory, chest-style
+// click-click transfers but fully self-contained (own contexts, own mover). ---
+const hopperPanelEl = document.querySelector("#hopper-panel");
+const hopperContextEl = document.querySelector("#hopper-context");
+const hopperSlotsEl = document.querySelector("#hopper-slots");
+const hopperInvGridEl = document.querySelector("#hopper-inv-grid");
+let hopperPanelNeedsRefresh = true;
+let hopperPanelSignature = "";
+
+function markHopperPanelDirty() {
+  hopperPanelNeedsRefresh = true;
+}
+
+function openHopperPanel(key) {
+  if (state.craftingOpen) closeCraftPanel(false);
+  if (state.furnaceOpen) closeFurnacePanel(false);
+  if (state.inventoryOpen) closeInventoryPanel(false);
+  if (state.chestOpen) closeChestPanel(false);
+  if (state.dispenserOpen) closeDispenserPanel();
+  if (hopperPanelKey === key) {
+    closeHopperPanel();
+    return;
+  }
+  hopperPanelKey = key;
+  state.hopperOpen = true;
+  getHopperState(key, true);
+  if (state.pointerLocked && document.pointerLockElement === renderer.domElement) {
+    state._suppressAutoPause = true;
+    document.exitPointerLock();
+  }
+  if (hopperPanelEl) hopperPanelEl.classList.remove("hidden");
+  state.keys.clear();
+  state.jumpQueued = false;
+  clearTransfer();
+  markHopperPanelDirty();
+  updateHopperPanel(true);
+  state.recentAction = "Opened hopper";
+}
+
+function closeHopperPanel() {
+  if (!hopperPanelKey) return;
+  hopperPanelKey = null;
+  state.hopperOpen = false;
+  if (hopperPanelEl) hopperPanelEl.classList.add("hidden");
+  hopperPanelSignature = "";
+  clearTransfer();
+  state.recentAction = "Closed hopper";
+}
+
+function updateHopperPanel(force = false) {
+  if (!hopperPanelKey) return;
+  const hopper = getHopperState(hopperPanelKey, true);
+  const [x, y, z] = hopperPanelKey.split(",").map(Number);
+  const id = world.get(x, y, z);
+  // The block id is part of the signature so a redstone lock/unlock while the
+  // panel is open refreshes the "(LOCKED)" context line.
+  const sig = `${hopperPanelKey}|${id}|${inventorySignature()}|${JSON.stringify(hopper.slots)}|${state.transferContext ?? "-"}|${state.inventoryTransferIndex ?? "-"}`;
+  if (!force && !hopperPanelNeedsRefresh && hopperPanelSignature === sig) return;
+  hopperPanelSignature = sig;
+  hopperPanelNeedsRefresh = false;
+  if (hopperContextEl) {
+    hopperContextEl.textContent = `Hopper @ ${x},${y},${z} — output ${"down/north/east/south/west".split("/")[hopperFacing(id)] || "?"}${hopperIsLocked(id) ? " (LOCKED by redstone)" : ""}`;
+  }
+  if (hopperSlotsEl) {
+    hopperSlotsEl.innerHTML = "";
+    for (let i = 0; i < HOPPER_SIZE; i += 1) {
+      const slot = hopper.slots[i];
+      const btn = document.createElement("div");
+      btn.className = "chest-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "hopper-slot" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.hopperSlot = String(i);
+      btn.textContent = slot ? `${getItemName(slot.itemId)}\nx${slot.count}` : "·";
+      hopperSlotsEl.appendChild(btn);
+    }
+  }
+  if (hopperInvGridEl) {
+    hopperInvGridEl.innerHTML = "";
+    for (let i = 0; i < INVENTORY_SIZE; i += 1) {
+      const slot = state.inventory[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "inventory-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "hopper-inv" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.hopperInvIndex = String(i);
+      btn.textContent = slot ? `${i + 1}: ${getItemName(slot.itemId)} x${slot.count}` : `${i + 1}: Empty`;
+      hopperInvGridEl.appendChild(btn);
+    }
+  }
+}
+
+/** Move a stack between the open hopper and the player inventory (either way). */
+function executeHopperTransfer(fromCtx, fromIdx, toCtx, toIdx) {
+  const hopper = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+  if (!hopper) return false;
+  const src = fromCtx === "hopper-slot" ? hopper.slots[fromIdx] : state.inventory[fromIdx];
+  if (!src) return false;
+  const dstArr = toCtx === "hopper-slot" ? hopper.slots : state.inventory;
+  const dst = dstArr[toIdx];
+  // Tools with durability never merge — swap only (matches inventory rules).
+  const canMerge = dst && dst.itemId === src.itemId && !hasDurability(src.itemId) && dst.count < MAX_STACK;
+  if (!dst) {
+    dstArr[toIdx] = src;
+    if (fromCtx === "hopper-slot") hopper.slots[fromIdx] = null; else state.inventory[fromIdx] = null;
+  } else if (canMerge) {
+    const take = Math.min(MAX_STACK - dst.count, src.count);
+    dst.count += take;
+    src.count -= take;
+    if (src.count <= 0) {
+      if (fromCtx === "hopper-slot") hopper.slots[fromIdx] = null; else state.inventory[fromIdx] = null;
+    }
+  } else {
+    // Swap
+    dstArr[toIdx] = src;
+    if (fromCtx === "hopper-slot") hopper.slots[fromIdx] = dst; else state.inventory[fromIdx] = dst;
+  }
+  return true;
+}
+
+function onHopperPanelClick(ctx, slotIndex, shiftKey = false) {
+  if (!hopperPanelKey) return;
+  // Wave U1 — shift-click quick-move (hopper<->inventory).
+  if (shiftKey) {
+    if (quickMoveStack(ctx, slotIndex)) {
+      const [hx, hy, hz] = hopperPanelKey.split(",").map(Number);
+      redstoneSim.onBlockChanged(hx, hy, hz);
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markHopperPanelDirty();
+      updateHopperPanel(true);
+    }
+    return;
+  }
+  if (state.transferContext === null) {
+    const has = ctx === "hopper-slot"
+      ? !!getHopperState(hopperPanelKey, true).slots[slotIndex]
+      : !!state.inventory[slotIndex];
+    if (!has) {
+      state.recentAction = "Slot empty";
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = ctx;
+    markHopperPanelDirty();
+    updateHopperPanel(true);
+    return;
+  }
+  if (state.transferContext === ctx && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled transfer";
+    markHopperPanelDirty();
+    updateHopperPanel(true);
+    return;
+  }
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  // Only hopper-panel contexts are legal here (panel is exclusive with others).
+  if (fromCtx !== "hopper-slot" && fromCtx !== "hopper-inv") {
+    clearTransfer();
+    return;
+  }
+  clearTransfer();
+  const moved = executeHopperTransfer(fromCtx, fromIdx, ctx, slotIndex);
+  if (moved && hopperPanelKey) {
+    // Fullness changed — wake any comparator reading this hopper.
+    const [hx, hy, hz] = hopperPanelKey.split(",").map(Number);
+    redstoneSim.onBlockChanged(hx, hy, hz);
+  }
+  state.recentAction = moved ? "Moved item" : "Cannot move item";
+  markInventoryPanelDirty();
+  markHopperPanelDirty();
+  updateHopperPanel(true);
+}
+
+if (hopperSlotsEl) {
+  hopperSlotsEl.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-hopper-slot]");
+    if (cell) onHopperPanelClick("hopper-slot", Number(cell.dataset.hopperSlot), event.shiftKey);
+  });
+}
+if (hopperInvGridEl) {
+  hopperInvGridEl.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-hopper-inv-index]");
+    if (cell) onHopperPanelClick("hopper-inv", Number(cell.dataset.hopperInvIndex), event.shiftKey);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wave R5 — dispensers + droppers ("ejectors"): shared 9-slot container state,
+// edge-triggered firing (the sim detects the OFF->ON edge and calls back).
+// ---------------------------------------------------------------------------
+const EJECTOR_SIZE = 9;
+const dispenserStates = new Map(); // "x,y,z" -> { slots: ({itemId,count,durability?}|null)[9] }
+
+function toEjectorKey(x, y, z) {
+  return `${x},${y},${z}`;
+}
+
+function getEjectorState(key, createIfMissing = true) {
+  let ejector = dispenserStates.get(key);
+  if (!ejector && createIfMissing) {
+    ejector = { slots: new Array(EJECTOR_SIZE).fill(null) };
+    dispenserStates.set(key, ejector);
+  }
+  return ejector || null;
+}
+
+/** One rising-edge fire: insert into a faced container, else eject a ground item.
+ * Dispensers throw hard, droppers lob gently. Solid non-container in front =
+ * blocked no-op (deterministic; the item stays). */
+function ejectorFireAt(x, y, z, facing, isDropper) {
+  const key = toEjectorKey(x, y, z);
+  const ejector = dispenserStates.get(key);
+  if (!ejector) return;
+  // The sim only calls back when this cell still holds an ejector (redstone.js
+  // guards the timer drain with EJECTOR_IDS.has). Destruction spills contents at
+  // its own site (breakBlock + the creeper explosion path), never on a fire tick.
+  const from = firstFilledSlot(ejector.slots);
+  if (from === -1) return; // empty — nothing to dispense
+  const slot = ejector.slots[from];
+  const [dx, dy, dz] = PISTON_FACING_DIRS[facing];
+  const tx = x + dx, ty = y + dy, tz = z + dz;
+  const targetId = world.get(tx, ty, tz);
+
+  let done = false;
+  if (targetId === CHEST_BLOCK_TYPE) {
+    const chest = getChestState(toChestKey(tx, ty, tz), true);
+    done = insertIntoSlots(chest, slot.itemId, 1, slot.durability) === 0;
+    if (done) markChestPanelDirty();
+  } else if (HOPPER_IDS.has(targetId)) {
+    const target = getHopperState(toHopperKey(tx, ty, tz), true);
+    done = insertIntoSlots(target.slots, slot.itemId, 1, slot.durability) === 0;
+  } else if (EJECTOR_IDS.has(targetId)) {
+    const target = getEjectorState(toEjectorKey(tx, ty, tz), true);
+    done = insertIntoSlots(target.slots, slot.itemId, 1, slot.durability) === 0;
+  } else if (targetId === FURNACE_BLOCK_TYPE) {
+    // Same rules as hopper feeding: from above -> smeltable input only;
+    // horizontally -> fuel. (Facing 5 = output points down onto the furnace.)
+    const furnace = getFurnaceState(toFurnaceKey(tx, ty, tz), true);
+    if (facing === 5) {
+      if (getSmeltingRecipeByInput(slot.itemId)
+          && (!furnace.inputItemId || (furnace.inputItemId === slot.itemId && furnace.inputCount < MAX_STACK))) {
+        furnace.inputItemId = slot.itemId;
+        furnace.inputCount += 1;
+        done = true;
+      }
+    } else if (facing !== 4 && FUEL_ITEM_MS[slot.itemId]) {
+      furnace.fuelBufferMs += FUEL_ITEM_MS[slot.itemId];
+      done = true;
+    }
+    if (done) markFurnacePanelDirty();
+  } else if (targetId === 0 || (BLOCK_TRANSPARENCY_CLASS[targetId] || 0) !== 0) {
+    // Open (or non-solid) cell in front: eject as a ground item along the facing.
+    const speed = isDropper ? 1.4 : 3.4;
+    itemEntities.spawnItemEntity(
+      slot.itemId, 1,
+      x + 0.5 + dx * 0.65, y + 0.4 + dy * 0.65, z + 0.5 + dz * 0.65,
+      { vx: dx * speed, vy: dy * speed + (dy === 0 ? 1.0 : 0), vz: dz * speed },
+    );
+    done = true;
+  }
+
+  if (done) {
+    slot.count -= 1;
+    if (slot.count <= 0) ejector.slots[from] = null;
+    // Fullness changed at both ends — wake comparators (Wave R4 discipline).
+    redstoneSim.onBlockChanged(x, y, z);
+    redstoneSim.onBlockChanged(tx, ty, tz);
+    if (dispenserPanelKey === key) markDispenserPanelDirty();
+  }
+}
+
+// --- Dispenser/dropper panel (Wave R5): 9-slot grid + player inventory,
+// click-click transfers — same shape as the hopper panel. ---
+const dispenserPanelEl = document.querySelector("#dispenser-panel");
+const dispenserContextEl = document.querySelector("#dispenser-context");
+const dispenserSlotsEl = document.querySelector("#dispenser-slots");
+const dispenserInvGridEl = document.querySelector("#dispenser-inv-grid");
+let dispenserPanelKey = null; // open ejector's position key (null = closed)
+let dispenserPanelNeedsRefresh = true;
+let dispenserPanelSignature = "";
+
+function markDispenserPanelDirty() {
+  dispenserPanelNeedsRefresh = true;
+}
+
+function openDispenserPanel(key) {
+  if (state.craftingOpen) closeCraftPanel(false);
+  if (state.furnaceOpen) closeFurnacePanel(false);
+  if (state.inventoryOpen) closeInventoryPanel(false);
+  if (state.chestOpen) closeChestPanel(false);
+  if (state.hopperOpen) closeHopperPanel();
+  if (dispenserPanelKey === key) {
+    closeDispenserPanel();
+    return;
+  }
+  dispenserPanelKey = key;
+  state.dispenserOpen = true;
+  getEjectorState(key, true);
+  if (state.pointerLocked && document.pointerLockElement === renderer.domElement) {
+    state._suppressAutoPause = true;
+    document.exitPointerLock();
+  }
+  if (dispenserPanelEl) dispenserPanelEl.classList.remove("hidden");
+  state.keys.clear();
+  state.jumpQueued = false;
+  clearTransfer();
+  markDispenserPanelDirty();
+  updateDispenserPanel(true);
+  state.recentAction = "Opened dispenser";
+}
+
+function closeDispenserPanel() {
+  if (!dispenserPanelKey) return;
+  dispenserPanelKey = null;
+  state.dispenserOpen = false;
+  if (dispenserPanelEl) dispenserPanelEl.classList.add("hidden");
+  dispenserPanelSignature = "";
+  clearTransfer();
+  state.recentAction = "Closed dispenser";
+}
+
+function updateDispenserPanel(force = false) {
+  if (!dispenserPanelKey) return;
+  const ejector = getEjectorState(dispenserPanelKey, true);
+  const [x, y, z] = dispenserPanelKey.split(",").map(Number);
+  const id = world.get(x, y, z);
+  const sig = `${dispenserPanelKey}|${id}|${inventorySignature()}|${JSON.stringify(ejector.slots)}|${state.transferContext ?? "-"}|${state.inventoryTransferIndex ?? "-"}`;
+  if (!force && !dispenserPanelNeedsRefresh && dispenserPanelSignature === sig) return;
+  dispenserPanelSignature = sig;
+  dispenserPanelNeedsRefresh = false;
+
+  if (dispenserContextEl) {
+    const kind = EJECTOR_IDS.has(id) ? (ejectorIsDropper(id) ? "Dropper" : "Dispenser") : "Dispenser";
+    const dirName = "north/east/south/west/up/down".split("/")[EJECTOR_IDS.has(id) ? ejectorFacing(id) : 0] || "?";
+    dispenserContextEl.textContent = `${kind} @ ${x},${y},${z} — fires ${dirName}`;
+  }
+  if (dispenserSlotsEl) {
+    dispenserSlotsEl.innerHTML = "";
+    for (let i = 0; i < EJECTOR_SIZE; i += 1) {
+      const slot = ejector.slots[i];
+      const btn = document.createElement("div");
+      btn.className = "chest-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "dispenser-slot" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.dispenserSlot = String(i);
+      btn.textContent = slot ? `${getItemName(slot.itemId)}\nx${slot.count}` : "·";
+      dispenserSlotsEl.appendChild(btn);
+    }
+  }
+  if (dispenserInvGridEl) {
+    dispenserInvGridEl.innerHTML = "";
+    for (let i = 0; i < INVENTORY_SIZE; i += 1) {
+      const slot = state.inventory[i];
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "inventory-slot" + (slot ? "" : " empty");
+      if (state.transferContext === "dispenser-inv" && state.inventoryTransferIndex === i) {
+        btn.classList.add("transfer-selected");
+      }
+      btn.dataset.dispenserInvIndex = String(i);
+      btn.textContent = slot ? `${i + 1}: ${getItemName(slot.itemId)} x${slot.count}` : `${i + 1}: Empty`;
+      dispenserInvGridEl.appendChild(btn);
+    }
+  }
+}
+
+/** Move a stack between the open ejector and the player inventory (either way). */
+function executeDispenserTransfer(fromCtx, fromIdx, toCtx, toIdx) {
+  const ejector = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+  if (!ejector) return false;
+  const src = fromCtx === "dispenser-slot" ? ejector.slots[fromIdx] : state.inventory[fromIdx];
+  if (!src) return false;
+  const dstArr = toCtx === "dispenser-slot" ? ejector.slots : state.inventory;
+  const dst = dstArr[toIdx];
+  // Tools with durability never merge — swap only (matches inventory rules).
+  const canMerge = dst && dst.itemId === src.itemId && !hasDurability(src.itemId) && dst.count < MAX_STACK;
+  if (!dst) {
+    dstArr[toIdx] = src;
+    if (fromCtx === "dispenser-slot") ejector.slots[fromIdx] = null; else state.inventory[fromIdx] = null;
+  } else if (canMerge) {
+    const take = Math.min(MAX_STACK - dst.count, src.count);
+    dst.count += take;
+    src.count -= take;
+    if (src.count <= 0) {
+      if (fromCtx === "dispenser-slot") ejector.slots[fromIdx] = null; else state.inventory[fromIdx] = null;
+    }
+  } else {
+    // Swap
+    dstArr[toIdx] = src;
+    if (fromCtx === "dispenser-slot") ejector.slots[fromIdx] = dst; else state.inventory[fromIdx] = dst;
+  }
+  return true;
+}
+
+function onDispenserPanelClick(ctx, slotIndex, shiftKey = false) {
+  if (!dispenserPanelKey) return;
+  // Wave U1 — shift-click quick-move (dispenser<->inventory).
+  if (shiftKey) {
+    if (quickMoveStack(ctx, slotIndex)) {
+      const [ex, ey, ez] = dispenserPanelKey.split(",").map(Number);
+      redstoneSim.onBlockChanged(ex, ey, ez);
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markDispenserPanelDirty();
+      updateDispenserPanel(true);
+    }
+    return;
+  }
+  if (state.transferContext === null) {
+    const has = ctx === "dispenser-slot"
+      ? !!getEjectorState(dispenserPanelKey, true).slots[slotIndex]
+      : !!state.inventory[slotIndex];
+    if (!has) {
+      state.recentAction = "Slot empty";
+      return;
+    }
+    state.inventoryTransferIndex = slotIndex;
+    state.transferContext = ctx;
+    markDispenserPanelDirty();
+    updateDispenserPanel(true);
+    return;
+  }
+  if (state.transferContext === ctx && state.inventoryTransferIndex === slotIndex) {
+    clearTransfer();
+    state.recentAction = "Cancelled transfer";
+    markDispenserPanelDirty();
+    updateDispenserPanel(true);
+    return;
+  }
+  const fromCtx = state.transferContext;
+  const fromIdx = state.inventoryTransferIndex;
+  // Only dispenser-panel contexts are legal here (panel is exclusive with others).
+  if (fromCtx !== "dispenser-slot" && fromCtx !== "dispenser-inv") {
+    clearTransfer();
+    return;
+  }
+  clearTransfer();
+  const moved = executeDispenserTransfer(fromCtx, fromIdx, ctx, slotIndex);
+  if (moved && dispenserPanelKey) {
+    // Fullness changed — wake any comparator reading this ejector.
+    const [ex, ey, ez] = dispenserPanelKey.split(",").map(Number);
+    redstoneSim.onBlockChanged(ex, ey, ez);
+  }
+  state.recentAction = moved ? "Moved item" : "Cannot move item";
+  markInventoryPanelDirty();
+  markDispenserPanelDirty();
+  updateDispenserPanel(true);
+}
+
+if (dispenserSlotsEl) {
+  dispenserSlotsEl.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-dispenser-slot]");
+    if (cell) onDispenserPanelClick("dispenser-slot", Number(cell.dataset.dispenserSlot), event.shiftKey);
+  });
+}
+if (dispenserInvGridEl) {
+  dispenserInvGridEl.addEventListener("click", (event) => {
+    const cell = event.target.closest("[data-dispenser-inv-index]");
+    if (cell) onDispenserPanelClick("dispenser-inv", Number(cell.dataset.dispenserInvIndex), event.shiftKey);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wave U2 — hover tooltips. One delegated mousemove resolves the slot under the
+// cursor to its live item (name + count + durability). Reading game state
+// instead of the slot's text means it survives the frequent innerHTML re-renders.
+// ---------------------------------------------------------------------------
+const slotTooltipEl = document.querySelector("#slot-tooltip");
+const TOOLTIP_SLOT_SELECTOR =
+  "[data-slot-index],[data-chest-slot],[data-chest-inv-index],[data-hopper-slot]," +
+  "[data-hopper-inv-index],[data-dispenser-slot],[data-dispenser-inv-index],[data-armor-slot]";
+
+function slotElementItem(el) {
+  if (!el) return null;
+  const d = el.dataset;
+  if (d.slotIndex !== undefined) return state.inventory[Number(d.slotIndex)] ?? null;
+  if (d.chestInvIndex !== undefined) return state.inventory[Number(d.chestInvIndex)] ?? null;
+  if (d.hopperInvIndex !== undefined) return state.inventory[Number(d.hopperInvIndex)] ?? null;
+  if (d.dispenserInvIndex !== undefined) return state.inventory[Number(d.dispenserInvIndex)] ?? null;
+  if (d.chestSlot !== undefined) {
+    const chest = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+    return chest ? (chest[Number(d.chestSlot)] ?? null) : null;
+  }
+  if (d.hopperSlot !== undefined) {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    return h ? (h.slots[Number(d.hopperSlot)] ?? null) : null;
+  }
+  if (d.dispenserSlot !== undefined) {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    return e ? (e.slots[Number(d.dispenserSlot)] ?? null) : null;
+  }
+  if (d.armorSlot !== undefined) {
+    const itemId = state.wornArmor[ARMOR_SLOTS[Number(d.armorSlot)]];
+    return itemId ? { itemId, count: 1 } : null;
+  }
+  return null;
+}
+
+function hideSlotTooltip() {
+  if (slotTooltipEl && !slotTooltipEl.classList.contains("hidden")) {
+    slotTooltipEl.classList.add("hidden");
+    slotTooltipEl._sig = "";
+  }
+}
+
+function showSlotTooltip(item, clientX, clientY) {
+  if (!slotTooltipEl) return;
+  const maxDur = hasDurability(item.itemId) ? (TOOL_MAX_DURABILITY[item.itemId] ?? 0) : 0;
+  const dur = maxDur ? (Number.isFinite(item.durability) ? item.durability : maxDur) : 0;
+  const sig = `${item.itemId}|${item.count}|${dur}/${maxDur}`;
+  // Rebuild the DOM only when the hovered item changes; reposition every move.
+  if (slotTooltipEl._sig !== sig) {
+    slotTooltipEl._sig = sig;
+    slotTooltipEl.innerHTML = "";
+    const nameEl = document.createElement("div");
+    nameEl.className = "tt-name";
+    nameEl.textContent = getItemName(item.itemId);
+    slotTooltipEl.appendChild(nameEl);
+    if (item.count > 1) {
+      const c = document.createElement("div");
+      c.className = "tt-sub";
+      c.textContent = `x${item.count}`;
+      slotTooltipEl.appendChild(c);
+    }
+    if (maxDur) {
+      const dEl = document.createElement("div");
+      dEl.className = "tt-dur";
+      dEl.textContent = `Durability ${dur}/${maxDur}`;
+      slotTooltipEl.appendChild(dEl);
+    }
+  }
+  slotTooltipEl.classList.remove("hidden");
+  const pad = 14;
+  const rect = slotTooltipEl.getBoundingClientRect();
+  let x = clientX + pad;
+  let y = clientY + pad;
+  if (x + rect.width > window.innerWidth) x = clientX - rect.width - pad;
+  if (y + rect.height > window.innerHeight) y = clientY - rect.height - pad;
+  slotTooltipEl.style.left = `${Math.max(0, x)}px`;
+  slotTooltipEl.style.top = `${Math.max(0, y)}px`;
+}
+
+if (slotTooltipEl) {
+  document.addEventListener("mousemove", (event) => {
+    const el = event.target.closest ? event.target.closest(TOOLTIP_SLOT_SELECTOR) : null;
+    if (!el) { hideSlotTooltip(); return; }
+    const item = slotElementItem(el);
+    if (!item) { hideSlotTooltip(); return; }
+    showSlotTooltip(item, event.clientX, event.clientY);
+  });
+  document.addEventListener("mouseleave", hideSlotTooltip);
+}
+
+// Comparator container reading (Wave R4): signal 0 for empty, else
+// 1 + floor(14 * fillFraction) — the classic container-fullness curve.
+function containerSignalAt(x, y, z) {
+  const id = world.get(x, y, z);
+  let filled = 0;
+  let capacity = 0;
+  if (id === CHEST_BLOCK_TYPE) {
+    const chest = chestStates.get(toChestKey(x, y, z));
+    if (!chest) return 0;
+    capacity = CHEST_SIZE * MAX_STACK;
+    for (const slot of chest) if (slot) filled += slot.count;
+  } else if (HOPPER_IDS.has(id)) {
+    const hopper = hopperStates.get(toHopperKey(x, y, z));
+    if (!hopper) return 0;
+    capacity = HOPPER_SIZE * MAX_STACK;
+    for (const slot of hopper.slots) if (slot) filled += slot.count;
+  } else if (EJECTOR_IDS.has(id)) {
+    const ejector = dispenserStates.get(toEjectorKey(x, y, z));
+    if (!ejector) return 0;
+    capacity = EJECTOR_SIZE * MAX_STACK;
+    for (const slot of ejector.slots) if (slot) filled += slot.count;
+  } else if (id === FURNACE_BLOCK_TYPE) {
+    const furnace = furnaceStates.get(toFurnaceKey(x, y, z));
+    if (!furnace) return 0;
+    capacity = 2 * MAX_STACK; // input + output slots
+    filled = (furnace.inputCount || 0) + (furnace.outputCount || 0);
+  } else {
+    return 0;
+  }
+  if (filled <= 0) return 0;
+  return Math.min(15, 1 + Math.floor((filled / capacity) * 14));
+}
+
 function getChestState(key, createIfMissing = true) {
   let chest = chestStates.get(key);
   if (!chest && createIfMissing) {
@@ -3620,10 +4538,29 @@ function triggerCreeperExplosion(mob) {
         const type = world.get(bx, by, bz);
         // Don't remove bedrock, liquids (water=15, lava=21), or out-of-bounds
         if (type === 0 || type === 13 || type === 15 || type === 21 || !world.isWithinVerticalBounds(by)) continue;
+        // Wave R5 — a dispenser/dropper blown up here won't route through
+        // breakBlock, so spill its 9 slots and drop the state; otherwise its
+        // contents vanish silently AND the orphaned state leaks into every save
+        // (and would resurrect into a new ejector placed on this cell).
+        if (EJECTOR_IDS.has(type)) {
+          const ejKey = toEjectorKey(bx, by, bz);
+          const ejector = dispenserStates.get(ejKey);
+          if (ejector) {
+            for (const slot of ejector.slots) {
+              if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, bx + 0.5, by + 0.5, bz + 0.5);
+            }
+            dispenserStates.delete(ejKey);
+          }
+          if (dispenserPanelKey === ejKey) closeDispenserPanel();
+        }
         world.set(bx, by, bz, 0);
+        // Wave R3 — an explosion can sever circuits and piston pairs: notify the
+        // sim per cleared cell (support pops, wire recompute, orphan cleanup).
+        redstoneSim.onBlockChanged(bx, by, bz);
       }
     }
   }
+  applyRedstoneVisualChanges(redstoneSim.tick(0));
 
   // Radial damage to player
   const pdx = state.playerPos.x - mob.pos.x;
@@ -4660,6 +5597,11 @@ function loadFurnaceInput(itemId) {
 
   furnace.inputItemId = itemId;
   furnace.inputCount += 1;
+  {
+    // Fullness changed — wake any comparator reading this furnace (Wave R4).
+    const c = fromFurnaceKey(key);
+    redstoneSim.onBlockChanged(c.x, c.y, c.z);
+  }
   state.recentAction = `Loaded ${getItemName(itemId)} into furnace`;
   markCraftPanelDirty();
   markFurnacePanelDirty();
@@ -4722,6 +5664,11 @@ function takeFurnaceOutput() {
   if (furnace.outputCount <= 0) {
     furnace.outputCount = 0;
     furnace.outputItemId = null;
+  }
+  {
+    // Fullness changed — wake any comparator reading this furnace (Wave R4).
+    const c = fromFurnaceKey(key);
+    redstoneSim.onBlockChanged(c.x, c.y, c.z);
   }
 
   // Wave F2: award XP for collected smelted items (fractional, accumulate into whole orbs).
@@ -4851,6 +5798,63 @@ function getTransferSlot(context, index) {
     return state.inventory[index] ?? null;
   }
   return null;
+}
+
+// Wave U1 — shift-click quick-move: jump a whole stack to the sensible place in
+// one click. Container slot -> player inventory; inventory slot (with a container
+// open) -> that container; plain inventory -> hotbar<->backpack. Respects stack
+// limits, merges into matching stacks first, and keeps tool durability (via
+// insertIntoSlots). Returns true if anything moved.
+function quickMoveStack(fromCtx, fromIdx) {
+  // Resolve the source backing array for this context.
+  let srcArr = null;
+  if (fromCtx === "inventory" || fromCtx === "chest-inv" || fromCtx === "hopper-inv" || fromCtx === "dispenser-inv") {
+    srcArr = state.inventory;
+  } else if (fromCtx === "chest-storage") {
+    srcArr = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+  } else if (fromCtx === "hopper-slot") {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    srcArr = h ? h.slots : null;
+  } else if (fromCtx === "dispenser-slot") {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    srcArr = e ? e.slots : null;
+  }
+  if (!srcArr) return false;
+  const src = srcArr[fromIdx];
+  if (!src) return false;
+
+  // Resolve the destination array + index range.
+  let destArr = null;
+  let dStart = 0;
+  let dEnd = -1;
+  if (fromCtx === "chest-storage" || fromCtx === "hopper-slot" || fromCtx === "dispenser-slot") {
+    // Container -> player inventory (whole inventory).
+    destArr = state.inventory; dStart = 0; dEnd = INVENTORY_SIZE - 1;
+  } else if (fromCtx === "chest-inv") {
+    destArr = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "hopper-inv") {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    destArr = h ? h.slots : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "dispenser-inv") {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    destArr = e ? e.slots : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "inventory") {
+    // Plain inventory panel: hotbar (0..HOTBAR_SIZE-1) <-> backpack.
+    destArr = state.inventory;
+    if (fromIdx < HOTBAR_SIZE) { dStart = HOTBAR_SIZE; dEnd = INVENTORY_SIZE - 1; }
+    else { dStart = 0; dEnd = HOTBAR_SIZE - 1; }
+  }
+  if (!destArr || dEnd < dStart) return false;
+
+  const leftover = insertIntoSlots(destArr, src.itemId, src.count, src.durability, dStart, dEnd);
+  const moved = src.count - leftover;
+  if (moved <= 0) return false;
+  src.count -= moved;
+  if (src.count <= 0) srcArr[fromIdx] = null;
+  return true;
 }
 
 // Attempt to move/swap between (fromCtx, fromIdx) and (toCtx, toIdx).
@@ -5515,6 +6519,12 @@ function toggleFurnacePanel() {
   if (state.chestOpen) {
     closeChestPanel(false);
   }
+  if (state.hopperOpen) {
+    closeHopperPanel();
+  }
+  if (state.dispenserOpen) {
+    closeDispenserPanel();
+  }
 
   state.furnaceOpen = true;
   state.activeFurnaceKey = ensureActiveFurnaceKey();
@@ -5567,6 +6577,8 @@ function openChestPanel(key) {
   if (state.craftingOpen) closeCraftPanel(false);
   if (state.furnaceOpen) closeFurnacePanel(false);
   if (state.inventoryOpen) closeInventoryPanel(false);
+  if (state.hopperOpen) closeHopperPanel();
+  if (state.dispenserOpen) closeDispenserPanel();
   if (state.chestOpen && state.activeChestKey === key) {
     closeChestPanel(true);
     return;
@@ -5644,8 +6656,23 @@ function updateChestPanel(force = false) {
   }
 }
 
-function onChestStorageClick(slotIndex) {
+function onChestStorageClick(slotIndex, shiftKey = false) {
   if (!state.chestOpen || !state.activeChestKey) return;
+
+  // Wave U1 — shift-click sends the stack straight to the player inventory.
+  if (shiftKey) {
+    if (quickMoveStack("chest-storage", slotIndex)) {
+      const c = fromChestKey(state.activeChestKey);
+      redstoneSim.onBlockChanged(c.x, c.y, c.z); // fullness changed
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markChestPanelDirty();
+      updateChestPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     const chest = getChestState(state.activeChestKey, false);
@@ -5674,6 +6701,9 @@ function onChestStorageClick(slotIndex) {
   clearTransfer();
   const moved = executeTransfer(fromCtx, fromIdx, "chest-storage", slotIndex);
   if (moved) {
+    // Chest fullness changed — wake any comparator reading it (Wave R4).
+    const c = fromChestKey(state.activeChestKey);
+    redstoneSim.onBlockChanged(c.x, c.y, c.z);
     state.recentAction = "Moved item";
     markInventoryPanelDirty();
     markChestPanelDirty();
@@ -5686,8 +6716,25 @@ function onChestStorageClick(slotIndex) {
   }
 }
 
-function onChestInvClick(slotIndex) {
+function onChestInvClick(slotIndex, shiftKey = false) {
   if (!state.chestOpen) return;
+
+  // Wave U1 — shift-click sends the stack straight into the chest.
+  if (shiftKey) {
+    if (quickMoveStack("chest-inv", slotIndex)) {
+      if (state.activeChestKey) {
+        const c = fromChestKey(state.activeChestKey);
+        redstoneSim.onBlockChanged(c.x, c.y, c.z);
+      }
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markChestPanelDirty();
+      updateChestPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     if (!state.inventory[slotIndex]) {
@@ -5715,6 +6762,11 @@ function onChestInvClick(slotIndex) {
   clearTransfer();
   const moved = executeTransfer(fromCtx, fromIdx, "chest-inv", slotIndex);
   if (moved) {
+    if (fromCtx === "chest-storage" && state.activeChestKey) {
+      // Item left the chest — wake any comparator reading it (Wave R4).
+      const c = fromChestKey(state.activeChestKey);
+      redstoneSim.onBlockChanged(c.x, c.y, c.z);
+    }
     state.recentAction = "Moved item";
     markInventoryPanelDirty();
     markChestPanelDirty();
@@ -5816,7 +6868,7 @@ function closeInventoryPanel(updateAction = true) {
   }
 }
 
-function onInventorySlotClick(slotIndex) {
+function onInventorySlotClick(slotIndex, shiftKey = false) {
   if (!state.inventoryOpen) {
     return;
   }
@@ -5825,6 +6877,20 @@ function onInventorySlotClick(slotIndex) {
   }
 
   const targetIndex = Math.floor(slotIndex);
+
+  // Wave U1 — shift-click quick-moves the whole stack between hotbar & backpack.
+  if (shiftKey) {
+    if (quickMoveStack("inventory", targetIndex)) {
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markCraftPanelDirty();
+      markInventoryPanelDirty();
+      refreshHud();
+      updateCraftPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     if (!state.inventory[targetIndex]) {
@@ -5926,6 +6992,12 @@ function toggleInventoryPanel() {
   if (state.chestOpen) {
     closeChestPanel(false);
   }
+  if (state.hopperOpen) {
+    closeHopperPanel();
+  }
+  if (state.dispenserOpen) {
+    closeDispenserPanel();
+  }
 
   state.inventoryOpen = true;
   clearTransfer();
@@ -5962,6 +7034,12 @@ function toggleCraftPanel() {
   }
   if (state.chestOpen) {
     closeChestPanel(false);
+  }
+  if (state.hopperOpen) {
+    closeHopperPanel();
+  }
+  if (state.dispenserOpen) {
+    closeDispenserPanel();
   }
   if (state.craftingOpen) {
     closeCraftPanel(true);
@@ -6008,7 +7086,7 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 11, // Wave G1: added cropTickSeed + breeding mob fields; v10 added spawnPoint
+    version: 13, // v12 added hoppers (R4); v13 added dispensers (R5). Loading is field-presence based, so this is metadata only.
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -6045,7 +7123,101 @@ function collectSaveSnapshot() {
       furnaceAccum: state._furnaceXpAccum,
     },
     fluidSim: fluidSim.serialise(), // Wave F5: persist flowing cells
+    // Wave R4: hopper contents (v12; older saves simply lack the field).
+    hoppers: serializeHoppers(),
+    // Wave R5: dispenser/dropper contents (v13; older saves simply lack the field).
+    dispensers: serializeEjectors(),
   };
+}
+
+// Wave R4 — hopper persistence: contents keyed by position, validated on load
+// against the world block (stale keys from removed hoppers are dropped).
+function serializeHoppers() {
+  const out = {};
+  for (const [key, hopper] of hopperStates) {
+    out[key] = {
+      slots: hopper.slots.map((slot) => {
+        if (!slot) return null;
+        const entry = { itemId: slot.itemId, count: slot.count };
+        if (hasDurability(slot.itemId) && Number.isFinite(slot.durability)) {
+          entry.durability = slot.durability;
+        }
+        return entry;
+      }),
+    };
+  }
+  return out;
+}
+
+function loadHoppers(raw) {
+  hopperStates.clear();
+  if (!raw || typeof raw !== "object") return;
+  for (const [key, entry] of Object.entries(raw)) {
+    const [x, y, z] = key.split(",").map(Number);
+    if (!HOPPER_IDS.has(world.get(x, y, z))) continue; // block no longer a hopper
+    const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+    const hopper = { slots: new Array(HOPPER_SIZE).fill(null), cooldownMs: 0 };
+    for (let i = 0; i < HOPPER_SIZE; i += 1) {
+      const s = slots[i];
+      if (!s || typeof s.itemId !== "string" || !Number.isFinite(s.count) || s.count <= 0) continue;
+      if (!ITEM_DEFS[s.itemId]) continue; // unknown item from a newer save
+      const slot = { itemId: s.itemId, count: Math.min(MAX_STACK, Math.floor(s.count)) };
+      if (hasDurability(s.itemId)) {
+        // Same discipline as loadInventory: tools are count:1 with clamped wear.
+        slot.count = 1;
+        const maxDur = TOOL_MAX_DURABILITY[s.itemId] ?? 1;
+        slot.durability = Number.isFinite(s.durability) && s.durability > 0
+          ? Math.min(maxDur, s.durability)
+          : maxDur;
+      }
+      hopper.slots[i] = slot;
+    }
+    hopperStates.set(key, hopper);
+  }
+}
+
+// Wave R5 — dispenser/dropper persistence: same shape and validation as hoppers.
+function serializeEjectors() {
+  const out = {};
+  for (const [key, ejector] of dispenserStates) {
+    out[key] = {
+      slots: ejector.slots.map((slot) => {
+        if (!slot) return null;
+        const entry = { itemId: slot.itemId, count: slot.count };
+        if (hasDurability(slot.itemId) && Number.isFinite(slot.durability)) {
+          entry.durability = slot.durability;
+        }
+        return entry;
+      }),
+    };
+  }
+  return out;
+}
+
+function loadEjectors(raw) {
+  dispenserStates.clear();
+  if (!raw || typeof raw !== "object") return;
+  for (const [key, entry] of Object.entries(raw)) {
+    const [x, y, z] = key.split(",").map(Number);
+    if (!EJECTOR_IDS.has(world.get(x, y, z))) continue; // block no longer an ejector
+    const slots = Array.isArray(entry?.slots) ? entry.slots : [];
+    const ejector = { slots: new Array(EJECTOR_SIZE).fill(null) };
+    for (let i = 0; i < EJECTOR_SIZE; i += 1) {
+      const s2 = slots[i];
+      if (!s2 || typeof s2.itemId !== "string" || !Number.isFinite(s2.count) || s2.count <= 0) continue;
+      if (!ITEM_DEFS[s2.itemId]) continue; // unknown item from a newer save
+      const slot = { itemId: s2.itemId, count: Math.min(MAX_STACK, Math.floor(s2.count)) };
+      if (hasDurability(s2.itemId)) {
+        slot.count = 1; // tools are always count:1
+        const maxDur = TOOL_MAX_DURABILITY[s2.itemId] ?? 1;
+        slot.durability = Number.isFinite(s2.durability) && s2.durability > 0
+          ? Math.min(maxDur, s2.durability)
+          : maxDur;
+      }
+      ejector.slots[i] = slot;
+    }
+    dispenserStates.set(key, ejector);
+  }
 }
 
 async function saveGame(reason = "manual") {
@@ -6137,6 +7309,11 @@ async function loadGame() {
     redstoneSim.reset();
     redstoneSim.seedFromWorldEdits(snapshot.edits ?? null);
     applyRedstoneVisualChanges(redstoneSim.tick(0));
+    // Wave R4: hopper contents (older saves lack the field → all empty).
+    loadHoppers(snapshot.hoppers ?? null);
+    loadEjectors(snapshot.dispensers ?? null); // Wave R5
+    closeHopperPanel();
+    closeDispenserPanel(); // Wave R5 — else a stale panel floats over the reloaded world
     // Wave F2: restore XP state; v<=6 saves have no xp field → default to 0
     {
       const xpSnap = snapshot.xp ?? null;
@@ -6395,6 +7572,25 @@ function breakBlock(ndcX = 0, ndcY = 0) {
       redstoneSim.onBlockChanged(coords.x, otherY, coords.z);
     }
   }
+  // Wave R3 — pistons are two-part when extended: breaking either part removes
+  // both (the directly-broken part is the one that drops, via BLOCK_DROPS).
+  if (PISTON_BASE_IDS.has(type) && pistonIsExtended(type)) {
+    const [pdx, pdy, pdz] = PISTON_FACING_DIRS[pistonFacing(type)];
+    const hx = coords.x + pdx, hy = coords.y + pdy, hz = coords.z + pdz;
+    if (PISTON_HEAD_IDS.has(world.get(hx, hy, hz))) {
+      world.set(hx, hy, hz, 0);
+      redstoneSim.onBlockChanged(hx, hy, hz);
+    }
+  }
+  if (PISTON_HEAD_IDS.has(type)) {
+    const [pdx, pdy, pdz] = PISTON_FACING_DIRS[pistonHeadFacing(type)];
+    const bx = coords.x - pdx, by = coords.y - pdy, bz = coords.z - pdz;
+    const baseId = world.get(bx, by, bz);
+    if (PISTON_BASE_IDS.has(baseId) && pistonIsExtended(baseId)) {
+      world.set(bx, by, bz, 0); // base gone too; head's own BLOCK_DROPS supplies the drop
+      redstoneSim.onBlockChanged(bx, by, bz);
+    }
+  }
   if (type === FURNACE_BLOCK_TYPE) {
     furnaceStates.delete(targetKey);
     if (state.activeFurnaceKey === targetKey) {
@@ -6419,6 +7615,28 @@ function breakBlock(ndcX = 0, ndcY = 0) {
       if (chestPanel) chestPanel.classList.add("hidden");
     }
     markChestPanelDirty();
+  }
+  // Wave R4 — breaking a hopper spills its 5 slots as ground drops + clears state.
+  if (HOPPER_IDS.has(type)) {
+    const hopper = hopperStates.get(targetKey);
+    if (hopper) {
+      for (const slot of hopper.slots) {
+        if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
+      }
+      hopperStates.delete(targetKey);
+    }
+    if (hopperPanelKey === targetKey) closeHopperPanel();
+  }
+  // Wave R5 — breaking a dispenser/dropper spills its 9 slots + clears state.
+  if (EJECTOR_IDS.has(type)) {
+    const ejector = dispenserStates.get(targetKey);
+    if (ejector) {
+      for (const slot of ejector.slots) {
+        if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, coords.x + 0.5, coords.y + 0.5, coords.z + 0.5);
+      }
+      dispenserStates.delete(targetKey);
+    }
+    if (dispenserPanelKey === targetKey) closeDispenserPanel();
   }
   // Rebuild the broken block's chunk (and any seam neighbour whose face exposure changed)
   // synchronously so the block disappears this frame; let the budgeted drain pick up the
@@ -6677,6 +7895,16 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       viewmodel.triggerSwing();
       return true;
     }
+    // Wave R4 — right-click opens the hopper's 5-slot panel.
+    if (HOPPER_IDS.has(sb)) {
+      openHopperPanel(toHopperKey(solidCoords.x, solidCoords.y, solidCoords.z));
+      return true;
+    }
+    // Wave R5 — right-click opens the dispenser/dropper's 9-slot panel.
+    if (EJECTOR_IDS.has(sb)) {
+      openDispenserPanel(toEjectorKey(solidCoords.x, solidCoords.y, solidCoords.z));
+      return true;
+    }
   }
 
   const slot = getSelectedInventorySlot();
@@ -6818,6 +8046,62 @@ function placeBlock(ndcX = 0, ndcY = 0) {
       : makeComparatorId(orient, 0, false);
   }
 
+  // Wave R3 — piston placement: the push face points TOWARD the player (Minecraft
+  // convention), including straight up/down when the player looks steeply down/up.
+  if (placeType === 144 || placeType === 156) {
+    const sticky = placeType === 156;
+    let facing;
+    if (state.pitch < -0.85) facing = 4;      // looking down -> face up at the player
+    else if (state.pitch > 0.85) facing = 5;  // looking up -> face down
+    else {
+      const twoPi = Math.PI * 2;
+      const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+      const deg = (normYaw / Math.PI) * 180;
+      let away;
+      if (deg < 45 || deg >= 315) away = 0;
+      else if (deg < 135) away = 3;
+      else if (deg < 225) away = 2;
+      else away = 1;
+      facing = (away + 2) % 4; // toward the player = opposite of "away"
+    }
+    placeType = makePistonId(facing, sticky, false);
+  }
+
+  // Wave R5 — dispenser/dropper/observer placement: the front (bore / detector
+  // eye) points TOWARD the player, incl. up/down at steep pitch — piston rules.
+  if (placeType === 190 || placeType === 196 || placeType === 202) {
+    const base = placeType;
+    let facing;
+    if (state.pitch < -0.85) facing = 4;      // looking down -> face up at the player
+    else if (state.pitch > 0.85) facing = 5;  // looking up -> face down
+    else {
+      const twoPi = Math.PI * 2;
+      const normYaw = ((state.yaw % twoPi) + twoPi) % twoPi;
+      const deg = (normYaw / Math.PI) * 180;
+      let away;
+      if (deg < 45 || deg >= 315) away = 0;
+      else if (deg < 135) away = 3;
+      else if (deg < 225) away = 2;
+      else away = 1;
+      facing = (away + 2) % 4; // toward the player = opposite of "away"
+    }
+    placeType = base === 202 ? makeObserverId(facing, false) : makeEjectorId(facing, base === 196);
+  }
+
+  // Wave R4 — hopper placement: the spout points INTO the block face you clicked
+  // (top face -> output down; a side face -> horizontal output toward that block).
+  if (placeType === 180 && placeHitNormal) {
+    const nx = Math.round(placeHitNormal.x), ny = Math.round(placeHitNormal.y), nz = Math.round(placeHitNormal.z);
+    let facing = 0; // default: down
+    if (ny === 0) {
+      if (nz === 1) facing = 1;       // clicked +Z face -> output -Z... into the block
+      else if (nx === -1) facing = 2; // clicked -X face -> output +X
+      else if (nz === -1) facing = 3; // clicked -Z face -> output +Z
+      else if (nx === 1) facing = 4;  // clicked +X face -> output -X
+    }
+    placeType = makeHopperId(facing, false);
+  }
+
   // Wave G2b — door + trapdoor orientation from yaw (door is placed as a 2-cell pair below;
   // trapdoor is single-cell and rides the generic placement path).
   let doorLowerId = null;
@@ -6899,6 +8183,12 @@ function placeBlock(ndcX = 0, ndcY = 0) {
     const chestKey = toChestKey(coords.x, coords.y, coords.z);
     getChestState(chestKey, true);
     markChestPanelDirty();
+  }
+  if (HOPPER_IDS.has(placeType)) {
+    getHopperState(toHopperKey(coords.x, coords.y, coords.z), true); // Wave R4
+  }
+  if (EJECTOR_IDS.has(placeType)) {
+    getEjectorState(toEjectorKey(coords.x, coords.y, coords.z), true); // Wave R5
   }
   consumeFromSlot(state.inventory, state.selectedSlot, 1);
   // Rebuild the placed block's chunk (+ seam neighbours) now; defer the over-marked
@@ -7235,6 +8525,8 @@ function triggerDamageFlash() {
 function regenerateWorld() {
   fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
   redstoneSim.reset(); // Wave R1: drop transient circuit state with the old terrain
+  hopperStates.clear(); closeHopperPanel(); // Wave R4
+  dispenserStates.clear(); closeDispenserPanel(); // Wave R5
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -7272,6 +8564,8 @@ async function createNewWorld() {
   world.setSeed(seed);
   fluidSim.reset(); // Wave F5: clear flowing cells before fresh terrain
   redstoneSim.reset(); // Wave R1: drop transient circuit state with the old terrain
+  hopperStates.clear(); closeHopperPanel(); // Wave R4
+  dispenserStates.clear(); closeDispenserPanel(); // Wave R5
   world.generateTerrain();
   deactivateTorchLights();
   furnaceStates.clear();
@@ -7372,6 +8666,8 @@ function updateSimulation(dtSeconds) {
     refreshHud();
     updateFurnacePanel();
     updateChestPanel();
+    updateHopperPanel();
+    updateDispenserPanel();
     return;
   }
 
@@ -7775,6 +9071,7 @@ function updateSimulation(dtSeconds) {
   clampPlayer();
   world.ensureActiveChunksAround(state.playerPos.x, state.playerPos.z, REMESH_DRAIN_BUDGET);
   updateFurnaceSimulation(deltaMs);
+  updateHopperSimulation(deltaMs); // Wave R4 — after furnaces so fresh output moves next tick
   updateHostileMobs(deltaMs);
   updatePassiveMobs(deltaMs);
   updateTorchLights(deltaMs);
@@ -7847,6 +9144,8 @@ function updateSimulation(dtSeconds) {
   updateFurnacePanel();
   updateInventoryPanel();
   updateChestPanel();
+  updateHopperPanel();
+  updateDispenserPanel();
 
   const now = performance.now();
   const autosaveDue = !isAutomationSession && now - lastAutosaveAt >= simConfig.autosaveIntervalMs;
@@ -8026,6 +9325,16 @@ function closePauseMenu() {
 }
 
 function togglePauseMenu() {
+  // Wave R4 — Esc closes an open hopper panel before anything pauses.
+  if (state.hopperOpen) {
+    closeHopperPanel();
+    return;
+  }
+  // Wave R5 — same for the dispenser/dropper panel.
+  if (state.dispenserOpen) {
+    closeDispenserPanel();
+    return;
+  }
   // Esc inside the settings sub-panel backs out to the pause menu first.
   if (state.pauseOpen && settingsPanelEl && !settingsPanelEl.classList.contains("hidden")) {
     settingsPanelEl.classList.add("hidden");
@@ -8061,7 +9370,7 @@ document.addEventListener("pointerlockchange", () => {
   state._suppressAutoPause = false;
   if (suppressed || isAutomationSession) return;
   if (state.mode !== "playing") return;
-  if (state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen) return;
+  if (state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen || state.hopperOpen || state.dispenserOpen) return;
   openPauseMenu();
 });
 
@@ -8155,7 +9464,7 @@ inventoryPanel.addEventListener("click", (event) => {
     return;
   }
   const slotIndex = Number(slotButton.dataset.slotIndex);
-  onInventorySlotClick(slotIndex);
+  onInventorySlotClick(slotIndex, event.shiftKey);
 });
 
 // Wave 10 — craft panel grid + result slot + inventory clicks
@@ -8192,12 +9501,12 @@ if (chestPanel) {
   chestPanel.addEventListener("click", (event) => {
     const chestCell = event.target.closest("[data-chest-slot]");
     if (chestCell) {
-      onChestStorageClick(Number(chestCell.dataset.chestSlot));
+      onChestStorageClick(Number(chestCell.dataset.chestSlot), event.shiftKey);
       return;
     }
     const invBtn = event.target.closest("[data-chest-inv-index]");
     if (invBtn) {
-      onChestInvClick(Number(invBtn.dataset.chestInvIndex));
+      onChestInvClick(Number(invBtn.dataset.chestInvIndex), event.shiftKey);
       return;
     }
   });
@@ -8396,6 +9705,12 @@ window.render_game_to_text = () => {
       litLampsNearby: nearbyBlocks.filter((e) => e.type === REDSTONE_LAMP_ON_TYPE).length,
       repeatersNearby: nearbyBlocks.filter((e) => REPEATER_IDS.has(e.type)).length,
       comparatorsNearby: nearbyBlocks.filter((e) => COMPARATOR_IDS.has(e.type)).length,
+      pistonsNearby: nearbyBlocks.filter((e) => PISTON_BASE_IDS.has(e.type) || PISTON_HEAD_IDS.has(e.type)).length,
+      hoppersNearby: nearbyBlocks.filter((e) => HOPPER_IDS.has(e.type)).length,
+      hopperStates: hopperStates.size,
+      ejectorsNearby: nearbyBlocks.filter((e) => EJECTOR_IDS.has(e.type)).length,
+      observersNearby: nearbyBlocks.filter((e) => OBSERVER_IDS.has(e.type)).length,
+      ejectorStates: dispenserStates.size,
       ...redstoneSim.stats(),
     },
     combat: {
@@ -8717,6 +10032,94 @@ window.__exoCraftDebug = {
     world.rebuildEditedChunksNow(bx, bz);
     return { placed: true, x: bx, y: by, z: bz, id: world.get(bx, by, bz) };
   },
+  // Wave R3 — place a piston via debug: placePiston(x,y,z,facing,sticky)
+  placePiston: (x, y, z, facing = 0, sticky = false) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, makePistonId(facing % 6, !!sticky, false));
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, id: world.get(bx, by, bz) };
+  },
+  // Wave R4 — hopper debug hooks.
+  placeHopper: (x, y, z, facing = 0) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, makeHopperId(facing % 5, false));
+    getHopperState(toHopperKey(bx, by, bz), true);
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, id: world.get(bx, by, bz) };
+  },
+  getHopperAt: (x, y, z) => {
+    const key = toHopperKey(Math.floor(x), Math.floor(y), Math.floor(z));
+    const hopper = hopperStates.get(key);
+    const id = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (!hopper) return null;
+    return { id, locked: HOPPER_IDS.has(id) ? hopperIsLocked(id) : null, slots: hopper.slots.map((s) => (s ? { ...s } : null)) };
+  },
+  giveHopperItem: (x, y, z, itemId, count = 1, durability = undefined) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const hopper = getHopperState(toHopperKey(bx, by, bz), true);
+    const left = insertIntoSlots(hopper.slots, itemId, Math.max(1, Math.floor(count)), durability);
+    redstoneSim.onBlockChanged(bx, by, bz); // container fullness changed
+    return { added: count - left };
+  },
+  getChestContentsAt: (x, y, z) => {
+    const chest = chestStates.get(toChestKey(Math.floor(x), Math.floor(y), Math.floor(z)));
+    return chest ? chest.map((s) => (s ? { ...s } : null)) : null;
+  },
+  // Wave R5 — dispenser/dropper/observer test hooks.
+  placeEjector: (x, y, z, facing = 0, isDropper = false) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, makeEjectorId(facing % 6, !!isDropper));
+    getEjectorState(toEjectorKey(bx, by, bz), true);
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, id: world.get(bx, by, bz) };
+  },
+  getEjectorAt: (x, y, z) => {
+    const key = toEjectorKey(Math.floor(x), Math.floor(y), Math.floor(z));
+    const ejector = dispenserStates.get(key);
+    const id = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (!ejector) return null;
+    return { id, isDropper: EJECTOR_IDS.has(id) ? ejectorIsDropper(id) : null, slots: ejector.slots.map((s) => (s ? { ...s } : null)) };
+  },
+  giveEjectorItem: (x, y, z, itemId, count = 1, durability = undefined) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    const ejector = getEjectorState(toEjectorKey(bx, by, bz), true);
+    const left = insertIntoSlots(ejector.slots, itemId, Math.max(1, Math.floor(count)), durability);
+    redstoneSim.onBlockChanged(bx, by, bz); // container fullness changed
+    return { added: count - left };
+  },
+  placeObserver: (x, y, z, facing = 0) => {
+    const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
+    world.set(bx, by, bz, makeObserverId(facing % 6, false));
+    redstoneSim.onBlockChanged(bx, by, bz);
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    world.rebuildEditedChunksNow(bx, bz);
+    return { placed: true, id: world.get(bx, by, bz) };
+  },
+  getObserverAt: (x, y, z) => {
+    const id = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
+    if (!OBSERVER_IDS.has(id)) return null;
+    return { id, facing: observerFacing(id), powered: (id - 202) >= 6 };
+  },
+  // Wave R5 review — reproduce the save/load reseed deterministically (reset +
+  // seedFromWorldEdits over the current edits), without touching IndexedDB.
+  reseedRedstoneFromEdits: () => {
+    redstoneSim.reset();
+    redstoneSim.seedFromWorldEdits(world.exportEdits());
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return true;
+  },
+  // Wave R5 review — explode at a chosen cell (spawnMob can't aim a creeper).
+  explodeAt: (x, y, z) => {
+    triggerCreeperExplosion({ pos: { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5, z: Math.floor(z) + 0.5 } });
+    return true;
+  },
+  getContainerSignalAt: (x, y, z) => containerSignalAt(Math.floor(x), Math.floor(y), Math.floor(z)),
   // Wave R2 — cycle a repeater's delay / toggle a comparator's mode at a cell.
   cycleRepeaterAt: (x, y, z) => {
     const bx = Math.floor(x), by = Math.floor(y), bz = Math.floor(z);
@@ -9162,6 +10565,10 @@ window.__exoCraftDebug = {
     if (typeof itemId !== "string" || !ITEM_DEFS[itemId]) return `Unknown item: ${itemId}`;
     const chest = getChestState(key, true);
     const leftover = addItemToInventory(chest, itemId, count);
+    {
+      const c = fromChestKey(key);
+      redstoneSim.onBlockChanged(c.x, c.y, c.z); // container fullness changed
+    }
     markChestPanelDirty();
     updateChestPanel(true);
     return { added: count - leftover, leftover };
@@ -9231,11 +10638,13 @@ window.__exoCraftDebug = {
     };
   },
   // Wave F1 — item entity debug hooks
-  spawnItemEntity: (itemId, count = 1, dx = 0, dy = 1, dz = 0) => {
+  spawnItemEntity: (itemId, count = 1, dx = 0, dy = 1, dz = 0, opts = undefined) => {
     const x = state.playerPos.x + (Number.isFinite(dx) ? dx : 0);
     const y = state.playerPos.y + (Number.isFinite(dy) ? dy : 1);
     const z = state.playerPos.z + (Number.isFinite(dz) ? dz : 0);
-    const e = itemEntities.spawnItemEntity(itemId, Math.max(1, Math.floor(count)), x, y, z);
+    // Wave R4 — optional opts forwards vx/vy/vz overrides (e.g. {vx:0,vy:0,vz:0}
+    // for a scatter-free drop straight into a hopper in deterministic tests).
+    const e = itemEntities.spawnItemEntity(itemId, Math.max(1, Math.floor(count)), x, y, z, opts || {});
     return e ? { id: e.id, itemId: e.itemId, count: e.count, x, y, z } : null;
   },
   getItemEntities: () => itemEntities.getState(),

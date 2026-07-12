@@ -985,3 +985,241 @@ persist as ordinary block edits; save stays v11):
 - KNOWN (deferred): no repeater locking (side-input latch); comparators don't read
   container fullness yet (needs hoppers wave); side inputs accept any signal source
   (MC restricts to wire/repeaters/redstone blocks); components remain floor-mounted.
+
+## Wave R3 — pistons (normal + sticky, ids 144-179)
+- BASE ids 144-167 (144 + sticky*12 + extended*6 + facing 0-5 NESW+up/down): plain
+  OPAQUE CUBES with per-facing GENERATED face maps (push plate on the facing side,
+  planks back, body sides) — zero opaque-mesher risk. HEAD ids 168-179: class-5
+  partial (0.25 plate flush with the outer face + centered arm, axis-generic via
+  PISTON_FACING_DIRS; arm reuses the R2 emitBox tileOverride). 3 new tiles fill the
+  atlas to exactly 64/64 — NEXT TILE WAVE MUST EXPAND THE ATLAS (path documented).
+- MECHANICS (redstone.js): powered=extend / unpowered=retract on 100ms timers; row
+  scan collects <=12 contiguous pushable blocks (class-0 cubes + glass; immovable:
+  furnace/chest/bedrock/other pistons), moves far->near; attached components AND
+  flora in the path pop as drops; fluids/air at the row end are consumed; sticky
+  retract pulls one block. Placement faces TOWARD the player (incl. up/down from
+  pitch); breaking base or head removes both, one drop; explosion cells notify the
+  sim. Entity displacement: AABB-overlap check (radius-aware, both mob body cells),
+  shove skipped when the destination is solid.
+- 3-lens adversarial review (logic/mesher/perf-save; 2 reviewers verified live with
+  Playwright rigs): 4 MUST-FIXES found, ALL fixed + regression-tested:
+  (1) SAVE CORRUPTION — pushing into FLOWING water left a stale fluidLevels entry;
+  fluidSim.restore() then clobbered the pushed block on load. Fixed 2 ways: sim
+  changed-cells now notify fluidSim.onBlockChanged, and _resolveCell heals stale
+  non-fluid entries. (2) Entity in front of a bare piston was never displaced (head
+  cell missing from onPistonMoved) -> physics popped the player UP through solid
+  ceilings (no-clip exploit); head destination now always included. (3) Down-facing
+  heads rendered pitch black (partial path sampled light from the opaque base
+  above); heads now sample their OWN cell. (4) Sticky piston + redstone block =
+  eternal 10Hz oscillator (measured 15-33x frame cost); piston burnout added (6
+  transitions/2s -> freeze until a real neighbour change), mirroring torch burnout.
+  Plus: retract head-OWNERSHIP check (facing+sticky match — a severed pair can no
+  longer delete a neighbouring piston's head).
+- VERIFIED: smoke suite 44 -> 58 checks, ALL PASS: extend/push rows, normal-vs-
+  sticky retract, 13-block over-limit refusal, chest immovable, wire pops in the
+  push path, up-facing lift, fluid-cell heal (pushed stone survives), player
+  displaced along the axis (not upward), oscillator burns out (5 transitions then
+  frozen, 0 pending). Reviewers also live-verified: save/load round-trip of an
+  extended sticky piston, pushed-sand falling, 12-ok/13-fail boundary, face-to-face
+  pistons deterministic, blocked pistons stay quiet. Build green; screenshots show
+  all facings rendering (down-head lighting fixed).
+- KNOWN (deferred): piston bases don't get pushed by other pistons (deliberate —
+  avoids timer-key desync); side texture band doesn't rotate with facing (cosmetic;
+  needs atlas expansion for rotated tiles); no slime-block chain physics; heads
+  collide as full cubes.
+
+## Wave R4 — hoppers + comparator container reading (ids 180-189)
+- BLOCKS: hopper ids 180-189 = 180 + locked*5 + facing (0=down, 1-4 NESW).
+  Class-5 partial geometry: funnel mouth (full-width upper half), narrow stem,
+  and a short spout hugging the output face — all strictly in-cell. 2 new tiles
+  (hopper outside/inside) forced the ATLAS EXPANSION from 8x8 to 16x16
+  (ATLAS_COLS/ROWS=16); all UVs derive from tileOrigin/tileUvRect so existing
+  slots kept their coordinates — verified zero visual drift. LIGHT_PASSABLE +
+  own-cell light sampling (like piston heads: a chest directly above is the
+  normal setup and would otherwise render the hopper pitch black).
+- MECHANICS (main.js): 5-slot container per hopper (hopperStates map, saved as
+  v12 `hoppers` field — old saves forward-default). Every 400ms an unlocked
+  hopper pushes ONE item into the container it faces (chest / hopper / furnace:
+  from above feeds the smelt input — ONLY if the item is smeltable; from the
+  side burns it as fuel) and pulls ONE from the container above (chest /
+  hopper / furnace output), or VACUUMS dropped item entities from its mouth.
+  Redstone power sets the locked bit (transfers pause; instant flip like the
+  lamp). Right-click opens a 5-slot panel with click-click transfers. Breaking
+  (or exploding) a hopper spills its slots; evicted chunks pause their hoppers
+  instead of forcing chunk regen every tick.
+- COMPARATORS now read container fullness (1 + floor(14*fill) over chest 27x64 /
+  hopper 5x64 / furnace 2x64) — closes the R2 gap. Container reads are gated to
+  the comparator's REAR input only.
+- 3-lens adversarial review (logic / mesher-blank-world / perf-save, live
+  Playwright verification): 5 MUST-FIXES, all fixed + regression-rigged:
+  (1) STALENESS — comparators poll containers only on re-evaluation and no
+  mutation path dirtied the sim; every container mutation (hopper push/pull,
+  all panel transfers, furnace load/take, debug hooks) now calls
+  redstoneSim.onBlockChanged on the container cell. (2) DURABILITY — hopper
+  transfers stripped tool wear and stacked tools (free repair + item loss on
+  reload); insertIntoSlots is now one-per-slot for tools/non-stackables and
+  carries durability end-to-end incl. save/load validation against ITEM_DEFS.
+  (3) PHANTOM LATCH — container reads leaked into repeater rears and comparator
+  sides; now rear-only via an allowContainer flag. (4) FURNACE JAM —
+  non-smeltables fed from above wedged the input slot; gated on
+  getSmeltingRecipeByInput. (5) Hopper under an opaque block rendered black
+  (light sampled the cell above); hoppers sample their OWN cell.
+- VERIFIED: smoke suite 58 -> 69 checks, ALL PASS: chest->hopper->chest chain,
+  redstone lock/unlock pause-resume, comparator reads fullness LIVE (no manual
+  re-dirty — the old masking "nudge" removed), vacuum pickup, furnace feeding,
+  repeater-behind-chest stays off, subtract-mode sides ignore containers (15
+  stays 15), 2 worn pickaxes cross a hopper into 2 chest slots at durability 7,
+  hopper delivery wakes an adjacent comparator, non-smeltables stay put.
+- KNOWN (deferred): item entities don't carry durability (pre-existing,
+  engine-wide — vacuumed tools reset to full wear like any ground drop);
+  droppers/dispensers next; hopper minecarts far later.
+
+## Wave R5 — dispensers/droppers + observers (ids 190-213)
+- BLOCKS: dispenser 190-195 (190+facing), dropper 196-201, observer 202-213
+  (202 + powered*6 + facing); facing 0-5 = NESW/up/down (piston order). ALL THREE
+  ARE PLAIN OPAQUE CUBES with generated per-facing BLOCK_FACE_TILES maps (bore
+  tile on the front; observer eye front / output-dot back that swaps to a lit
+  tile while pulsing) — zero mesher branches touched. 6 new atlas tiles at
+  [10..15,0]. GOTCHA (caught live): new ids MUST be registered in config.js
+  blockTypes or world.set normalizes them to air.
+- EJECTORS (shared machinery): 9-slot container (dispenserStates map, saved as
+  v13 `dispensers` field with durability + registry validation like hoppers).
+  The sim tracks per-cell powered state and fires ONCE per OFF->ON edge on a
+  1-tick delay via the onEjectorFire callback; first sight PRIMES silently, so
+  placement next to live power and save-load never fire spuriously. A fire
+  inserts one item into the faced container (chest/hopper/ejector/furnace with
+  the R4 smeltable-input + fuel rules) or throws it as an item entity with
+  facing-directed velocity (dispensers hard, droppers a gentle lob). A solid
+  non-container in front = deterministic no-op. Hoppers feed and drain ejectors;
+  comparators read their fullness (9x64); pistons refuse to move them.
+- OBSERVERS: watch the cell they FACE; when its block id changes, the back
+  pulses 15 for one redstone tick (100ms delay, 100ms pulse) through
+  _componentOutputInto — which now works vertically (observers can face and
+  output up/down; repeaters/comparators keep their same-level guard). Priming
+  semantics like ejectors. BURNOUT: counts every DETECTED change (not just
+  scheduled pulses) — the first cut gated counting on scheduling, and a
+  face-to-face observer pair paced itself just under the window and ping-ponged
+  FOREVER (found by rig AU, fixed, regression-locked: pair goes quiet with 0
+  pending timers).
+- UI: right-click opens a 3x3 dispenser panel (chest-style click-click
+  transfers, durability-safe swap rules, mutual exclusion with every other
+  panel, Esc chain, redstone-lock context line); breaking or exploding an
+  ejector spills its 9 slots.
+- VERIFIED: smoke suite 69 -> 80 checks, ALL PASS: single fire per rising edge
+  (no auto-refire, refires on the next edge), dropper->chest insert (no ground
+  item), observer prime-silent + pulse on/off, hopper->dispenser feed +
+  comparator signal, hopper drains dropper above, observer-pair burnout,
+  blocked-dispenser no-op, piston-vs-dispenser immovability. 3-lens adversarial
+  review (logic / render-registry / perf-save) with live Playwright verification
+  run against this wave; confirmed findings land as a follow-up commit.
+- KNOWN (deferred): dispensers don't yet "use" items (no arrow-projectile
+  firing, no bucket place/scoop — ejected as ground items instead); fluid-level
+  changes don't pulse observers (fluid sim doesn't notify redstone); observers
+  are piston-immovable (deviation: last-seen state is position-keyed).
+
+### Wave R5 review follow-up (adversarial 3-lens, live-verified)
+2 must-fixes + 3 nice-to-haves + 1 note, all fixed and regression-rigged (suite
+80 -> 84):
+- MUST-FIX (save corruption): an observer SAVED MID-PULSE loaded permanently
+  powered — its 100ms off-flip lived only in a transient timer that reset()
+  clears on load, so it emitted 15 out of its back forever (stuck circuit, no
+  in-game remedy). `seedFromWorldEdits` now normalizes powered observer ids
+  (208-213) back to unpowered on load, mirroring the stale-button-release
+  convention. Rig AW.
+- MUST-FIX (item loss + state leak): a dispenser/dropper destroyed by a CREEPER
+  (not breakBlock) silently ate its contents and leaked its state into every
+  save; the intended spill branch was DEAD CODE (the sim guards the fire
+  callback with EJECTOR_IDS.has, so it never ran on a destroyed cell). The
+  creeper explosion path now spills the 9 slots + drops the state like
+  breakBlock; the dead branch was removed. Rig AX.
+- NICE-TO-HAVE: loadGame() now closes the dispenser panel (a stale panel over a
+  reloaded world was a ghost-container item-loss path); the frame loop now
+  refreshes the dispenser panel every frame (was stale until the next click);
+  dispenser/dropper/observer item icons now draw their FRONT tile (they shared
+  furnace_top / observer_side and were indistinguishable in the hotbar).
+- NOTE: save `version` constant bumped 11 -> 13 to match the v12 hoppers / v13
+  dispensers fields (loading is field-presence based, so this is metadata only).
+
+## Wave L1 — lighting seam ghost-light fix
+- THE BUG (documented since R1, deferred): removing a light emitter (torch/lamp)
+  or placing an opaque block near a CHUNK SEAM left ghost blocklight that never
+  cleared. Root cause: the per-chunk light BFS is MONOTONIC (seed + spread-if-
+  greater) and seeds cross-chunk light from the NEIGHBOUR'S computed buffer. On a
+  light DECREASE, two seam chunks mutually re-seed each other's stale glow across
+  the seam forever — the ghost stabilises a notch below the original and sticks.
+  Reproduced deterministically: torch at x=15 (chunk seam), remove it, and the
+  torch cell still read blocklight 12 (was 14), the neighbour chunk read 8, and
+  even the same-chunk-west cell read 9 — all pure ghost.
+- THE FIX (fixpoint regional relight): a light DECREASE (emitter removed/weakened
+  OR passable->opaque) queues the edited chunk in world._pendingLightDecrease.
+  Before the next remesh, buildChunkMesh flushes the queue: for each region it
+  CLEARS the skylight+blocklight buffers of the 3x3 chunk neighbourhood (so no
+  stale value can re-seed across a seam), then recomputes them to a fixpoint
+  (3 passes — a source's range 14 < chunk width 16, so light crosses at most one
+  seam and two passes suffice; the third is insurance). The corrected buffers are
+  authoritative (dirtyLight=false) and the region's meshes are marked dirty so the
+  drain rebuilds them. Light INCREASES keep the cheap additive path untouched.
+- WHY 3x3 IS EXACTLY RIGHT: max light range (14) < chunk width (16), so any edit's
+  light effect is fully contained in the immediate ring — chunks two away can't be
+  reached, so their buffers are never stale and correctly seed the region border.
+- COST: zero when idle (guarded by _pendingLightDecrease.size). A light-decrease
+  edit costs ~27 computeChunkLight calls (3 passes x up to 9 chunks); these are
+  infrequent (break a torch, place a wall) and bounded. Decreases in the same
+  chunk collapse to one region; evicted chunks are skipped (relight on re-stream).
+- VERIFIED (live Playwright + smoke suite 84 -> 87, ALL PASS): the exact repro now
+  clears to 0 (torch cell, neighbour chunk, same chunk); a SURVIVING second torch
+  keeps its glow through the relight (removed cell reads exactly the survivor's
+  decayed contribution, not a ghost); the additive path still lights across seams;
+  an opaque roof casts a skylight shadow and removing it restores sky 15. New rigs
+  AY1-3 lock: glow crosses the seam, seam-emitter removal leaves no ghost, and the
+  regional relight preserves a surviving source. Lamp rigs A5b/A7b unaffected.
+  Sim-driven decreases (lamp off, piston pushing an opaque block near a seam) flush
+  correctly through applyRedstoneVisualChanges -> rebuildEditedChunksNow. Build green.
+- KNOWN (unchanged, pre-existing): light INCREASE near a seam can lag one remesh
+  when the neighbour chunk happens to rebuild before the source chunk (additive
+  ordering); real break/place go through rebuildEditedChunksNow center-first, so
+  the source chunk computes first and the neighbour seeds correctly — no visible lag.
+
+## Wave U1 — inventory UX: shift-click quick-move
+- Shift-click any slot to jump the whole stack to the sensible destination in one
+  click, across ALL container panels (inventory, chest, hopper, dispenser). Routing:
+  a CONTAINER slot -> player inventory; an INVENTORY slot (with a container open)
+  -> that container; the plain inventory panel -> hotbar<->backpack (Minecraft's
+  region swap). Merges into matching stacks first, then fills empties, respecting
+  stack limits, and keeps tool DURABILITY / non-stackable one-per-slot rules (built
+  on the R4 insertIntoSlots, now range-aware for the hotbar/backpack split).
+- Container quick-moves dirty the redstone sim (onBlockChanged) so an adjacent
+  comparator re-reads the new fullness, same discipline as the R4/R5 transfers.
+- Implementation: one context-generic quickMoveStack(fromCtx, fromIdx) resolves the
+  source/destination backing arrays per panel; each panel's click handler gained a
+  `shiftKey` param and a shift branch that calls it and refreshes. The single-click
+  select/move flow is untouched. No save-format or sim-state change; UI-only.
+- VERIFIED (live Playwright + smoke suite 87 -> 89, ALL PASS): inventory
+  hotbar<->backpack swap, chest inv->chest and chest->inv, and tool durability
+  preserved through a shift-move (a worn pickaxe crosses at count 1, wear intact).
+  New rigs AZ1-2 lock the chest round-trip. During rig authoring, caught a test
+  gotcha (not a code bug): openChestPanel is proximity-gated, so a chest placed far
+  from the player never opens and a stale hidden DOM slot from a prior chest made
+  the click look like it fired — the rig now places the chest next to the player.
+- KNOWN (next inventory waves): drag-and-drop, hover tooltips (item name + durability
+  + later enchants), number-key slot swap, and shift-click-to-equip armor are not yet
+  done — U1 is the shift-click quick-move slice.
+
+## Wave U2 — hover tooltips on inventory/container slots
+- Hovering any slot (inventory, chest, hopper, dispenser, armor) shows a
+  cursor-following tooltip: item name, count (when >1), and durability X/Y for
+  tools. One DELEGATED document mousemove resolves the slot under the cursor to
+  its LIVE item (reads game state, not the slot's rendered text) so it survives
+  the frequent innerHTML panel re-renders; empty slots and off-slot moves hide it.
+- Cheap: the tooltip DOM is rebuilt only when the hovered item's signature
+  (id|count|dur) changes; every move just repositions (clamped to the viewport).
+  Text is set via textContent (no innerHTML injection surface). UI-only, no
+  save/sim change.
+- VERIFIED (live Playwright + smoke suite 89 -> 91, ALL PASS): hovering a
+  stone_pickaxe shows "Stone Pickaxe" + "Durability 132/132"; a 12-stack shows
+  "Cobblestone" + "x12"; empty slots stay hidden; moving off hides it. Rigs BA1-2
+  lock it. (A probe gotcha, not a code bug: dispatching mousemove on `document`
+  makes event.target=document which has no .closest — real moves target the slot
+  element, so the rig dispatches on the element.)
+- KNOWN (next): drag-and-drop and number-key slot swap remain; tooltips will grow
+  an enchantment list once enchanting lands.

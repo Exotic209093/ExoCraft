@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS } from "./textures";
+import { BLOCK_FACE_TILES, tileUvRect, BLOCK_TRANSPARENCY_CLASS, FLORA_BLOCK_IDS, PARTIAL_BLOCK_IDS, SLAB_BLOCK_IDS, STAIR_BLOCK_IDS, FENCE_BLOCK_IDS, PANE_BLOCK_IDS, LADDER_BLOCK_IDS, ladderFacing, DOOR_BLOCK_IDS, doorOrient, doorIsOpen, TRAPDOOR_BLOCK_IDS, trapdoorOrient, trapdoorIsOpen, REDSTONE_WIRE_IDS, REDSTONE_CROSS_IDS, BUTTON_IDS, PLATE_IDS, BUTTON_PRESSED, PLATE_ON, REPEATER_IDS, COMPARATOR_IDS, repeaterFacing, repeaterDelayIdx, repeaterIsPowered, comparatorFacing, comparatorMode, comparatorIsPowered, REDSTONE_FACING_DIRS, PISTON_HEAD_IDS, pistonHeadFacing, pistonHeadIsSticky, PISTON_FACING_DIRS, HOPPER_IDS, hopperFacing, HOPPER_FACING_DIRS } from "./textures";
 
 const CARDINAL_DIRECTIONS = [
   [1, 0, 0],
@@ -164,6 +164,10 @@ const LIGHT_PASSABLE = new Set([
   83, 84, 85, 86, 87, 88, 89, 90, 91, 92,
   // Wave R2 — repeaters (96-127) + comparators (128-143): thin plates, light passes.
   ...Array.from({ length: 48 }, (_, i) => 96 + i),
+  // Wave R3 — piston heads (168-179): plate + arm, light passes (bases are opaque).
+  ...Array.from({ length: 12 }, (_, i) => 168 + i),
+  // Wave R4 — hoppers (180-189): funnel with gaps, light passes.
+  ...Array.from({ length: 10 }, (_, i) => 180 + i),
 ]);
 
 function toChunkKey(cx, cz) {
@@ -649,6 +653,11 @@ export class VoxelWorld {
     this.activeChunkKeys = new Set();
     this.dirtyActiveChunkKeys = new Set();
     this.lastCenterChunk = null;
+    // Wave L1 — chunk keys where a light DECREASE (emitter removed/weakened or an
+    // opaque block placed) needs a fixpoint regional relight before the next remesh.
+    // Monotonic per-chunk BFS can't remove light, so a decrease is flushed via a
+    // clear-then-recompute over the 3x3 neighbourhood (see flushLightDecreases).
+    this._pendingLightDecrease = new Set();
 
     // Last-chunk cache for the allocation-free get() fast path. NaN so the first
     // lookup (cx/cz can legitimately be 0) always misses. Invalidated in clearChunkRuntime.
@@ -1546,6 +1555,18 @@ export class VoxelWorld {
     const passabilityChanged = wasPassable !== nowPassable;
     const emitterChanged = (BLOCK_LIGHT_EMIT[previous] || 0) !== (BLOCK_LIGHT_EMIT[nextType] || 0);
     const lightChanged = passabilityChanged || emitterChanged;
+
+    // Wave L1 — a light DECREASE (emitter removed/weakened, or an opaque block
+    // placed where light used to pass) can't be undone by the additive per-chunk
+    // BFS: the neighbour chunks still hold the old glow in their buffers and
+    // mutually re-seed it across the seam forever (ghost light). Queue a fixpoint
+    // regional relight; it's flushed before the next remesh. Light INCREASES are
+    // handled correctly by the normal additive path, so they don't queue.
+    const emitterDecreased = (BLOCK_LIGHT_EMIT[previous] || 0) > (BLOCK_LIGHT_EMIT[nextType] || 0);
+    const passabilityLost = wasPassable && !nowPassable;
+    if (emitterDecreased || passabilityLost) {
+      this._pendingLightDecrease.add(toChunkKey(cx, cz));
+    }
     const exposureChanged = (previous > 0) !== (nextType > 0)
       || (BLOCK_TRANSPARENCY_CLASS[previous] || 0) !== (BLOCK_TRANSPARENCY_CLASS[nextType] || 0);
 
@@ -1964,6 +1985,62 @@ export class VoxelWorld {
     return { skylight, blocklight };
   }
 
+  // Wave L1 — flush queued light DECREASES with a fixpoint regional relight.
+  // Called at the top of buildChunkMesh so corrected buffers are in place before
+  // any chunk reads them. Processes the whole pending set once, then clears it.
+  flushLightDecreases() {
+    if (this._pendingLightDecrease.size === 0) return;
+    const centers = Array.from(this._pendingLightDecrease);
+    this._pendingLightDecrease.clear();
+    for (const key of centers) {
+      const { cx, cz } = fromChunkKey(key);
+      this.relightRegionFixpoint(cx, cz);
+    }
+  }
+
+  // Recompute skylight + blocklight for the 3x3 chunk neighbourhood around
+  // (cx,cz) to a fixpoint. A light source's range (max 14) is smaller than the
+  // chunk width (16), so a change in the centre chunk can only reach the immediate
+  // ring — the 3x3 region fully contains it. The buffers are CLEARED first so no
+  // stale ghost value seeds back across a seam; recomputing then converges in a
+  // few passes (each pass propagates one seam-hop). Chunks whose blocks aren't
+  // resident (evicted) are skipped — they relight correctly when re-streamed.
+  relightRegionFixpoint(cx, cz) {
+    const region = [];
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const rcx = cx + dx;
+        const rcz = cz + dz;
+        const chunk = this.chunks.get(toChunkKey(rcx, rcz));
+        if (chunk && chunk.blocks) region.push({ rcx, rcz, chunk });
+      }
+    }
+    if (region.length === 0) return;
+    // Clear the region's light so cross-seam seeding starts from a clean slate
+    // (computeChunkLight tolerates null neighbour buffers — it just skips the
+    // seam seed for that side).
+    for (const r of region) {
+      r.chunk.skylight = null;
+      r.chunk.blocklight = null;
+    }
+    // Fixpoint: light crosses at most one seam within the region, so two passes
+    // suffice for any compute order; a third is cheap insurance.
+    const PASSES = 3;
+    for (let pass = 0; pass < PASSES; pass += 1) {
+      for (const r of region) {
+        this.computeChunkLight(r.rcx, r.rcz); // stores buffers on the chunk
+        r.chunk.dirtyLight = false;           // buffers are now authoritative
+      }
+    }
+    // The corrected buffers must reach the screen: mark the region's meshes dirty
+    // so the remesh drain rebuilds them (reusing the buffers, no re-BFS).
+    for (const r of region) {
+      if (this.activeChunkKeys.has(toChunkKey(r.rcx, r.rcz))) {
+        this.dirtyActiveChunkKeys.add(toChunkKey(r.rcx, r.rcz));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // AO helper: compute occlusion level (0..3) for one vertex of a face.
   // side1, side2, corner are [dx,dy,dz] relative to the voxel being meshed.
@@ -2001,6 +2078,10 @@ export class VoxelWorld {
   }
 
   buildChunkMesh(cx, cz) {
+    // Wave L1 — apply any queued light-decrease relights before reading light
+    // buffers, so this build (and every later one this drain) sees corrected,
+    // ghost-free values. Cheap no-op when nothing is queued.
+    if (this._pendingLightDecrease.size > 0) this.flushLightDecreases();
     const chunk = this.ensureChunk(cx, cz);
     this.disposeChunkMeshes(chunk);
 
@@ -2290,8 +2371,13 @@ export class VoxelWorld {
           } else if (PARTIAL_BLOCK_IDS.has(blockType)) {
             // --- Wave F4: partial-geometry emitter (slabs and stairs) ---
             // Sample light from the voxel above (open sky side), same pattern as flora.
+            // Wave R3 must-fix: piston heads sample their OWN voxel instead — a
+            // down-facing head always has its opaque base above (light 0/0) and
+            // would render pitch black; heads are LIGHT_PASSABLE so their own
+            // cell carries valid light. Wave R4: hoppers get the same treatment
+            // (a chest or solid block directly above is the normal setup).
             const aboveX = worldX;
-            const aboveY = y + 1;
+            const aboveY = (PISTON_HEAD_IDS.has(blockType) || HOPPER_IDS.has(blockType)) ? y : y + 1;
             const aboveZ = worldZ;
             const aLX = aboveX - baseX;
             const aLZ = aboveZ - baseZ;
@@ -2389,6 +2475,48 @@ export class VoxelWorld {
               // the pressed state sinks visibly.
               const ph = blockType === PLATE_ON ? 0.03 : 0.0625;
               emitBox(x0 + 0.0625, y0, z0 + 0.0625, 0.875, ph, 0.875, blockType);
+            } else if (HOPPER_IDS.has(blockType)) {
+              // Wave R4 — hopper funnel: wide mouth box (top half), tapered stem,
+              // and a small output spout offset toward the facing direction.
+              const hFacing = hopperFacing(blockType);
+              const [odx, ody, odz] = HOPPER_FACING_DIRS[hFacing];
+              emitBox(x0, y0 + 0.5, z0, 1.0, 0.5, 1.0, blockType);              // mouth
+              emitBox(x0 + 0.25, y0 + 0.2, z0 + 0.25, 0.5, 0.3, 0.5, blockType); // stem
+              if (hFacing === 0) {
+                emitBox(x0 + 0.375, y0, z0 + 0.375, 0.25, 0.2, 0.25, blockType); // down spout
+              } else {
+                // Horizontal spout: a 0.25 bar hugging the output face (kept
+                // strictly inside this cell).
+                const sMinX = odx === 1 ? x0 + 0.75 : (odx === -1 ? x0 : x0 + 0.375);
+                const sMinZ = odz === 1 ? z0 + 0.75 : (odz === -1 ? z0 : z0 + 0.375);
+                emitBox(sMinX, y0 + 0.2, sMinZ, 0.25, 0.2, 0.25, blockType);
+              }
+            } else if (PISTON_HEAD_IDS.has(blockType)) {
+              // Wave R3 — piston head: a 0.25-thick push plate flush with the
+              // OUTER face (the pushing side) plus a slim arm reaching back to
+              // the base cell. Axis-generic via the facing direction vector.
+              const [hdx, hdy, hdz] = PISTON_FACING_DIRS[pistonHeadFacing(blockType)];
+              const P = 0.25;   // plate thickness
+              const A = 0.25;   // arm cross-section
+              // Plate: full cross-section slab at the far (facing) side of the cell.
+              const plateMin = [
+                x0 + (hdx > 0 ? 1 - P : 0), y0 + (hdy > 0 ? 1 - P : 0), z0 + (hdz > 0 ? 1 - P : 0),
+              ];
+              const plateSize = [
+                hdx !== 0 ? P : 1, hdy !== 0 ? P : 1, hdz !== 0 ? P : 1,
+              ];
+              emitBox(plateMin[0], plateMin[1], plateMin[2], plateSize[0], plateSize[1], plateSize[2], blockType);
+              // Arm: centered bar from the plate's inner face back to the near face.
+              const armLen = 1 - P;
+              const armMin = [
+                x0 + (hdx !== 0 ? (hdx > 0 ? 0 : P) : 0.5 - A / 2),
+                y0 + (hdy !== 0 ? (hdy > 0 ? 0 : P) : 0.5 - A / 2),
+                z0 + (hdz !== 0 ? (hdz > 0 ? 0 : P) : 0.5 - A / 2),
+              ];
+              const armSize = [
+                hdx !== 0 ? armLen : A, hdy !== 0 ? armLen : A, hdz !== 0 ? armLen : A,
+              ];
+              emitBox(armMin[0], armMin[1], armMin[2], armSize[0], armSize[1], armSize[2], blockType, "piston_side");
             } else if (REPEATER_IDS.has(blockType) || COMPARATOR_IDS.has(blockType)) {
               // Wave R2 — repeater/comparator: a thin base plate plus small "nub"
               // boxes whose POSITIONS encode facing, delay and mode, so direction
@@ -2987,6 +3115,7 @@ export class VoxelWorld {
     this.chunks.clear();
     this.activeChunkKeys.clear();
     this.dirtyActiveChunkKeys.clear();
+    this._pendingLightDecrease.clear(); // Wave L1 — stale region keys reference cleared chunks
     this.lastCenterChunk = null;
     // The get() last-chunk cache references chunk objects we just cleared.
     this._lastGetCx = NaN;

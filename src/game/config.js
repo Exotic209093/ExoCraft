@@ -145,6 +145,38 @@ const DEFAULT_GAME_CONFIG = {
         color: 0xb0b0bc,
         transparent: true,
       })),
+      // Wave R3 — piston bases (144-167: facing/extended/sticky in the id) and
+      // piston heads (168-179: facing/sticky). Facing letters: N E S W U D.
+      ...Array.from({ length: 24 }, (_, i) => ({
+        id: 144 + i,
+        name: `${i >= 12 ? "Sticky " : ""}Piston ${"NESWUD"[i % 6]}${(i % 12) >= 6 ? " (ext)" : ""}`,
+        color: i >= 12 ? 0x60a84a : 0xba945a,
+      })),
+      ...Array.from({ length: 12 }, (_, i) => ({
+        id: 168 + i,
+        name: `${i >= 6 ? "Sticky " : ""}Piston Head ${"NESWUD"[i % 6]}`,
+        color: 0xc8a060,
+        transparent: true,
+      })),
+      // Wave R4 — hoppers (180-189: facing D/N/E/S/W x locked in the id).
+      ...Array.from({ length: 10 }, (_, i) => ({
+        id: 180 + i,
+        name: `Hopper ${"DNESW"[i % 5]}${i >= 5 ? " (locked)" : ""}`,
+        color: 0x565a62,
+        transparent: true,
+      })),
+      // Wave R5 — dispensers (190-195) + droppers (196-201): facing in the id.
+      ...Array.from({ length: 12 }, (_, i) => ({
+        id: 190 + i,
+        name: `${i < 6 ? "Dispenser" : "Dropper"} ${"NESWUD"[i % 6]}`,
+        color: 0x8a8a92,
+      })),
+      // Wave R5 — observers (202-213: facing x powered in the id).
+      ...Array.from({ length: 12 }, (_, i) => ({
+        id: 202 + i,
+        name: `Observer ${"NESWUD"[i % 6]}${i >= 6 ? " (pulsing)" : ""}`,
+        color: 0x74747c,
+      })),
     ],
     generation: {
       seed: 1337,
