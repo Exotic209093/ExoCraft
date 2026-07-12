@@ -653,6 +653,11 @@ export class VoxelWorld {
     this.activeChunkKeys = new Set();
     this.dirtyActiveChunkKeys = new Set();
     this.lastCenterChunk = null;
+    // Wave L1 — chunk keys where a light DECREASE (emitter removed/weakened or an
+    // opaque block placed) needs a fixpoint regional relight before the next remesh.
+    // Monotonic per-chunk BFS can't remove light, so a decrease is flushed via a
+    // clear-then-recompute over the 3x3 neighbourhood (see flushLightDecreases).
+    this._pendingLightDecrease = new Set();
 
     // Last-chunk cache for the allocation-free get() fast path. NaN so the first
     // lookup (cx/cz can legitimately be 0) always misses. Invalidated in clearChunkRuntime.
@@ -1550,6 +1555,18 @@ export class VoxelWorld {
     const passabilityChanged = wasPassable !== nowPassable;
     const emitterChanged = (BLOCK_LIGHT_EMIT[previous] || 0) !== (BLOCK_LIGHT_EMIT[nextType] || 0);
     const lightChanged = passabilityChanged || emitterChanged;
+
+    // Wave L1 — a light DECREASE (emitter removed/weakened, or an opaque block
+    // placed where light used to pass) can't be undone by the additive per-chunk
+    // BFS: the neighbour chunks still hold the old glow in their buffers and
+    // mutually re-seed it across the seam forever (ghost light). Queue a fixpoint
+    // regional relight; it's flushed before the next remesh. Light INCREASES are
+    // handled correctly by the normal additive path, so they don't queue.
+    const emitterDecreased = (BLOCK_LIGHT_EMIT[previous] || 0) > (BLOCK_LIGHT_EMIT[nextType] || 0);
+    const passabilityLost = wasPassable && !nowPassable;
+    if (emitterDecreased || passabilityLost) {
+      this._pendingLightDecrease.add(toChunkKey(cx, cz));
+    }
     const exposureChanged = (previous > 0) !== (nextType > 0)
       || (BLOCK_TRANSPARENCY_CLASS[previous] || 0) !== (BLOCK_TRANSPARENCY_CLASS[nextType] || 0);
 
@@ -1968,6 +1985,62 @@ export class VoxelWorld {
     return { skylight, blocklight };
   }
 
+  // Wave L1 — flush queued light DECREASES with a fixpoint regional relight.
+  // Called at the top of buildChunkMesh so corrected buffers are in place before
+  // any chunk reads them. Processes the whole pending set once, then clears it.
+  flushLightDecreases() {
+    if (this._pendingLightDecrease.size === 0) return;
+    const centers = Array.from(this._pendingLightDecrease);
+    this._pendingLightDecrease.clear();
+    for (const key of centers) {
+      const { cx, cz } = fromChunkKey(key);
+      this.relightRegionFixpoint(cx, cz);
+    }
+  }
+
+  // Recompute skylight + blocklight for the 3x3 chunk neighbourhood around
+  // (cx,cz) to a fixpoint. A light source's range (max 14) is smaller than the
+  // chunk width (16), so a change in the centre chunk can only reach the immediate
+  // ring — the 3x3 region fully contains it. The buffers are CLEARED first so no
+  // stale ghost value seeds back across a seam; recomputing then converges in a
+  // few passes (each pass propagates one seam-hop). Chunks whose blocks aren't
+  // resident (evicted) are skipped — they relight correctly when re-streamed.
+  relightRegionFixpoint(cx, cz) {
+    const region = [];
+    for (let dz = -1; dz <= 1; dz += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const rcx = cx + dx;
+        const rcz = cz + dz;
+        const chunk = this.chunks.get(toChunkKey(rcx, rcz));
+        if (chunk && chunk.blocks) region.push({ rcx, rcz, chunk });
+      }
+    }
+    if (region.length === 0) return;
+    // Clear the region's light so cross-seam seeding starts from a clean slate
+    // (computeChunkLight tolerates null neighbour buffers — it just skips the
+    // seam seed for that side).
+    for (const r of region) {
+      r.chunk.skylight = null;
+      r.chunk.blocklight = null;
+    }
+    // Fixpoint: light crosses at most one seam within the region, so two passes
+    // suffice for any compute order; a third is cheap insurance.
+    const PASSES = 3;
+    for (let pass = 0; pass < PASSES; pass += 1) {
+      for (const r of region) {
+        this.computeChunkLight(r.rcx, r.rcz); // stores buffers on the chunk
+        r.chunk.dirtyLight = false;           // buffers are now authoritative
+      }
+    }
+    // The corrected buffers must reach the screen: mark the region's meshes dirty
+    // so the remesh drain rebuilds them (reusing the buffers, no re-BFS).
+    for (const r of region) {
+      if (this.activeChunkKeys.has(toChunkKey(r.rcx, r.rcz))) {
+        this.dirtyActiveChunkKeys.add(toChunkKey(r.rcx, r.rcz));
+      }
+    }
+  }
+
   // ---------------------------------------------------------------------------
   // AO helper: compute occlusion level (0..3) for one vertex of a face.
   // side1, side2, corner are [dx,dy,dz] relative to the voxel being meshed.
@@ -2005,6 +2078,10 @@ export class VoxelWorld {
   }
 
   buildChunkMesh(cx, cz) {
+    // Wave L1 — apply any queued light-decrease relights before reading light
+    // buffers, so this build (and every later one this drain) sees corrected,
+    // ghost-free values. Cheap no-op when nothing is queued.
+    if (this._pendingLightDecrease.size > 0) this.flushLightDecreases();
     const chunk = this.ensureChunk(cx, cz);
     this.disposeChunkMeshes(chunk);
 
@@ -3038,6 +3115,7 @@ export class VoxelWorld {
     this.chunks.clear();
     this.activeChunkKeys.clear();
     this.dirtyActiveChunkKeys.clear();
+    this._pendingLightDecrease.clear(); // Wave L1 — stale region keys reference cleared chunks
     this.lastCenterChunk = null;
     // The get() last-chunk cache references chunk objects we just cleared.
     this._lastGetCx = NaN;

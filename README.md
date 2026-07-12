@@ -31,7 +31,7 @@ Open `http://localhost:5173`, click **Start**, then click the canvas to lock the
 
 **World** — Seeded procedural terrain ~112 blocks tall with FBM + ridged-noise mountains, valleys and cliffs; 5 biomes (plains, forest, desert, snow, mountains) with per-biome surface blocks, grass tint, tree types (oak/birch/spruce) and snow cover. Deep connected caves, depth-banded ores (coal → iron → gold/redstone → diamond), oceans/lakes at sea level with sand beaches, lava pools deep underground, and chunk streaming with memory eviction.
 
-**Lighting** — Per-chunk merged geometry with baked ambient occlusion and a 0–15 skylight + blocklight flood-fill. Caves are dark until you place a torch; the surface dims at night. Day/night drives a gradient sky dome with stars and drifting clouds.
+**Lighting** — Per-chunk merged geometry with baked ambient occlusion and a 0–15 skylight + blocklight flood-fill. Caves are dark until you place a torch; the surface dims at night. Removing a light (or walling off the sky) does a fixpoint relight over the affected 3×3 chunk region, so light near chunk seams clears correctly with no ghost glow. Day/night drives a gradient sky dome with stars and drifting clouds.
 
 **Survival** — Health + hearts, hunger + food (apples from leaves, cooked meats), passive health regen and starvation, fall/void/lava damage, tool durability, and wearable armor (leather/iron/diamond) with damage reduction. Mine the right tool tier to harvest higher ores.
 

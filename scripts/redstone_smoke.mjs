@@ -968,6 +968,42 @@ const rigAX = await page.evaluate(async ({ P }) => {
 check("AX1 exploded dispenser spills bread (new ground entities)", rigAX.after > rigAX.before, JSON.stringify(rigAX));
 check("AX2 exploded dispenser drops its state (no leak, block gone)", rigAX.gone === null && rigAX.blockId === 0 && rigAX.statesAfter === rigAX.statesBefore - 1, JSON.stringify(rigAX));
 
+// Rig AY (Wave L1): removing a light emitter at a CHUNK SEAM must not leave
+// ghost blocklight — the monotonic per-chunk BFS re-seeds removed light across
+// the seam forever unless a fixpoint regional relight clears it. Work high in
+// open air so blocklight propagates freely and isn't masked by skylight.
+const rigAY = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const y = P.y + 24;
+  const seam = (Math.floor(P.x / 16) + 1) * 16; // chunk boundary east of P's chunk
+  const z = P.z;
+  const tx = seam - 1;     // last column of P's chunk (touches the seam)
+  const probeX = seam + 3; // 3 cells into the neighbour chunk
+  D.teleportPlayer(P.x + 0.5, y + 2, P.z + 0.5);
+  window.advanceTime(50);
+  D.setBlock(tx, y, z, 8); // torch (emit 14)
+  window.advanceTime(50);
+  const litNeighbour = D.getLightAt(probeX, y, z).block; // glow crosses the seam
+  D.setBlock(tx, y, z, 0); // remove the torch
+  window.advanceTime(50);
+  const ghostNeighbour = D.getLightAt(probeX, y, z).block; // must be 0
+  const ghostSource = D.getLightAt(tx, y, z).block;        // must be 0
+  // A surviving neighbouring torch's glow must NOT be wiped by the regional relight.
+  const t2 = seam + 5;
+  D.setBlock(t2, y, z, 8);
+  window.advanceTime(50);
+  D.setBlock(tx, y, z, 8);  // second torch at the seam
+  window.advanceTime(50);
+  D.setBlock(tx, y, z, 0);  // remove the seam torch again
+  window.advanceTime(50);
+  const survivorGlow = D.getLightAt(t2 - 1, y, z).block; // still lit by t2 (~13)
+  D.setBlock(t2, y, z, 0);
+  return { litNeighbour, ghostNeighbour, ghostSource, survivorGlow };
+}, { P });
+check("AY1 torch glow crosses the chunk seam", rigAY.litNeighbour >= 8, JSON.stringify(rigAY));
+check("AY2 removing a seam emitter leaves NO ghost light", rigAY.ghostNeighbour === 0 && rigAY.ghostSource === 0, JSON.stringify(rigAY));
+check("AY3 the regional relight preserves a surviving source", rigAY.survivorGlow >= 12, JSON.stringify(rigAY));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

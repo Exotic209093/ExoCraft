@@ -1139,3 +1139,43 @@ persist as ordinary block edits; save stays v11):
   furnace_top / observer_side and were indistinguishable in the hotbar).
 - NOTE: save `version` constant bumped 11 -> 13 to match the v12 hoppers / v13
   dispensers fields (loading is field-presence based, so this is metadata only).
+
+## Wave L1 — lighting seam ghost-light fix
+- THE BUG (documented since R1, deferred): removing a light emitter (torch/lamp)
+  or placing an opaque block near a CHUNK SEAM left ghost blocklight that never
+  cleared. Root cause: the per-chunk light BFS is MONOTONIC (seed + spread-if-
+  greater) and seeds cross-chunk light from the NEIGHBOUR'S computed buffer. On a
+  light DECREASE, two seam chunks mutually re-seed each other's stale glow across
+  the seam forever — the ghost stabilises a notch below the original and sticks.
+  Reproduced deterministically: torch at x=15 (chunk seam), remove it, and the
+  torch cell still read blocklight 12 (was 14), the neighbour chunk read 8, and
+  even the same-chunk-west cell read 9 — all pure ghost.
+- THE FIX (fixpoint regional relight): a light DECREASE (emitter removed/weakened
+  OR passable->opaque) queues the edited chunk in world._pendingLightDecrease.
+  Before the next remesh, buildChunkMesh flushes the queue: for each region it
+  CLEARS the skylight+blocklight buffers of the 3x3 chunk neighbourhood (so no
+  stale value can re-seed across a seam), then recomputes them to a fixpoint
+  (3 passes — a source's range 14 < chunk width 16, so light crosses at most one
+  seam and two passes suffice; the third is insurance). The corrected buffers are
+  authoritative (dirtyLight=false) and the region's meshes are marked dirty so the
+  drain rebuilds them. Light INCREASES keep the cheap additive path untouched.
+- WHY 3x3 IS EXACTLY RIGHT: max light range (14) < chunk width (16), so any edit's
+  light effect is fully contained in the immediate ring — chunks two away can't be
+  reached, so their buffers are never stale and correctly seed the region border.
+- COST: zero when idle (guarded by _pendingLightDecrease.size). A light-decrease
+  edit costs ~27 computeChunkLight calls (3 passes x up to 9 chunks); these are
+  infrequent (break a torch, place a wall) and bounded. Decreases in the same
+  chunk collapse to one region; evicted chunks are skipped (relight on re-stream).
+- VERIFIED (live Playwright + smoke suite 84 -> 87, ALL PASS): the exact repro now
+  clears to 0 (torch cell, neighbour chunk, same chunk); a SURVIVING second torch
+  keeps its glow through the relight (removed cell reads exactly the survivor's
+  decayed contribution, not a ghost); the additive path still lights across seams;
+  an opaque roof casts a skylight shadow and removing it restores sky 15. New rigs
+  AY1-3 lock: glow crosses the seam, seam-emitter removal leaves no ghost, and the
+  regional relight preserves a surviving source. Lamp rigs A5b/A7b unaffected.
+  Sim-driven decreases (lamp off, piston pushing an opaque block near a seam) flush
+  correctly through applyRedstoneVisualChanges -> rebuildEditedChunksNow. Build green.
+- KNOWN (unchanged, pre-existing): light INCREASE near a seam can lag one remesh
+  when the neighbour chunk happens to rebuild before the source chunk (additive
+  ordering); real break/place go through rebuildEditedChunksNow center-first, so
+  the source chunk computes first and the neighbour seeds correctly — no visible lag.

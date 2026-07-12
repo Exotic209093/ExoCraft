@@ -23,7 +23,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 | Save/load (seed + edits + entities + state) | ✅ | v11 schema, forward-defaulting discipline |
 | Caves, depth-banded ores, lava pools | ✅ | coal → iron → gold/redstone → diamond ladder |
 | Block states | 🟡 | Encoded in block ids (doors, redstone…) — works well; a metadata layer only if id space (≤255) runs out |
-| Lighting engine (skylight + blocklight BFS, AO) | 🟡 | KNOWN BUG: removing an emitter near a chunk seam leaves ghost light (needs relight-to-fixpoint or removal BFS) |
+| Lighting engine (skylight + blocklight BFS, AO) | ✅ | Emitter removal / opaque-block placement near a chunk seam does a fixpoint regional relight (Wave L1) — no more ghost light |
 | Day/night, moon phases, sunrise/sunset | ✅ | |
 | Weather (biome rain/snow) | ✅ | No thunder/lightning |
 | Flowing water & lava + buckets | ✅ | No obsidian interaction yet (water+lava → cobblestone) |
@@ -115,7 +115,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 
 ### Phase B — depth systems
 4. **Lighting fix wave** — seam ghost-light: relight-to-fixpoint over the affected
-   3×3 (or a light-removal BFS). Verify with `getLightAt` probes at seams.
+   3×3 (or a light-removal BFS). Verify with `getLightAt` probes at seams. ✅ (Wave L1)
 5. **Enchanting** — table block, XP-level costs, lapis stand-in (use gold?),
    enchantment data on item instances (extends durability field pattern),
    starter enchants: Efficiency, Unbreaking, Sharpness, Protection, Power.
