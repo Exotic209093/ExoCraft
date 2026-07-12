@@ -3484,6 +3484,97 @@ if (dispenserInvGridEl) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Wave U2 — hover tooltips. One delegated mousemove resolves the slot under the
+// cursor to its live item (name + count + durability). Reading game state
+// instead of the slot's text means it survives the frequent innerHTML re-renders.
+// ---------------------------------------------------------------------------
+const slotTooltipEl = document.querySelector("#slot-tooltip");
+const TOOLTIP_SLOT_SELECTOR =
+  "[data-slot-index],[data-chest-slot],[data-chest-inv-index],[data-hopper-slot]," +
+  "[data-hopper-inv-index],[data-dispenser-slot],[data-dispenser-inv-index],[data-armor-slot]";
+
+function slotElementItem(el) {
+  if (!el) return null;
+  const d = el.dataset;
+  if (d.slotIndex !== undefined) return state.inventory[Number(d.slotIndex)] ?? null;
+  if (d.chestInvIndex !== undefined) return state.inventory[Number(d.chestInvIndex)] ?? null;
+  if (d.hopperInvIndex !== undefined) return state.inventory[Number(d.hopperInvIndex)] ?? null;
+  if (d.dispenserInvIndex !== undefined) return state.inventory[Number(d.dispenserInvIndex)] ?? null;
+  if (d.chestSlot !== undefined) {
+    const chest = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+    return chest ? (chest[Number(d.chestSlot)] ?? null) : null;
+  }
+  if (d.hopperSlot !== undefined) {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    return h ? (h.slots[Number(d.hopperSlot)] ?? null) : null;
+  }
+  if (d.dispenserSlot !== undefined) {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    return e ? (e.slots[Number(d.dispenserSlot)] ?? null) : null;
+  }
+  if (d.armorSlot !== undefined) {
+    const itemId = state.wornArmor[ARMOR_SLOTS[Number(d.armorSlot)]];
+    return itemId ? { itemId, count: 1 } : null;
+  }
+  return null;
+}
+
+function hideSlotTooltip() {
+  if (slotTooltipEl && !slotTooltipEl.classList.contains("hidden")) {
+    slotTooltipEl.classList.add("hidden");
+    slotTooltipEl._sig = "";
+  }
+}
+
+function showSlotTooltip(item, clientX, clientY) {
+  if (!slotTooltipEl) return;
+  const maxDur = hasDurability(item.itemId) ? (TOOL_MAX_DURABILITY[item.itemId] ?? 0) : 0;
+  const dur = maxDur ? (Number.isFinite(item.durability) ? item.durability : maxDur) : 0;
+  const sig = `${item.itemId}|${item.count}|${dur}/${maxDur}`;
+  // Rebuild the DOM only when the hovered item changes; reposition every move.
+  if (slotTooltipEl._sig !== sig) {
+    slotTooltipEl._sig = sig;
+    slotTooltipEl.innerHTML = "";
+    const nameEl = document.createElement("div");
+    nameEl.className = "tt-name";
+    nameEl.textContent = getItemName(item.itemId);
+    slotTooltipEl.appendChild(nameEl);
+    if (item.count > 1) {
+      const c = document.createElement("div");
+      c.className = "tt-sub";
+      c.textContent = `x${item.count}`;
+      slotTooltipEl.appendChild(c);
+    }
+    if (maxDur) {
+      const dEl = document.createElement("div");
+      dEl.className = "tt-dur";
+      dEl.textContent = `Durability ${dur}/${maxDur}`;
+      slotTooltipEl.appendChild(dEl);
+    }
+  }
+  slotTooltipEl.classList.remove("hidden");
+  const pad = 14;
+  const rect = slotTooltipEl.getBoundingClientRect();
+  let x = clientX + pad;
+  let y = clientY + pad;
+  if (x + rect.width > window.innerWidth) x = clientX - rect.width - pad;
+  if (y + rect.height > window.innerHeight) y = clientY - rect.height - pad;
+  slotTooltipEl.style.left = `${Math.max(0, x)}px`;
+  slotTooltipEl.style.top = `${Math.max(0, y)}px`;
+}
+
+if (slotTooltipEl) {
+  document.addEventListener("mousemove", (event) => {
+    const el = event.target.closest ? event.target.closest(TOOLTIP_SLOT_SELECTOR) : null;
+    if (!el) { hideSlotTooltip(); return; }
+    const item = slotElementItem(el);
+    if (!item) { hideSlotTooltip(); return; }
+    showSlotTooltip(item, event.clientX, event.clientY);
+  });
+  document.addEventListener("mouseleave", hideSlotTooltip);
+}
+
 // Comparator container reading (Wave R4): signal 0 for empty, else
 // 1 + floor(14 * fillFraction) — the classic container-fullness curve.
 function containerSignalAt(x, y, z) {

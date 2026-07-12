@@ -1037,6 +1037,34 @@ const rigAZ = await page.evaluate(async () => {
 check("AZ1 shift-click quick-moves inventory -> chest", rigAZ.inChest === 7 && rigAZ.invAfter1 === 0, JSON.stringify(rigAZ));
 check("AZ2 shift-click quick-moves chest -> inventory", rigAZ.backInChest === 0 && rigAZ.invAfter2 === 7, JSON.stringify(rigAZ));
 
+// Rig BA (Wave U2): hovering a slot shows a tooltip with the item name + (for
+// tools) its durability; moving off the slot hides it.
+const rigBA = await page.evaluate(async () => {
+  const D = window.__exoCraftDebug;
+  D.grantInventoryItem("stone_pickaxe", 1);
+  const s0 = JSON.parse(window.render_game_to_text()).inventory;
+  if (!s0.open) window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyE" })); // open inventory
+  const inv = JSON.parse(window.render_game_to_text()).inventory.slots;
+  const idx = inv.findIndex((s) => s && s.itemId === "stone_pickaxe");
+  const el = document.querySelector(`[data-slot-index="${idx}"]`);
+  let text = "";
+  let hidden = true;
+  if (el) {
+    const r = el.getBoundingClientRect();
+    // Dispatch on the element so event.target is the slot, as a real move is.
+    el.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: r.left + 5, clientY: r.top + 5 }));
+    const tt = document.querySelector("#slot-tooltip");
+    text = tt.textContent;
+    hidden = tt.classList.contains("hidden");
+  }
+  document.body.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 1, clientY: 1 }));
+  const hiddenAfter = document.querySelector("#slot-tooltip").classList.contains("hidden");
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyE" })); // close inventory
+  return { idx, text, hidden, hiddenAfter };
+});
+check("BA1 hover shows a tooltip with name + durability", rigBA.hidden === false && rigBA.text.includes("Stone Pickaxe") && rigBA.text.includes("132/132"), JSON.stringify(rigBA));
+check("BA2 moving off the slot hides the tooltip", rigBA.hiddenAfter === true, JSON.stringify(rigBA));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

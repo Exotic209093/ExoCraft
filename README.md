@@ -44,7 +44,7 @@ Open `http://localhost:5173`, click **Start**, then click the canvas to lock the
 
 **Feel & graphics** — Mouse-look first-person with a held-item viewmodel that swings on use, weighty combat with knockback, procedural break/place/footstep/hurt/ambient audio, animated water, biome weather (rain/snow), wind-swaying grass and leaves, and a post-processing pipeline (ACES tone mapping, bloom on emissives, FXAA). Landing camera dips and directional hurt tilt add impact weight.
 
-**UI & settings** — Original pixel-art icons for every item (tools, weapons, food, materials, armor) across the hotbar, inventory, containers, ground drops and the held-item view; an item-name popup on hotbar selection; a "You died!" screen with cause + respawn; and an Esc pause menu with live settings (FOV, mouse sensitivity, render distance, volume, music) persisted locally.
+**UI & settings** — Original pixel-art icons for every item (tools, weapons, food, materials, armor) across the hotbar, inventory, containers, ground drops and the held-item view; an item-name popup on hotbar selection; hover tooltips (name + durability) on every inventory/container slot; a "You died!" screen with cause + respawn; and an Esc pause menu with live settings (FOV, mouse sensitivity, render distance, volume, music) persisted locally.
 
 There's also a guided objective/specialization progression system (collect copper → smelt → craft → explore/combat branches) layered on top.
 

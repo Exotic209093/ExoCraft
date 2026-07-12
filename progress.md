@@ -1204,3 +1204,22 @@ persist as ordinary block edits; save stays v11):
 - KNOWN (next inventory waves): drag-and-drop, hover tooltips (item name + durability
   + later enchants), number-key slot swap, and shift-click-to-equip armor are not yet
   done — U1 is the shift-click quick-move slice.
+
+## Wave U2 — hover tooltips on inventory/container slots
+- Hovering any slot (inventory, chest, hopper, dispenser, armor) shows a
+  cursor-following tooltip: item name, count (when >1), and durability X/Y for
+  tools. One DELEGATED document mousemove resolves the slot under the cursor to
+  its LIVE item (reads game state, not the slot's rendered text) so it survives
+  the frequent innerHTML panel re-renders; empty slots and off-slot moves hide it.
+- Cheap: the tooltip DOM is rebuilt only when the hovered item's signature
+  (id|count|dur) changes; every move just repositions (clamped to the viewport).
+  Text is set via textContent (no innerHTML injection surface). UI-only, no
+  save/sim change.
+- VERIFIED (live Playwright + smoke suite 89 -> 91, ALL PASS): hovering a
+  stone_pickaxe shows "Stone Pickaxe" + "Durability 132/132"; a 12-stack shows
+  "Cobblestone" + "x12"; empty slots stay hidden; moving off hides it. Rigs BA1-2
+  lock it. (A probe gotcha, not a code bug: dispatching mousemove on `document`
+  makes event.target=document which has no .closest — real moves target the slot
+  element, so the rig dispatches on the element.)
+- KNOWN (next): drag-and-drop and number-key slot swap remain; tooltips will grow
+  an enchantment list once enchanting lands.

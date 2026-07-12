@@ -86,7 +86,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 | Pixel UI, hotbar, hearts/hunger/XP/armor, F3 | ✅ | |
 | Item pixel-art icons everywhere + held sprites | ✅ | |
 | Death screen, pause menu, settings (persisted) | ✅ | |
-| Inventory interactions | 🟡 | Click-click transfer + shift-click quick-move (Wave U1); still needs drag & drop, hover tooltips |
+| Inventory interactions | 🟡 | Click-click transfer, shift-click quick-move (U1), hover tooltips (U2); still needs drag & drop |
 | Audio | 🟡 | Procedural SFX + music toggle + master volume; needs positional (3D) audio, biome ambience beds, sound categories, subtitles |
 | Controller/gamepad support | ⬜ | Gamepad API mapping + UI focus model |
 | Mobile/touch | ⬜ | Stretch goal |
@@ -122,7 +122,7 @@ Legend: ✅ done · 🟡 partial (works, known gaps listed) · ⬜ not started
 6. **Status effects + brewing** — effect framework (speed/slow/regen/poison…),
    brewing stand, nether-wart stand-in crop, potion items + drinking.
 7. **Inventory UX** — drag & drop, shift-click quick-move, hover tooltips
-   (name + enchants), number-key slot swap inside panels. 🟡 shift-click done (Wave U1).
+   (name + enchants), number-key slot swap inside panels. 🟡 shift-click (U1) + tooltips (U2) done.
 
 ### Phase C — world expansion
 8. **Structures wave** — villages (small: houses + farms + well), dungeons with

@@ -320,6 +320,27 @@ canvas {
   100% { opacity: 0; }
 }
 
+/* Wave U2 — hover tooltip that follows the cursor over any inventory slot. */
+#slot-tooltip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  max-width: 260px;
+  padding: 4px 8px;
+  font-family: "VT323", monospace;
+  font-size: 17px;
+  line-height: 1.25;
+  color: #ffffff;
+  background: rgba(16, 0, 24, 0.92);
+  border: 2px solid #2b0a4a;
+  box-shadow: inset 1px 1px 0 #3a1a5c, 0 0 0 1px #120018;
+  white-space: nowrap;
+}
+#slot-tooltip .tt-name { color: #ffffff; }
+#slot-tooltip .tt-sub { color: #a8a0c0; font-size: 15px; }
+#slot-tooltip .tt-dur { color: #9be08a; font-size: 15px; }
+#slot-tooltip.hidden { display: none; }
+
 /* Hearts row */
 #mc-hearts {
   display: flex;
