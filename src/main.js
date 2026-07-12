@@ -3217,16 +3217,9 @@ function ejectorFireAt(x, y, z, facing, isDropper) {
   const key = toEjectorKey(x, y, z);
   const ejector = dispenserStates.get(key);
   if (!ejector) return;
-  const id = world.get(x, y, z);
-  if (!EJECTOR_IDS.has(id)) {
-    // Destroyed without breakBlock (e.g. creeper crater): spill + drop state.
-    for (const slot of ejector.slots) {
-      if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, x + 0.5, y + 0.5, z + 0.5);
-    }
-    if (dispenserPanelKey === key) closeDispenserPanel();
-    dispenserStates.delete(key);
-    return;
-  }
+  // The sim only calls back when this cell still holds an ejector (redstone.js
+  // guards the timer drain with EJECTOR_IDS.has). Destruction spills contents at
+  // its own site (breakBlock + the creeper explosion path), never on a fire tick.
   const from = firstFilledSlot(ejector.slots);
   if (from === -1) return; // empty — nothing to dispense
   const slot = ejector.slots[from];
@@ -4425,6 +4418,21 @@ function triggerCreeperExplosion(mob) {
         const type = world.get(bx, by, bz);
         // Don't remove bedrock, liquids (water=15, lava=21), or out-of-bounds
         if (type === 0 || type === 13 || type === 15 || type === 21 || !world.isWithinVerticalBounds(by)) continue;
+        // Wave R5 — a dispenser/dropper blown up here won't route through
+        // breakBlock, so spill its 9 slots and drop the state; otherwise its
+        // contents vanish silently AND the orphaned state leaks into every save
+        // (and would resurrect into a new ejector placed on this cell).
+        if (EJECTOR_IDS.has(type)) {
+          const ejKey = toEjectorKey(bx, by, bz);
+          const ejector = dispenserStates.get(ejKey);
+          if (ejector) {
+            for (const slot of ejector.slots) {
+              if (slot) itemEntities.spawnItemEntity(slot.itemId, slot.count, bx + 0.5, by + 0.5, bz + 0.5);
+            }
+            dispenserStates.delete(ejKey);
+          }
+          if (dispenserPanelKey === ejKey) closeDispenserPanel();
+        }
         world.set(bx, by, bz, 0);
         // Wave R3 — an explosion can sever circuits and piston pairs: notify the
         // sim per cleared cell (support pops, wire recompute, orphan cleanup).
@@ -6855,7 +6863,7 @@ function collectSaveSnapshot() {
     markInventoryPanelDirty();
   }
   return {
-    version: 11, // Wave G1: added cropTickSeed + breeding mob fields; v10 added spawnPoint
+    version: 13, // v12 added hoppers (R4); v13 added dispensers (R5). Loading is field-presence based, so this is metadata only.
     savedAt: Date.now(),
     seed: world.getSeed(),
     worldTimeMs: state.timeOfDayMs,
@@ -7082,6 +7090,7 @@ async function loadGame() {
     loadHoppers(snapshot.hoppers ?? null);
     loadEjectors(snapshot.dispensers ?? null); // Wave R5
     closeHopperPanel();
+    closeDispenserPanel(); // Wave R5 — else a stale panel floats over the reloaded world
     // Wave F2: restore XP state; v<=6 saves have no xp field → default to 0
     {
       const xpSnap = snapshot.xp ?? null;
@@ -8435,6 +8444,7 @@ function updateSimulation(dtSeconds) {
     updateFurnacePanel();
     updateChestPanel();
     updateHopperPanel();
+    updateDispenserPanel();
     return;
   }
 
@@ -8912,6 +8922,7 @@ function updateSimulation(dtSeconds) {
   updateInventoryPanel();
   updateChestPanel();
   updateHopperPanel();
+  updateDispenserPanel();
 
   const now = performance.now();
   const autosaveDue = !isAutomationSession && now - lastAutosaveAt >= simConfig.autosaveIntervalMs;
@@ -9871,6 +9882,19 @@ window.__exoCraftDebug = {
     const id = world.get(Math.floor(x), Math.floor(y), Math.floor(z));
     if (!OBSERVER_IDS.has(id)) return null;
     return { id, facing: observerFacing(id), powered: (id - 202) >= 6 };
+  },
+  // Wave R5 review — reproduce the save/load reseed deterministically (reset +
+  // seedFromWorldEdits over the current edits), without touching IndexedDB.
+  reseedRedstoneFromEdits: () => {
+    redstoneSim.reset();
+    redstoneSim.seedFromWorldEdits(world.exportEdits());
+    applyRedstoneVisualChanges(redstoneSim.tick(0));
+    return true;
+  },
+  // Wave R5 review — explode at a chosen cell (spawnMob can't aim a creeper).
+  explodeAt: (x, y, z) => {
+    triggerCreeperExplosion({ pos: { x: Math.floor(x) + 0.5, y: Math.floor(y) + 0.5, z: Math.floor(z) + 0.5 } });
+    return true;
   },
   getContainerSignalAt: (x, y, z) => containerSignalAt(Math.floor(x), Math.floor(y), Math.floor(z)),
   // Wave R2 — cycle a repeater's delay / toggle a comparator's mode at a cell.

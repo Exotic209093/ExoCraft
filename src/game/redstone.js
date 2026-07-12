@@ -203,6 +203,14 @@ export class RedstoneSim {
       if (id === BUTTON_PRESSED && !this._buttonTimers.has(key)) {
         this._buttonTimers.set(key, this._accumMs + BUTTON_RELEASE_MS);
       }
+      // Wave R5 — a powered observer id (208-213) is a TRANSIENT pulse state that
+      // was captured mid-pulse (its 100 ms off-flip lived only in _observerTimers,
+      // which reset() just cleared). Left as-is it would emit 15 out of its back
+      // FOREVER — a stuck circuit with no in-game remedy. Reset it to unpowered
+      // now; _evaluate re-primes _observerLastSeen so the next real change pulses.
+      if (OBSERVER_IDS.has(id) && observerIsPowered(id)) {
+        this._setBlock(e.x, e.y, e.z, makeObserverId(observerFacing(id), false));
+      }
     }
   }
 

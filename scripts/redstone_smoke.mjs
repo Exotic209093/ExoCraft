@@ -923,6 +923,51 @@ const rigAV = await page.evaluate(async ({ P }) => {
 check("AV1 blocked dispenser keeps its item (deterministic no-op)", rigAV.e1 === rigAV.e0 && rigAV.kept === 1, JSON.stringify(rigAV));
 check("AV2 piston refuses to push a dispenser (stays retracted)", rigAV.pistonId.id === 145, JSON.stringify(rigAV.pistonId));
 
+// Rig AW (Wave R5 review MUST-FIX): an observer saved MID-PULSE must not load
+// stuck-powered. Trigger a pulse, capture it powered, then reseed from edits
+// (the save/load path) and confirm the back-pulse does NOT persist forever.
+const rigAW = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 71, x = P.x + 1; // clear of AV (P.z+63/+65) and AX (P.z+67)
+  for (let dx = 0; dx <= 3; dx++) D.setBlock(x + dx, P.y, z, 3);
+  D.placeObserver(x + 1, P.y + 1, z, 1); // faces E: watches x+2, back = x
+  D.placeRedstone("wire", x, P.y + 1, z);
+  window.advanceTime(300);
+  D.setBlock(x + 2, P.y + 1, z, 82);  // watched change -> pulse
+  window.advanceTime(150);            // now inside the 100ms powered window
+  const midPulse = D.getObserverAt(x + 1, P.y + 1, z); // must be powered here
+  const wireMid = D.getRedstoneAt(x, P.y + 1, z);
+  D.reseedRedstoneFromEdits();        // <-- simulate save + reload mid-pulse
+  window.advanceTime(3000);           // no off-flip would ever come if stuck
+  const afterLoad = D.getObserverAt(x + 1, P.y + 1, z);
+  const wireAfter = D.getRedstoneAt(x, P.y + 1, z);
+  const stats = JSON.parse(window.render_game_to_text()).redstone;
+  return { midPulse, wireMid, afterLoad, wireAfter, pending: stats.pendingObservers };
+}, { P });
+check("AW1 observer was genuinely mid-pulse before reseed", rigAW.midPulse.powered === true && rigAW.wireMid.power === 15, JSON.stringify(rigAW));
+check("AW2 reseed clears the stuck pulse (observer unpowered, wire off)", rigAW.afterLoad.powered === false && rigAW.wireAfter.id === 83 && rigAW.wireAfter.power === 0 && rigAW.pending === 0, JSON.stringify(rigAW));
+
+// Rig AX (Wave R5 review MUST-FIX): a dispenser destroyed by a creeper blast
+// (not breakBlock) must SPILL its contents and drop its state — no silent loss,
+// no leaked ejectorStates entry.
+const rigAX = await page.evaluate(async ({ P }) => {
+  const D = window.__exoCraftDebug;
+  const z = P.z + 77, x = P.x + 1; // >3 cells from any other rig's ejector (blast r=3)
+  D.setBlock(x, P.y, z, 3);
+  D.placeEjector(x, P.y + 1, z, 0, false);
+  D.giveEjectorItem(x, P.y + 1, z, "bread", 5);
+  const before = D.getItemEntities().count;
+  const statesBefore = JSON.parse(window.render_game_to_text()).redstone.ejectorStates;
+  D.explodeAt(x, P.y + 1, z);
+  window.advanceTime(300);
+  const gone = D.getEjectorAt(x, P.y + 1, z); // block + state should be gone
+  const after = D.getItemEntities().count;
+  const statesAfter = JSON.parse(window.render_game_to_text()).redstone.ejectorStates;
+  return { before, after, gone, statesBefore, statesAfter, blockId: D.getRedstoneAt(x, P.y + 1, z).id };
+}, { P });
+check("AX1 exploded dispenser spills bread (new ground entities)", rigAX.after > rigAX.before, JSON.stringify(rigAX));
+check("AX2 exploded dispenser drops its state (no leak, block gone)", rigAX.gone === null && rigAX.blockId === 0 && rigAX.statesAfter === rigAX.statesBefore - 1, JSON.stringify(rigAX));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

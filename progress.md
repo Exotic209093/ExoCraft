@@ -1116,3 +1116,26 @@ persist as ordinary block edits; save stays v11):
   firing, no bucket place/scoop — ejected as ground items instead); fluid-level
   changes don't pulse observers (fluid sim doesn't notify redstone); observers
   are piston-immovable (deviation: last-seen state is position-keyed).
+
+### Wave R5 review follow-up (adversarial 3-lens, live-verified)
+2 must-fixes + 3 nice-to-haves + 1 note, all fixed and regression-rigged (suite
+80 -> 84):
+- MUST-FIX (save corruption): an observer SAVED MID-PULSE loaded permanently
+  powered — its 100ms off-flip lived only in a transient timer that reset()
+  clears on load, so it emitted 15 out of its back forever (stuck circuit, no
+  in-game remedy). `seedFromWorldEdits` now normalizes powered observer ids
+  (208-213) back to unpowered on load, mirroring the stale-button-release
+  convention. Rig AW.
+- MUST-FIX (item loss + state leak): a dispenser/dropper destroyed by a CREEPER
+  (not breakBlock) silently ate its contents and leaked its state into every
+  save; the intended spill branch was DEAD CODE (the sim guards the fire
+  callback with EJECTOR_IDS.has, so it never ran on a destroyed cell). The
+  creeper explosion path now spills the 9 slots + drops the state like
+  breakBlock; the dead branch was removed. Rig AX.
+- NICE-TO-HAVE: loadGame() now closes the dispenser panel (a stale panel over a
+  reloaded world was a ghost-container item-loss path); the frame loop now
+  refreshes the dispenser panel every frame (was stale until the next click);
+  dispenser/dropper/observer item icons now draw their FRONT tile (they shared
+  furnace_top / observer_side and were indistinguishable in the hotbar).
+- NOTE: save `version` constant bumped 11 -> 13 to match the v12 hoppers / v13
+  dispensers fields (loading is field-presence based, so this is metadata only).

@@ -2857,6 +2857,14 @@ const _iconCache = new Map();
  * For tools/resources: a flat colored chip with a pixel highlight/shadow border.
  * Memoized per itemId; safe to call every frame.
  */
+// Wave R5 — item-icon face override: base placeBlockType -> the tile to draw as
+// its inventory/hotbar icon (their top faces collide, so use the front instead).
+const ICON_FRONT_TILE_OVERRIDE = {
+  190: "dispenser_front", // dispenser base (facing N)
+  196: "dropper_front",   // dropper base (facing N)
+  202: "observer_face",   // observer base (facing N)
+};
+
 export function getItemIconCanvas(itemId, placeBlockType) {
   if (_iconCache.has(itemId)) return _iconCache.get(itemId);
 
@@ -2886,7 +2894,10 @@ export function getItemIconCanvas(itemId, placeBlockType) {
   if (!drawnFromAtlas && placeBlockType != null && BLOCK_FACE_TILES[placeBlockType]) {
     const faces = BLOCK_FACE_TILES[placeBlockType];
     // Use top face for icon; torches/uniform blocks use any available face.
-    const tileName = faces.py || faces.pz || faces.px;
+    // Wave R5 — dispenser/dropper/observer share a top tile (furnace_top /
+    // observer_side), so their icons would be indistinguishable. Override to the
+    // distinctive FRONT tile so the hotbar tells them apart.
+    const tileName = ICON_FRONT_TILE_OVERRIDE[placeBlockType] || faces.py || faces.pz || faces.px;
     const slot = TILE[tileName];
     if (slot) {
       const [col, row] = slot;
