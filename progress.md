@@ -1179,3 +1179,28 @@ persist as ordinary block edits; save stays v11):
   when the neighbour chunk happens to rebuild before the source chunk (additive
   ordering); real break/place go through rebuildEditedChunksNow center-first, so
   the source chunk computes first and the neighbour seeds correctly — no visible lag.
+
+## Wave U1 — inventory UX: shift-click quick-move
+- Shift-click any slot to jump the whole stack to the sensible destination in one
+  click, across ALL container panels (inventory, chest, hopper, dispenser). Routing:
+  a CONTAINER slot -> player inventory; an INVENTORY slot (with a container open)
+  -> that container; the plain inventory panel -> hotbar<->backpack (Minecraft's
+  region swap). Merges into matching stacks first, then fills empties, respecting
+  stack limits, and keeps tool DURABILITY / non-stackable one-per-slot rules (built
+  on the R4 insertIntoSlots, now range-aware for the hotbar/backpack split).
+- Container quick-moves dirty the redstone sim (onBlockChanged) so an adjacent
+  comparator re-reads the new fullness, same discipline as the R4/R5 transfers.
+- Implementation: one context-generic quickMoveStack(fromCtx, fromIdx) resolves the
+  source/destination backing arrays per panel; each panel's click handler gained a
+  `shiftKey` param and a shift branch that calls it and refreshes. The single-click
+  select/move flow is untouched. No save-format or sim-state change; UI-only.
+- VERIFIED (live Playwright + smoke suite 87 -> 89, ALL PASS): inventory
+  hotbar<->backpack swap, chest inv->chest and chest->inv, and tool durability
+  preserved through a shift-move (a worn pickaxe crosses at count 1, wear intact).
+  New rigs AZ1-2 lock the chest round-trip. During rig authoring, caught a test
+  gotcha (not a code bug): openChestPanel is proximity-gated, so a chest placed far
+  from the player never opens and a stale hidden DOM slot from a prior chest made
+  the click look like it fired — the rig now places the chest next to the player.
+- KNOWN (next inventory waves): drag-and-drop, hover tooltips (item name + durability
+  + later enchants), number-key slot swap, and shift-click-to-equip armor are not yet
+  done — U1 is the shift-click quick-move slice.

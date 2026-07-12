@@ -1004,6 +1004,39 @@ check("AY1 torch glow crosses the chunk seam", rigAY.litNeighbour >= 8, JSON.str
 check("AY2 removing a seam emitter leaves NO ghost light", rigAY.ghostNeighbour === 0 && rigAY.ghostSource === 0, JSON.stringify(rigAY));
 check("AY3 the regional relight preserves a surviving source", rigAY.survivorGlow >= 12, JSON.stringify(rigAY));
 
+// Rig AZ (Wave U1): shift-click quick-move sends a whole stack from the player
+// inventory into an open chest in a single click, and back out again.
+const rigAZ = await page.evaluate(async () => {
+  const D = window.__exoCraftDebug;
+  // Place the chest right next to the player so it's within interact range
+  // (openChestPanel is proximity-gated — a far chest never actually opens).
+  const s = JSON.parse(window.render_game_to_text());
+  const x = Math.floor(s.player.x) + 2, y = Math.floor(s.player.y), z = Math.floor(s.player.z);
+  D.setBlock(x, y - 1, z, 3);
+  D.grantInventoryItem("gold_ingot", 7);
+  D.openChestAt(x, y, z); // renders the chest panel with the item visible
+  const inv0 = JSON.parse(window.render_game_to_text()).inventory.slots;
+  const idx = inv0.findIndex((s) => s && s.itemId === "gold_ingot");
+  const shiftClick = (sel) => {
+    const el = document.querySelector(sel);
+    if (el) el.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
+    return !!el;
+  };
+  const foundInv = shiftClick(`[data-chest-inv-index="${idx}"]`); // inventory -> chest
+  const chest1 = D.getChestContentsAt(x, y, z) || [];
+  const inChest = chest1.filter((s) => s && s.itemId === "gold_ingot").reduce((n, s) => n + s.count, 0);
+  const invAfter1 = JSON.parse(window.render_game_to_text()).inventory.slots.filter((s) => s && s.itemId === "gold_ingot").reduce((n, s) => n + s.count, 0);
+  const cslot = chest1.findIndex((s) => s && s.itemId === "gold_ingot");
+  const foundChest = shiftClick(`[data-chest-slot="${cslot}"]`); // chest -> inventory
+  const chest2 = D.getChestContentsAt(x, y, z) || [];
+  const backInChest = chest2.filter((s) => s && s.itemId === "gold_ingot").reduce((n, s) => n + s.count, 0);
+  const invAfter2 = JSON.parse(window.render_game_to_text()).inventory.slots.filter((s) => s && s.itemId === "gold_ingot").reduce((n, s) => n + s.count, 0);
+  window.dispatchEvent(new KeyboardEvent("keydown", { code: "Escape" }));
+  return { inChest, invAfter1, backInChest, invAfter2, foundInv, foundChest };
+});
+check("AZ1 shift-click quick-moves inventory -> chest", rigAZ.inChest === 7 && rigAZ.invAfter1 === 0, JSON.stringify(rigAZ));
+check("AZ2 shift-click quick-moves chest -> inventory", rigAZ.backInChest === 0 && rigAZ.invAfter2 === 7, JSON.stringify(rigAZ));
+
 // Text-state payload present
 const payload = await page.evaluate(() => JSON.parse(window.render_game_to_text()).redstone);
 check("F1 render_game_to_text has redstone payload", payload && typeof payload.trackedWireCells === "number", JSON.stringify(payload));

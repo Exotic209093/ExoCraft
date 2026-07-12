@@ -20,6 +20,7 @@ Open `http://localhost:5173`, click **Start**, then click the canvas to lock the
 - Left click: break block — or attack a mob under the crosshair
 - Right click: place the selected item — or eat it if it's food
 - `1`–`9`: select hotbar slot
+- `Shift`+click a slot in any container/inventory panel: quick-move the whole stack to the other side
 - `E`: inventory (with crafting grid + armor equip slots)
 - `C`: crafting panel (2×2 in hand, 3×3 near a crafting table)
 - `V`: furnace (when near a furnace); right-click a chest to open it

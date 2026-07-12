@@ -2810,12 +2810,15 @@ function getHopperState(key, createIfMissing = true) {
  * Tools and non-stackables never merge into an existing stack — each copy takes
  * its own slot (count 1) and keeps `durability`, so hopper transfers can't
  * silently repair a worn tool or fuse two tools into one. */
-function insertIntoSlots(slots, itemId, count, durability = undefined) {
+function insertIntoSlots(slots, itemId, count, durability = undefined, start = 0, end = slots.length - 1) {
   let remaining = count;
   const onePerSlot = hasDurability(itemId) || NON_STACKABLE.has(itemId);
-  // Merge into existing stacks first, then empty slots.
+  const lo = Math.max(0, start);
+  const hi = Math.min(slots.length - 1, end);
+  // Merge into existing stacks first, then empty slots. `start`/`end` bound the
+  // considered range (used by the shift-click hotbar<->backpack quick-move).
   for (let pass = 0; pass < 2 && remaining > 0; pass += 1) {
-    for (let i = 0; i < slots.length && remaining > 0; i += 1) {
+    for (let i = lo; i <= hi && remaining > 0; i += 1) {
       const slot = slots[i];
       if (pass === 0 && !onePerSlot && slot && slot.itemId === itemId && slot.count < MAX_STACK) {
         const take = Math.min(MAX_STACK - slot.count, remaining);
@@ -3134,8 +3137,21 @@ function executeHopperTransfer(fromCtx, fromIdx, toCtx, toIdx) {
   return true;
 }
 
-function onHopperPanelClick(ctx, slotIndex) {
+function onHopperPanelClick(ctx, slotIndex, shiftKey = false) {
   if (!hopperPanelKey) return;
+  // Wave U1 — shift-click quick-move (hopper<->inventory).
+  if (shiftKey) {
+    if (quickMoveStack(ctx, slotIndex)) {
+      const [hx, hy, hz] = hopperPanelKey.split(",").map(Number);
+      redstoneSim.onBlockChanged(hx, hy, hz);
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markHopperPanelDirty();
+      updateHopperPanel(true);
+    }
+    return;
+  }
   if (state.transferContext === null) {
     const has = ctx === "hopper-slot"
       ? !!getHopperState(hopperPanelKey, true).slots[slotIndex]
@@ -3180,13 +3196,13 @@ function onHopperPanelClick(ctx, slotIndex) {
 if (hopperSlotsEl) {
   hopperSlotsEl.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-hopper-slot]");
-    if (cell) onHopperPanelClick("hopper-slot", Number(cell.dataset.hopperSlot));
+    if (cell) onHopperPanelClick("hopper-slot", Number(cell.dataset.hopperSlot), event.shiftKey);
   });
 }
 if (hopperInvGridEl) {
   hopperInvGridEl.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-hopper-inv-index]");
-    if (cell) onHopperPanelClick("hopper-inv", Number(cell.dataset.hopperInvIndex));
+    if (cell) onHopperPanelClick("hopper-inv", Number(cell.dataset.hopperInvIndex), event.shiftKey);
   });
 }
 
@@ -3399,8 +3415,21 @@ function executeDispenserTransfer(fromCtx, fromIdx, toCtx, toIdx) {
   return true;
 }
 
-function onDispenserPanelClick(ctx, slotIndex) {
+function onDispenserPanelClick(ctx, slotIndex, shiftKey = false) {
   if (!dispenserPanelKey) return;
+  // Wave U1 — shift-click quick-move (dispenser<->inventory).
+  if (shiftKey) {
+    if (quickMoveStack(ctx, slotIndex)) {
+      const [ex, ey, ez] = dispenserPanelKey.split(",").map(Number);
+      redstoneSim.onBlockChanged(ex, ey, ez);
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markDispenserPanelDirty();
+      updateDispenserPanel(true);
+    }
+    return;
+  }
   if (state.transferContext === null) {
     const has = ctx === "dispenser-slot"
       ? !!getEjectorState(dispenserPanelKey, true).slots[slotIndex]
@@ -3445,13 +3474,13 @@ function onDispenserPanelClick(ctx, slotIndex) {
 if (dispenserSlotsEl) {
   dispenserSlotsEl.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-dispenser-slot]");
-    if (cell) onDispenserPanelClick("dispenser-slot", Number(cell.dataset.dispenserSlot));
+    if (cell) onDispenserPanelClick("dispenser-slot", Number(cell.dataset.dispenserSlot), event.shiftKey);
   });
 }
 if (dispenserInvGridEl) {
   dispenserInvGridEl.addEventListener("click", (event) => {
     const cell = event.target.closest("[data-dispenser-inv-index]");
-    if (cell) onDispenserPanelClick("dispenser-inv", Number(cell.dataset.dispenserInvIndex));
+    if (cell) onDispenserPanelClick("dispenser-inv", Number(cell.dataset.dispenserInvIndex), event.shiftKey);
   });
 }
 
@@ -5680,6 +5709,63 @@ function getTransferSlot(context, index) {
   return null;
 }
 
+// Wave U1 — shift-click quick-move: jump a whole stack to the sensible place in
+// one click. Container slot -> player inventory; inventory slot (with a container
+// open) -> that container; plain inventory -> hotbar<->backpack. Respects stack
+// limits, merges into matching stacks first, and keeps tool durability (via
+// insertIntoSlots). Returns true if anything moved.
+function quickMoveStack(fromCtx, fromIdx) {
+  // Resolve the source backing array for this context.
+  let srcArr = null;
+  if (fromCtx === "inventory" || fromCtx === "chest-inv" || fromCtx === "hopper-inv" || fromCtx === "dispenser-inv") {
+    srcArr = state.inventory;
+  } else if (fromCtx === "chest-storage") {
+    srcArr = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+  } else if (fromCtx === "hopper-slot") {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    srcArr = h ? h.slots : null;
+  } else if (fromCtx === "dispenser-slot") {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    srcArr = e ? e.slots : null;
+  }
+  if (!srcArr) return false;
+  const src = srcArr[fromIdx];
+  if (!src) return false;
+
+  // Resolve the destination array + index range.
+  let destArr = null;
+  let dStart = 0;
+  let dEnd = -1;
+  if (fromCtx === "chest-storage" || fromCtx === "hopper-slot" || fromCtx === "dispenser-slot") {
+    // Container -> player inventory (whole inventory).
+    destArr = state.inventory; dStart = 0; dEnd = INVENTORY_SIZE - 1;
+  } else if (fromCtx === "chest-inv") {
+    destArr = state.activeChestKey ? getChestState(state.activeChestKey, false) : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "hopper-inv") {
+    const h = hopperPanelKey ? getHopperState(hopperPanelKey, false) : null;
+    destArr = h ? h.slots : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "dispenser-inv") {
+    const e = dispenserPanelKey ? getEjectorState(dispenserPanelKey, false) : null;
+    destArr = e ? e.slots : null;
+    if (destArr) dEnd = destArr.length - 1;
+  } else if (fromCtx === "inventory") {
+    // Plain inventory panel: hotbar (0..HOTBAR_SIZE-1) <-> backpack.
+    destArr = state.inventory;
+    if (fromIdx < HOTBAR_SIZE) { dStart = HOTBAR_SIZE; dEnd = INVENTORY_SIZE - 1; }
+    else { dStart = 0; dEnd = HOTBAR_SIZE - 1; }
+  }
+  if (!destArr || dEnd < dStart) return false;
+
+  const leftover = insertIntoSlots(destArr, src.itemId, src.count, src.durability, dStart, dEnd);
+  const moved = src.count - leftover;
+  if (moved <= 0) return false;
+  src.count -= moved;
+  if (src.count <= 0) srcArr[fromIdx] = null;
+  return true;
+}
+
 // Attempt to move/swap between (fromCtx, fromIdx) and (toCtx, toIdx).
 // Returns true on success.
 function executeTransfer(fromCtx, fromIdx, toCtx, toIdx) {
@@ -6479,8 +6565,23 @@ function updateChestPanel(force = false) {
   }
 }
 
-function onChestStorageClick(slotIndex) {
+function onChestStorageClick(slotIndex, shiftKey = false) {
   if (!state.chestOpen || !state.activeChestKey) return;
+
+  // Wave U1 — shift-click sends the stack straight to the player inventory.
+  if (shiftKey) {
+    if (quickMoveStack("chest-storage", slotIndex)) {
+      const c = fromChestKey(state.activeChestKey);
+      redstoneSim.onBlockChanged(c.x, c.y, c.z); // fullness changed
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markChestPanelDirty();
+      updateChestPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     const chest = getChestState(state.activeChestKey, false);
@@ -6524,8 +6625,25 @@ function onChestStorageClick(slotIndex) {
   }
 }
 
-function onChestInvClick(slotIndex) {
+function onChestInvClick(slotIndex, shiftKey = false) {
   if (!state.chestOpen) return;
+
+  // Wave U1 — shift-click sends the stack straight into the chest.
+  if (shiftKey) {
+    if (quickMoveStack("chest-inv", slotIndex)) {
+      if (state.activeChestKey) {
+        const c = fromChestKey(state.activeChestKey);
+        redstoneSim.onBlockChanged(c.x, c.y, c.z);
+      }
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markInventoryPanelDirty();
+      markChestPanelDirty();
+      updateChestPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     if (!state.inventory[slotIndex]) {
@@ -6659,7 +6777,7 @@ function closeInventoryPanel(updateAction = true) {
   }
 }
 
-function onInventorySlotClick(slotIndex) {
+function onInventorySlotClick(slotIndex, shiftKey = false) {
   if (!state.inventoryOpen) {
     return;
   }
@@ -6668,6 +6786,20 @@ function onInventorySlotClick(slotIndex) {
   }
 
   const targetIndex = Math.floor(slotIndex);
+
+  // Wave U1 — shift-click quick-moves the whole stack between hotbar & backpack.
+  if (shiftKey) {
+    if (quickMoveStack("inventory", targetIndex)) {
+      state.recentAction = "Quick-moved stack";
+      clearTransfer();
+      markCraftPanelDirty();
+      markInventoryPanelDirty();
+      refreshHud();
+      updateCraftPanel(true);
+      updateInventoryPanel(true);
+    }
+    return;
+  }
 
   if (state.transferContext === null) {
     if (!state.inventory[targetIndex]) {
@@ -9241,7 +9373,7 @@ inventoryPanel.addEventListener("click", (event) => {
     return;
   }
   const slotIndex = Number(slotButton.dataset.slotIndex);
-  onInventorySlotClick(slotIndex);
+  onInventorySlotClick(slotIndex, event.shiftKey);
 });
 
 // Wave 10 — craft panel grid + result slot + inventory clicks
@@ -9278,12 +9410,12 @@ if (chestPanel) {
   chestPanel.addEventListener("click", (event) => {
     const chestCell = event.target.closest("[data-chest-slot]");
     if (chestCell) {
-      onChestStorageClick(Number(chestCell.dataset.chestSlot));
+      onChestStorageClick(Number(chestCell.dataset.chestSlot), event.shiftKey);
       return;
     }
     const invBtn = event.target.closest("[data-chest-inv-index]");
     if (invBtn) {
-      onChestInvClick(Number(invBtn.dataset.chestInvIndex));
+      onChestInvClick(Number(invBtn.dataset.chestInvIndex), event.shiftKey);
       return;
     }
   });
