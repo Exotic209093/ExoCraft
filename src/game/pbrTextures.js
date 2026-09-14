@@ -881,10 +881,12 @@ function paintTileAlbedo(tileName, ctx, ox, oy, size, seed) {
  * B = metalness (0=dielectric, 1=metal)
  * A = emissive mask (0=none, 1=emissive)
  */
-function paintTileRoughnessAO(tileName, ctx, ox, oy, size, seed) {
+function paintTileRoughnessAO(tileName, ctx, ox, oy, size, seed, raw = false) {
   const imgData = ctx.createImageData(size, size);
   const d = imgData.data;
   const scale = size / 8;
+  // Every pixel samples the same tile heightmap; generate it once per tile.
+  const heightmap = generateHeightmap(tileName, size, seed);
 
   // Default material properties by category
   let baseRoughness = 0.8;
@@ -953,7 +955,6 @@ function paintTileRoughnessAO(tileName, ctx, ox, oy, size, seed) {
       const roughness = clamp(baseRoughness + roughVar, 0, 1);
 
       // AO from heightmap curvature approximation
-      const heightmap = generateHeightmap(tileName, size, seed);
       const idx = y * size + x;
       const h = heightmap[idx];
       const xm = heightmap[y * size + ((x - 1 + size) % size)];
@@ -978,6 +979,7 @@ function paintTileRoughnessAO(tileName, ctx, ox, oy, size, seed) {
     }
   }
 
+  if (raw) return imgData;
   ctx.putImageData(imgData, ox, oy);
 }
 
@@ -1043,14 +1045,18 @@ export function generateNormalAtlas() {
 }
 
 /**
- * Generate the packed roughness-AO-metalness-emissive atlas canvas.
- * @returns {HTMLCanvasElement}
+ * Generate the packed atlas as raw bytes for GPU upload, or a canvas preview.
+ * @param {boolean} raw - Preserve RGB even where the emissive alpha is zero.
+ * @returns {HTMLCanvasElement|Uint8Array}
  */
-export function generateRoughnessAOAtlas() {
+export function generateRoughnessAOAtlas(raw = false) {
   const canvas = document.createElement('canvas');
   canvas.width = PBR_ATLAS_PX;
   canvas.height = PBR_ATLAS_PX;
   const ctx = canvas.getContext('2d');
+  // Canvas premultiplies RGB by alpha, destroying material data wherever the
+  // emissive mask is zero. Upload the packed bytes directly for GPU sampling.
+  const packed = raw ? new Uint8Array(PBR_ATLAS_PX * PBR_ATLAS_PX * 4) : null;
 
   const tileEntries = Object.entries(TILE);
   for (const [tileName, [col, row]] of tileEntries) {
@@ -1059,7 +1065,15 @@ export function generateRoughnessAOAtlas() {
 
     // Check for override
     const overrideKey = `${tileName}:roughnessAO`;
-    if (_textureOverrides.has(overrideKey)) {
+    if (raw) {
+      const seed = tileName.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      const tile = _textureOverrides.get(overrideKey)
+        || paintTileRoughnessAO(tileName, ctx, ox, oy, PBR_TILE_PX, seed, true);
+      for (let y = 0; y < PBR_TILE_PX; y++) {
+        packed.set(tile.data.subarray(y * PBR_TILE_PX * 4, (y + 1) * PBR_TILE_PX * 4),
+          ((oy + y) * PBR_ATLAS_PX + ox) * 4);
+      }
+    } else if (_textureOverrides.has(overrideKey)) {
       ctx.putImageData(_textureOverrides.get(overrideKey), ox, oy);
     } else {
       const seed = tileName.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
@@ -1067,17 +1081,17 @@ export function generateRoughnessAOAtlas() {
     }
   }
 
-  return canvas;
+  return packed || canvas;
 }
 
 /**
  * Create all three PBR atlas textures as THREE.CanvasTexture objects.
- * @returns {{ albedo: THREE.CanvasTexture, normal: THREE.CanvasTexture, roughnessAO: THREE.CanvasTexture }}
+ * @returns {{ albedo: THREE.CanvasTexture, normal: THREE.CanvasTexture, roughnessAO: THREE.DataTexture }}
  */
 export function createPBRAtlasTextures() {
   const albedoCanvas = generateAlbedoAtlas();
   const normalCanvas = generateNormalAtlas();
-  const roughnessAOCanvas = generateRoughnessAOAtlas();
+  const roughnessAOData = generateRoughnessAOAtlas(true);
 
   const albedo = new THREE.CanvasTexture(albedoCanvas);
   albedo.colorSpace = THREE.SRGBColorSpace;
@@ -1095,7 +1109,9 @@ export function createPBRAtlasTextures() {
   normal.wrapS = THREE.ClampToEdgeWrapping;
   normal.wrapT = THREE.ClampToEdgeWrapping;
 
-  const roughnessAO = new THREE.CanvasTexture(roughnessAOCanvas);
+  const roughnessAO = new THREE.DataTexture(roughnessAOData, PBR_ATLAS_PX, PBR_ATLAS_PX);
+  roughnessAO.flipY = true;
+  roughnessAO.needsUpdate = true;
   roughnessAO.colorSpace = THREE.LinearSRGBColorSpace;
   roughnessAO.magFilter = THREE.LinearFilter;
   roughnessAO.minFilter = THREE.LinearFilter; // No mipmaps needed for data texture

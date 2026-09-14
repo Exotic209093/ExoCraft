@@ -33,6 +33,8 @@ for (const evt of ["uncaughtException", "unhandledRejection"]) {
   });
 }
 const page = await browser.newPage();
+page.setDefaultTimeout(90000);
+await page.route("https://fonts.googleapis.com/**", (route) => route.fulfill({ body: "", contentType: "text/css" }));
 const errors = [];
 page.on("pageerror", (e) => errors.push(String(e)));
 // Resource-load noise (favicon 404, dev-server connection blips) isn't a JS error.

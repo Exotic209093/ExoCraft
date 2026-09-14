@@ -34,13 +34,13 @@ const FACE_NORMALS = [
 
 // Tangent vectors per face [tx, ty, tz, handedness].
 // Tangent points along the U-axis of the UV mapping for each face.
-// Handedness (w) is +1 for standard CCW outward-facing quads.
+// Horizontal faces need negative handedness because their UV V axis is reversed.
 // Bitangent is reconstructed in shader via cross(normal, tangent.xyz) * tangent.w.
 const FACE_TANGENTS = [
   [ 0, 0,-1, 1],  // PX: U goes -Z
   [ 0, 0, 1, 1],  // NX: U goes +Z
-  [ 1, 0, 0, 1],  // PY: U goes +X
-  [ 1, 0, 0, 1],  // NY: U goes +X
+  [ 1, 0, 0,-1],  // PY: U goes +X
+  [ 1, 0, 0,-1],  // NY: U goes +X
   [ 1, 0, 0, 1],  // PZ: U goes +X
   [-1, 0, 0, 1],  // NZ: U goes -X
 ];
@@ -519,7 +519,10 @@ export function createBlockMaterials(blockTypes, atlasTexture, pbrTextures = nul
   // Applied to all Standard materials when PBR is active.
   const applyPBRSamplingPatch = (material) => {
     if (!usePBR || !roughnessAOTex) return;
-    material.onBeforeCompile = (shader) => {
+    const previousPatch = material.onBeforeCompile;
+    material.customProgramCacheKey = () => `pbr:${previousPatch.toString()}`;
+    material.onBeforeCompile = (shader, renderer) => {
+      previousPatch.call(material, shader, renderer);
       shader.uniforms.tRoughnessAO = { value: roughnessAOTex };
       // Fragment: declare sampler and override roughness/metalness map chunks
       shader.fragmentShader = shader.fragmentShader.replace(
@@ -530,7 +533,8 @@ uniform sampler2D tRoughnessAO;`,
       // Override roughnessmap_fragment to sample R channel from packed texture
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <roughnessmap_fragment>',
-        `{
+        `float roughnessFactor = roughness;
+{
   float packedRoughness = texture2D(tRoughnessAO, vMapUv).r;
   roughnessFactor *= packedRoughness;
 }`,
@@ -538,7 +542,8 @@ uniform sampler2D tRoughnessAO;`,
       // Override metalnessmap_fragment to sample B channel from packed texture
       shader.fragmentShader = shader.fragmentShader.replace(
         '#include <metalnessmap_fragment>',
-        `{
+        `float metalnessFactor = metalness;
+{
   float packedMetalness = texture2D(tRoughnessAO, vMapUv).b;
   metalnessFactor *= packedMetalness;
 }`,
@@ -2178,7 +2183,7 @@ export class VoxelWorld {
           // so it renders on top of glass with its own material.
           // Lava (id 21, tclass=3) gets its own buffer after water.
           // Flora (tclass=4) gets a cross-quad buffer and skips the cube-face loop.
-          let posArr, normArr, uvArr, colArr, tintArr, swayArr, idxArr;
+          let posArr, normArr, uvArr, colArr, tintArr, swayArr, tanArr, idxArr;
           if (FLORA_BLOCK_IDS.has(blockType)) {
             // --- Cross-quad emitter for flora (two perpendicular quads = X shape) ---
             // Sample skylight / blocklight from the voxel above (open sky side).
@@ -2650,7 +2655,11 @@ export class VoxelWorld {
             const _emitFluidQuad = (verts, nx, ny, nz, uvRect) => {
               const _base = _flPos.length / 3;
               const { uMin, uMax, vMin, vMax } = uvRect;
+              const fluidFace = nx > 0 ? FACE_PX : nx < 0 ? FACE_NX
+                : ny > 0 ? FACE_PY : ny < 0 ? FACE_NY : nz > 0 ? FACE_PZ : FACE_NZ;
+              const fluidTangents = blockType === 15 ? waterTan : lavaTan;
               for (let _v = 0; _v < 4; _v += 1) {
+                fluidTangents.push(...FACE_TANGENTS[fluidFace]);
                 _flPos.push(...verts[_v]);
                 _flNorm.push(nx, ny, nz);
                 const [_ut, _vt] = FACE_UV_INDICES[_v];
@@ -2691,19 +2700,24 @@ export class VoxelWorld {
               0,0,-1, getFaceUvRect(blockType, FACE_NZ));
             continue; // skip the cube-face loop for flowing fluid
           } else if (blockType === 21) {
+            tanArr = lavaTan;
             posArr  = lavaPos;   normArr = lavaNorm;  uvArr = lavaUv;
             colArr  = lavaCol;   tintArr = lavaTint;  swayArr = null;     idxArr  = lavaIdx;
           } else if (blockType === 15) {
+            tanArr = waterTan;
             posArr  = waterPos;  normArr = waterNorm; uvArr = waterUv;
             colArr  = waterCol;  tintArr = waterTint; swayArr = null;      idxArr  = waterIdx;
           } else if (tclass === 2) {
+            tanArr = glassTan;
             posArr  = glassPos;  normArr = glassNorm; uvArr = glassUv;
             colArr  = glassCol;  tintArr = glassTint; swayArr = null;      idxArr  = glassIdx;
           } else if (tclass === 1) {
+            tanArr = leafTan;
             posArr  = leafPos;   normArr = leafNorm;  uvArr = leafUv;
             colArr  = leafCol;   tintArr = leafTint;  swayArr = leafSway;  idxArr  = leafIdx;
           } else {
             posArr  = opaquePos; normArr = opaqueNorm; uvArr = opaqueUv;
+            tanArr = opaqueTan;
             colArr  = opaqueCol; tintArr = opaqueTint; swayArr = null;     idxArr  = opaqueIdx;
           }
 

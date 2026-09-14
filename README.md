@@ -49,6 +49,12 @@ There's also a guided objective/specialization progression system (collect coppe
 
 ## Test hooks (automation / debugging)
 
+Run `npx playwright install chromium` once, start the app with `npm run dev`,
+then run `npm test` for startup, rendering, movement, menus, fluids, and save/load checks.
+Pass another server URL with `npm test -- http://127.0.0.1:4173` to test a production preview.
+The redstone checks run with `node scripts/redstone_smoke.mjs [URL]`.
+Screenshots are saved under `output/`.
+
 Exposed on `window` for deterministic testing:
 
 - `window.render_game_to_text()` — full game state as JSON

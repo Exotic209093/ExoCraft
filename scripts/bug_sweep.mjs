@@ -20,13 +20,8 @@ async function readState(page) {
 }
 
 async function step(page, frames = 1) {
-  for (let i = 0; i < frames; i += 1) {
-    await page.evaluate(async () => {
-      if (typeof window.advanceTime === "function") {
-        await window.advanceTime(1000 / 60);
-      }
-    });
-  }
+  // advanceTime retains every fixed simulation step and renders once at the end.
+  await advanceMs(page, frames * (1000 / 60));
 }
 
 async function advanceMs(page, ms) {
@@ -176,7 +171,11 @@ async function main() {
     headless: true,
     args: ["--use-gl=angle", "--use-angle=swiftshader"],
   });
+  try {
   const page = await browser.newPage();
+  page.setDefaultTimeout(90000);
+  // Remote fonts are cosmetic and must not block deterministic gameplay checks.
+  await page.route("https://fonts.googleapis.com/**", (route) => route.fulfill({ body: "", contentType: "text/css" }));
   const errors = [];
 
   page.on("console", (msg) => {
@@ -419,6 +418,8 @@ async function main() {
   assert(placed, "Could not place a block during interaction test");
 
   // Save/load regression check: loading should restore previous player position.
+  await page.evaluate(() => document.exitPointerLock());
+  await page.waitForFunction(() => document.pointerLockElement === null);
   const savedState = await readState(page);
   await page.click("#save-btn");
   await page.waitForTimeout(150);
@@ -484,8 +485,10 @@ async function main() {
     if (window.__exoCraftDebug && typeof window.__exoCraftDebug.clearHostileMobs === "function") {
       window.__exoCraftDebug.clearHostileMobs();
     }
-    if (window.__exoCraftDebug && typeof window.__exoCraftDebug.spawnHostileMobNearPlayer === "function") {
-      return window.__exoCraftDebug.spawnHostileMobNearPlayer(1.8);
+    if (window.__exoCraftDebug && typeof window.__exoCraftDebug.spawnMob === "function") {
+      // Skeletons guarantee bones; zombies can legitimately roll no drops.
+      window.__exoCraftDebug.clearItemEntities();
+      return window.__exoCraftDebug.spawnMob("skeleton", 1.8);
     }
     return false;
   });
@@ -497,7 +500,10 @@ async function main() {
     return false;
   });
   assert(defeatedForDrop, "Could not defeat hostile mob for drop validation");
-  await step(page, 2);
+  const droppedBones = await page.evaluate(() => window.__exoCraftDebug.getItemEntities().entries
+    .filter(entry => entry.itemId === "bone_shard").reduce((sum, entry) => sum + entry.count, 0));
+  assert(droppedBones > 0, "Defeating skeleton did not spawn bone shard entities");
+  await advanceMs(page, 1000);
   state = await readState(page);
   const boneAfter = countItem(state.inventory.slots, "bone_shard");
   assert(boneAfter > boneBefore, "Defeating hostile mob did not grant bone shard drops");
@@ -966,8 +972,10 @@ async function main() {
     throw new Error(`Console/runtime errors detected:\n${errors.join("\n")}`);
   }
 
-  await browser.close();
   console.log("Bug sweep passed.");
+  } finally {
+    await browser.close();
+  }
 }
 
 main().catch((error) => {
