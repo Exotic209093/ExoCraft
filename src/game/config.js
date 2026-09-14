@@ -298,6 +298,14 @@ const DEFAULT_GAME_CONFIG = {
     fogNear: 24,
     fogFar: 90,
   },
+  // PBR Phase 5: graphics quality settings for the PBR rendering pipeline.
+  graphics: {
+    pbrEnabled: true,         // false falls back to legacy Lambert + 16px atlas
+    normalMaps: true,         // false disables normal map binding (saves texture fetches)
+    textureResolution: 256,   // tile size in px: 64 | 128 | 256 | 512
+    anisotropy: 4,            // max anisotropic filtering: 0 | 2 | 4 | 8 | 16
+    shadowQuality: 'medium',  // 'off' | 'low' | 'medium' | 'high'
+  },
   lighting: {
     hemisphere: {
       skyColor: 0xb6e0ff,

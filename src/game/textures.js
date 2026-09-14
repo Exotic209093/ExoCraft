@@ -9,7 +9,7 @@ const ATLAS_PX = (TILE_PX + TILE_GUTTER * 2) * ATLAS_COLS;
 
 // Atlas slot coordinates (col, row). Row 0 is the top row of the canvas.
 // Existing 14 tiles stay at the same logical [col, row] positions.
-const TILE = {
+export const TILE = {
   // --- existing tiles (rows 0-3, cols 0-3) ---
   grass_top:       [0, 0],
   grass_side:      [1, 0],

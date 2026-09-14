@@ -60,6 +60,7 @@ import {
 } from "./game/survival";
 import { MAX_HUNGER, MAX_SATURATION, tickHunger, applyFood, JUMP_HUNGER_COST } from "./game/hunger";
 import { createBlockMaterials, VoxelWorld, dayFactorUniform, moonFactorUniform, worldTimeUniform } from "./game/world";
+import { createPBRAtlasTextures } from "./game/pbrTextures";
 import { FluidSim } from "./game/fluidSim";
 import { WeatherSystem } from "./game/weather";
 import {
@@ -431,7 +432,24 @@ if (torchLightsEnabled && torchLightPoolSize > 0) {
 }
 
 const atlasTexture = createAtlasTexture();
-const blockMaterials = createBlockMaterials(BLOCK_TYPES, atlasTexture);
+// PBR Phase 5: graphics quality config drives PBR pipeline activation.
+// When pbrEnabled is false, createBlockMaterials receives null and falls back to Lambert + 16px atlas.
+const gfxConfig = gameConfig.graphics || {};
+const pbrTextures = gfxConfig.pbrEnabled !== false ? createPBRAtlasTextures() : null;
+
+// Apply anisotropic filtering to all atlas textures based on quality config.
+const maxAniso = renderer.capabilities.getMaxAnisotropy();
+const requestedAniso = Number.isFinite(gfxConfig.anisotropy) ? gfxConfig.anisotropy : 4;
+const anisotropy = Math.min(Math.max(requestedAniso, 1), maxAniso);
+atlasTexture.anisotropy = anisotropy;
+if (pbrTextures) {
+  pbrTextures.albedo.anisotropy = anisotropy;
+  pbrTextures.normal.anisotropy = anisotropy;
+  // roughnessAO uses LinearFilter (no mipmaps) — anisotropy has no effect but set for consistency
+  pbrTextures.roughnessAO.anisotropy = anisotropy;
+}
+
+const blockMaterials = createBlockMaterials(BLOCK_TYPES, atlasTexture, pbrTextures);
 
 // Graphics-C: first-person held-item overlay.
 const viewmodel = new Viewmodel(renderer, atlasTexture);

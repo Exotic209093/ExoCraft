@@ -32,6 +32,19 @@ const FACE_NORMALS = [
   [ 0, 0,-1],
 ];
 
+// Tangent vectors per face [tx, ty, tz, handedness].
+// Tangent points along the U-axis of the UV mapping for each face.
+// Handedness (w) is +1 for standard CCW outward-facing quads.
+// Bitangent is reconstructed in shader via cross(normal, tangent.xyz) * tangent.w.
+const FACE_TANGENTS = [
+  [ 0, 0,-1, 1],  // PX: U goes -Z
+  [ 0, 0, 1, 1],  // NX: U goes +Z
+  [ 1, 0, 0, 1],  // PY: U goes +X
+  [ 1, 0, 0, 1],  // NY: U goes +X
+  [ 1, 0, 0, 1],  // PZ: U goes +X
+  [-1, 0, 0, 1],  // NZ: U goes -X
+];
+
 // FACE_KEYS maps face index -> key used in BLOCK_FACE_TILES
 const FACE_KEYS = ["px", "nx", "py", "ny", "pz", "nz"];
 
@@ -488,28 +501,83 @@ varying vec3 vTint;`,
   material.needsUpdate = true;
 }
 
-export function createBlockMaterials(blockTypes, atlasTexture) {
-  const baseMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+/**
+ * Create block materials using PBR MeshStandardMaterial when pbrTextures are provided,
+ * falling back to Lambert with the legacy atlas otherwise.
+ * @param {Array} blockTypes
+ * @param {THREE.Texture} atlasTexture - Legacy 16px atlas (used as fallback / emissiveMap)
+ * @param {{ albedo: THREE.Texture, normal: THREE.Texture, roughnessAO: THREE.Texture }|null} pbrTextures
+ */
+export function createBlockMaterials(blockTypes, atlasTexture, pbrTextures = null) {
+  const usePBR = pbrTextures !== null;
+  const mapTex = usePBR ? pbrTextures.albedo : atlasTexture;
+  const normalTex = usePBR ? pbrTextures.normal : null;
+  const roughnessAOTex = usePBR ? pbrTextures.roughnessAO : null;
+
+  // PBR Phase 3: custom onBeforeCompile hook that samples packed roughness-AO-metalness-emissive
+  // from a single texture (R=roughness, G=AO, B=metalness, A=emissive mask).
+  // Applied to all Standard materials when PBR is active.
+  const applyPBRSamplingPatch = (material) => {
+    if (!usePBR || !roughnessAOTex) return;
+    material.onBeforeCompile = (shader) => {
+      shader.uniforms.tRoughnessAO = { value: roughnessAOTex };
+      // Fragment: declare sampler and override roughness/metalness map chunks
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <common>',
+        `#include <common>
+uniform sampler2D tRoughnessAO;`,
+      );
+      // Override roughnessmap_fragment to sample R channel from packed texture
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <roughnessmap_fragment>',
+        `{
+  float packedRoughness = texture2D(tRoughnessAO, vMapUv).r;
+  roughnessFactor *= packedRoughness;
+}`,
+      );
+      // Override metalnessmap_fragment to sample B channel from packed texture
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <metalnessmap_fragment>',
+        `{
+  float packedMetalness = texture2D(tRoughnessAO, vMapUv).b;
+  metalnessFactor *= packedMetalness;
+}`,
+      );
+    };
+    material.needsUpdate = true;
+  };
+
+  const MatClass = usePBR ? THREE.MeshStandardMaterial : THREE.MeshLambertMaterial;
+
+  const baseMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: false,
     alphaTest: 0,
     vertexColors: true,
   });
   applyLightingShaderPatch(baseMaterial);
+  if (usePBR) applyPBRSamplingPatch(baseMaterial);
 
   // Alpha-cutout material for leaves (class 1)
-  const alphaCutoutMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const alphaCutoutMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: false,
     alphaTest: 0.5,
     side: THREE.DoubleSide,
     vertexColors: true,
   });
   applyLeafWindShaderPatch(alphaCutoutMaterial);
+  if (usePBR) applyPBRSamplingPatch(alphaCutoutMaterial);
 
   // Full-transparent material for glass (class 2)
-  const glassMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const glassMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: true,
     opacity: 1.0,
     depthWrite: false,
@@ -517,12 +585,15 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     vertexColors: true,
   });
   applyLightingShaderPatch(glassMaterial);
+  if (usePBR) applyPBRSamplingPatch(glassMaterial);
 
   // Water material: same class 2 path but named separately so wave 8 lava can fork it.
   // Uses the same atlas + lighting shader; the water tile's per-pixel alpha (~168/255)
   // gives natural translucency without needing a separate opacity parameter.
-  const waterMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const waterMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: true,
     opacity: 1.0,
     depthWrite: false,
@@ -530,21 +601,25 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     vertexColors: true,
   });
   applyWaterShaderPatch(waterMaterial);
+  if (usePBR) applyPBRSamplingPatch(waterMaterial);
 
   // Wave 8: lava material — opaque orange-glow fluid, emissive so it glows even in dark caves.
   // Treated as its own transparent buffer (class 3) but is visually fully opaque from the tile;
   // depthWrite true keeps it occluding geometry correctly.
-  const lavaMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const lavaMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: false,
     opacity: 1.0,
     depthWrite: true,
     vertexColors: true,
     emissive: new THREE.Color(0xff3300),
-    emissiveMap: atlasTexture,
+    emissiveMap: mapTex,
     emissiveIntensity: 0.85,
   });
   applyLightingShaderPatch(lavaMaterial);
+  if (usePBR) applyPBRSamplingPatch(lavaMaterial);
 
   // Block id -> material override for blocks that need a specific material
   // beyond what their transparency class dictates (water differs from glass).
@@ -566,9 +641,10 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
     } else if (block.emissive && block.emissive !== 0x000000) {
       mat = baseMaterial.clone();
       mat.emissive = new THREE.Color(block.emissive);
-      mat.emissiveMap = atlasTexture;
+      mat.emissiveMap = mapTex;
       mat.emissiveIntensity = Number.isFinite(block.emissiveIntensity) ? block.emissiveIntensity : 0.3;
       applyLightingShaderPatch(mat);
+      if (usePBR) applyPBRSamplingPatch(mat);
     } else {
       mat = baseMaterial;
     }
@@ -584,25 +660,31 @@ export function createBlockMaterials(blockTypes, atlasTexture) {
   const lavaMat  = lavaMaterial;
 
   // Wave 11 — flora cross-quad material: DoubleSide alpha-cutout (same as leaves but DoubleSide).
-  const floraMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const floraMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: false,
     alphaTest: 0.5,
     side: THREE.DoubleSide,
     vertexColors: true,
   });
   applyFloraWindShaderPatch(floraMaterial);
+  if (usePBR) applyPBRSamplingPatch(floraMaterial);
   const floraMat = floraMaterial;
 
   // Wave F4 — partial-geometry material (slabs + stairs): opaque, lit by same shader as cubes.
   // No alpha cutout, no transparency — these are solid opaque blocks rendered with custom geometry.
-  const partialMaterial = new THREE.MeshLambertMaterial({
-    map: atlasTexture,
+  const partialMaterial = new MatClass({
+    map: mapTex,
+    ...(usePBR && normalTex ? { normalMap: normalTex } : {}),
+    ...(usePBR ? { roughnessMap: roughnessAOTex, metalnessMap: roughnessAOTex, roughness: 1.0, metalness: 1.0 } : {}),
     transparent: false,
     alphaTest: 0,
     vertexColors: true,
   });
   applyLightingShaderPatch(partialMaterial);
+  if (usePBR) applyPBRSamplingPatch(partialMaterial);
   const partialMat = partialMaterial;
 
   return { byBlock: materials, opaque: opaqueMat, leaf: leafMat, glass: glassMat, water: waterMat, lava: lavaMat, flora: floraMat, partial: partialMat };
@@ -2031,6 +2113,7 @@ export class VoxelWorld {
     const opaqueUv   = [];
     const opaqueCol  = [];
     const opaqueTint = []; // Wave 12: biome grass tint per vertex (vec3)
+    const opaqueTan  = []; // PBR Phase 2: tangent vec4 per vertex [tx,ty,tz,handedness]
     const opaqueIdx  = [];
     const leafPos    = [];
     const leafNorm   = [];
@@ -2038,18 +2121,21 @@ export class VoxelWorld {
     const leafCol    = [];
     const leafTint   = []; // Wave 12
     const leafSway   = []; // Graphics-B: per-vertex sway weight (0=bottom, 1=top)
+    const leafTan    = []; // PBR Phase 2
     const leafIdx    = [];
     const glassPos   = [];
     const glassNorm  = [];
     const glassUv    = [];
     const glassCol   = [];
     const glassTint  = []; // Wave 12
+    const glassTan   = []; // PBR Phase 2
     const glassIdx   = [];
     const waterPos   = [];
     const waterNorm  = [];
     const waterUv    = [];
     const waterCol   = [];
     const waterTint  = []; // Wave 12
+    const waterTan   = []; // PBR Phase 2
     const waterIdx   = [];
     // Wave 8: lava — own buffer (tclass=3), rendered after water.
     const lavaPos    = [];
@@ -2057,6 +2143,7 @@ export class VoxelWorld {
     const lavaUv     = [];
     const lavaCol    = [];
     const lavaTint   = []; // Wave 12
+    const lavaTan    = []; // PBR Phase 2
     const lavaIdx    = [];
     // Wave 11: flora cross-quad buffer (tclass=4).
     const floraPos   = [];
@@ -2065,6 +2152,7 @@ export class VoxelWorld {
     const floraCol   = [];
     const floraTint  = []; // Wave 12
     const floraSway  = []; // Graphics-B: per-vertex sway weight (0=bottom, 1=top)
+    const floraTan   = []; // PBR Phase 2
     const floraIdx   = [];
     // Wave F4: partial-geometry buffer (slabs + stairs — custom box geometry, no sway).
     const partialPos  = [];
@@ -2072,6 +2160,7 @@ export class VoxelWorld {
     const partialUv   = [];
     const partialCol  = [];
     const partialTint = [];
+    const partialTan  = []; // PBR Phase 2
     const partialIdx  = [];
 
     for (let lz = 0; lz < S; lz += 1) {
@@ -2156,6 +2245,8 @@ export class VoxelWorld {
                 floraTint.push(ftr, ftg, ftb);
                 // Graphics-B: verts 0,1 are bottom (y0), verts 2,3 are top (y0+1)
                 floraSway.push(v < 2 ? 0.0 : 1.0);
+                // PBR Phase 2: tangent for flora cross-quad — U along quad diagonal
+                floraTan.push(1, 0, 0, 1);
               }
               // Two CCW triangles
               floraIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
@@ -2194,6 +2285,8 @@ export class VoxelWorld {
               floraCol.push(lr, lg, 1.0);
               floraTint.push(1.0, 1.0, 1.0);
               floraSway.push(0.0); // ladders never wave
+              // PBR Phase 2: tangent for ladder — U along horizontal axis of facing
+              floraTan.push(facing >= 2 ? 0 : 1, 0, facing < 2 ? 0 : 1, 1);
             }
             floraIdx.push(lbase, lbase + 1, lbase + 2, lbase + 1, lbase + 3, lbase + 2);
             continue;
@@ -2217,6 +2310,8 @@ export class VoxelWorld {
               floraCol.push(wr, wg, 1.0);
               floraTint.push(1.0, 1.0, 1.0);
               floraSway.push(0.0); // wire never waves
+              // PBR Phase 2: tangent for redstone wire — U along X axis on floor plane
+              floraTan.push(1, 0, 0, 1);
             }
             floraIdx.push(wbase, wbase + 1, wbase + 2, wbase + 1, wbase + 3, wbase + 2);
             continue;
@@ -2244,6 +2339,8 @@ export class VoxelWorld {
                 floraCol.push(cr, cg, 1.0);
                 floraTint.push(1.0, 1.0, 1.0);
                 floraSway.push(0.0); // levers/torches never wave
+                // PBR Phase 2: tangent for redstone cross quad — U along diagonal
+                floraTan.push(1, 0, 0, 1);
               }
               floraIdx.push(qbase, qbase + 1, qbase + 2, qbase + 1, qbase + 3, qbase + 2);
             }
@@ -2274,6 +2371,9 @@ export class VoxelWorld {
                   glassUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
                   glassCol.push(pr, pg, 1.0);
                   glassTint.push(1.0, 1.0, 1.0);
+                  // PBR Phase 2: tangent for glass pane box faces
+                  const [gtx, gty, gtz, gtw] = FACE_TANGENTS[faceIdx];
+                  glassTan.push(gtx, gty, gtz, gtw);
                 }
                 if (ny !== 0) glassIdx.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
                 else glassIdx.push(base, base + 1, base + 2, base + 1, base + 3, base + 2);
@@ -2317,6 +2417,15 @@ export class VoxelWorld {
             const emitPartialQuad = (verts, nx, ny, nz, uvRect) => {
               const base = partialPos.length / 3;
               const { uMin, uMax, vMin, vMax } = uvRect;
+              // Determine face index from normal for tangent lookup
+              let pFaceIdx = 0;
+              if (nx > 0.5) pFaceIdx = 0;
+              else if (nx < -0.5) pFaceIdx = 1;
+              else if (ny > 0.5) pFaceIdx = 2;
+              else if (ny < -0.5) pFaceIdx = 3;
+              else if (nz > 0.5) pFaceIdx = 4;
+              else if (nz < -0.5) pFaceIdx = 5;
+              const [ptx, pty, ptz, ptw] = FACE_TANGENTS[pFaceIdx];
               for (let v = 0; v < 4; v += 1) {
                 partialPos.push(...verts[v]);
                 partialNorm.push(nx, ny, nz);
@@ -2324,6 +2433,8 @@ export class VoxelWorld {
                 partialUv.push(ut === 0 ? uMin : uMax, vt === 0 ? vMin : vMax);
                 partialCol.push(pLightR, pLightG, AO_NEUTRAL);
                 partialTint.push(pTR, pTG, pTB);
+                // PBR Phase 2: tangent for partial geometry faces
+                partialTan.push(ptx, pty, ptz, ptw);
               }
               // Two CCW triangles; PY/NY faces need reversed winding (same rule as cube mesher).
               const isPyNy = (ny !== 0);
@@ -2699,6 +2810,10 @@ export class VoxelWorld {
               // Graphics-B: sway weight — 1.0 for top verts (by=1), 0.0 for base verts (by=0).
               // Only leaf geometry uses this; other arrays leave swayArr null.
               if (swayArr) swayArr.push(by);
+              // PBR Phase 2: tangent vec4 for normal mapping.
+              // tanArr is always present for all 7 buffers.
+              const [ttx, tty, ttz, ttw] = FACE_TANGENTS[f];
+              tanArr.push(ttx, tty, ttz, ttw);
             }
 
             // Two triangles forming the quad.
@@ -2742,7 +2857,7 @@ export class VoxelWorld {
     // Build Three.js meshes from the accumulated buffers.
     // Wave 12: tint is a separate per-vertex vec3 attribute carrying biome grass tint.
     // It does NOT touch vColor (which carries packed skylight/blocklight/AO).
-    const makeGeometry = (pos, norm, uv, col, tint, idx, sway = null) => {
+    const makeGeometry = (pos, norm, uv, col, tint, idx, sway = null, tan = null) => {
       if (idx.length === 0) return null;
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
@@ -2754,20 +2869,29 @@ export class VoxelWorld {
       if (sway !== null) {
         geo.setAttribute("swayWeight", new THREE.Float32BufferAttribute(sway, 1));
       }
+      // PBR Phase 2: per-vertex tangent vec4 for normal mapping (all buffers)
+      if (tan !== null && tan.length > 0) {
+        // Dev-mode invariant: tangent count must equal position count (4 floats per vertex vs 3)
+        const expectedTanLen = (pos.length / 3) * 4;
+        if (tan.length !== expectedTanLen) {
+          console.error(`PBR tangent buffer mismatch: pos=${pos.length / 3} verts, tan=${tan.length / 4} verts (expected ${expectedTanLen / 4})`);
+        }
+        geo.setAttribute("tangent", new THREE.Float32BufferAttribute(tan, 4));
+      }
       geo.setIndex(idx);
       return geo;
     };
 
     const mats = this.materials;
 
-    const opaqueGeo = makeGeometry(opaquePos, opaqueNorm, opaqueUv, opaqueCol, opaqueTint, opaqueIdx);
+    const opaqueGeo = makeGeometry(opaquePos, opaqueNorm, opaqueUv, opaqueCol, opaqueTint, opaqueIdx, null, opaqueTan);
     if (opaqueGeo) {
       const mesh = new THREE.Mesh(opaqueGeo, mats.opaque);
       chunk.meshes.push(mesh);
       this.meshGroup.add(mesh);
     }
 
-    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafTint, leafIdx, leafSway);
+    const leafGeo = makeGeometry(leafPos, leafNorm, leafUv, leafCol, leafTint, leafIdx, leafSway, leafTan);
     if (leafGeo) {
       const mesh = new THREE.Mesh(leafGeo, mats.leaf);
       mesh.renderOrder = 1;
@@ -2775,7 +2899,7 @@ export class VoxelWorld {
       this.meshGroup.add(mesh);
     }
 
-    const glassGeo = makeGeometry(glassPos, glassNorm, glassUv, glassCol, glassTint, glassIdx);
+    const glassGeo = makeGeometry(glassPos, glassNorm, glassUv, glassCol, glassTint, glassIdx, null, glassTan);
     if (glassGeo) {
       const mesh = new THREE.Mesh(glassGeo, mats.glass);
       mesh.renderOrder = 2;
@@ -2784,7 +2908,7 @@ export class VoxelWorld {
     }
 
     // Water rendered after glass (renderOrder 3).
-    const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterTint, waterIdx);
+    const waterGeo = makeGeometry(waterPos, waterNorm, waterUv, waterCol, waterTint, waterIdx, null, waterTan);
     if (waterGeo) {
       const mesh = new THREE.Mesh(waterGeo, mats.water);
       mesh.renderOrder = 3;
@@ -2797,7 +2921,7 @@ export class VoxelWorld {
     }
 
     // Wave 8: lava rendered after water (renderOrder 4) with its own emissive material.
-    const lavaGeo = makeGeometry(lavaPos, lavaNorm, lavaUv, lavaCol, lavaTint, lavaIdx);
+    const lavaGeo = makeGeometry(lavaPos, lavaNorm, lavaUv, lavaCol, lavaTint, lavaIdx, null, lavaTan);
     if (lavaGeo) {
       const mesh = new THREE.Mesh(lavaGeo, mats.lava);
       mesh.renderOrder = 4;
@@ -2808,7 +2932,7 @@ export class VoxelWorld {
     }
 
     // Wave 11: flora cross-quads rendered after lava (renderOrder 5).
-    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraTint, floraIdx, floraSway);
+    const floraGeo = makeGeometry(floraPos, floraNorm, floraUv, floraCol, floraTint, floraIdx, floraSway, floraTan);
     if (floraGeo) {
       const mesh = new THREE.Mesh(floraGeo, mats.flora);
       mesh.renderOrder = 5;
@@ -2818,7 +2942,7 @@ export class VoxelWorld {
     }
 
     // Wave F4: partial-geometry mesh (slabs + stairs), rendered after flora (renderOrder 6).
-    const partialGeo = makeGeometry(partialPos, partialNorm, partialUv, partialCol, partialTint, partialIdx);
+    const partialGeo = makeGeometry(partialPos, partialNorm, partialUv, partialCol, partialTint, partialIdx, null, partialTan);
     if (partialGeo) {
       const mesh = new THREE.Mesh(partialGeo, mats.partial);
       mesh.renderOrder = 6;
