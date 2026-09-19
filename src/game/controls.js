@@ -59,7 +59,7 @@ export function setupControls({
     const isRepeat = event.repeat;
     // Wave P1 — the pause menu counts as an open panel: it blocks movement keys,
     // hotbar switching and mouse actions just like the container UIs.
-    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen;
+    const panelOpen = state.craftingOpen || state.inventoryOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen || state.hopperOpen || state.dispenserOpen;
 
     if (code === "Escape" && !isRepeat) {
       if (state.inventoryOpen && typeof toggleInventoryPanel === "function") {
@@ -196,7 +196,7 @@ export function setupControls({
     if (state.mode !== "playing") {
       return;
     }
-    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen) {
+    if (state.inventoryOpen || state.craftingOpen || state.furnaceOpen || state.chestOpen || state.pauseOpen || state.hopperOpen || state.dispenserOpen) {
       return;
     }
     renderer.domElement.focus();
