@@ -2,6 +2,8 @@
 
 A browser voxel sandbox inspired by Minecraft, built with Three.js and Vite. Procedurally generated biome world, smooth voxel lighting, survival mechanics, mobs, crafting, and a modern post-processing render pipeline.
 
+[![ExoCraft in-game view](docs/screenshot.png)](https://exo-craft.vercel.app)
+
 ## Run
 
 ```bash
